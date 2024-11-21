@@ -1,9 +1,10 @@
 import { join, extname, basename } from "https://deno.land/std@0.203.0/path/mod.ts";
 import * as xlsx from "https://deno.land/x/sheetjs@v0.18.3/xlsx.mjs";
 import * as cptable from "https://deno.land/x/sheetjs@v0.18.3/dist/cpexcel.full.mjs";
-xlsx.set_cptable(cptable);
-
 import { Command } from "https://deno.land/x/cliffy@v0.25.7/command/mod.ts";
+import { parse as parseDate } from "https://deno.land/std@0.203.0/datetime/mod.ts";
+
+xlsx.set_cptable(cptable);
 
 interface ParsedOptions {
   csvFile: string;
@@ -11,6 +12,7 @@ interface ParsedOptions {
   delimiter: string;
   force: boolean;
   detectNumbers: boolean;
+  dateFormats: string[];
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -36,8 +38,39 @@ function normalizeNumbers(rows: string[][]): string[][] {
   );
 }
 
+function tryParseDate(value: string, formats: string[]): number | null {
+  for (const format of formats) {
+    try {
+      //console.log(`try [${value.trim()}] [${format}] ${typeof format}`)
+      const parsed = parseDate(value.trim(), format + "");
+      if (parsed) {
+        //console.log("parsed",parsed)
+        // Convert date to Excel's numeric format (days since 1900-01-01)
+        //const excelDate = (parsed.getTime() - new Date(Date.UTC(1900, 0, 1)).getTime()) / (1000 * 60 * 60 * 24) + 2;
+        //return excelDate; // Return Excel-compatible numeric date
+        return parsed.toISOString().split("T")[0];
+        // return parsed.toISOString(); // Standardize to ISO 8601 format
+      }
+    } catch (e) {
+      // Ignore parse errors and try the next format
+      //console.log("error",e)
+    }
+  }
+  return null;
+}
+
+function normalizeDates(rows: string[][], dateFormats: string[]): (string | number)[][] {
+  return rows.map((row) =>
+    row.map((value) => {
+      const parsedDate = tryParseDate(value, dateFormats);
+      return parsedDate ? parsedDate : value;
+    })
+  );
+}
+
 async function csvToXlsx(options: ParsedOptions) {
-  const { csvFile, xlsxFile, delimiter, force, detectNumbers } = options;
+  console.log("options:", options)
+  const { csvFile, xlsxFile, delimiter, force, detectNumbers, dateFormats } = options;
 
   if (!(await fileExists(csvFile))) {
     throw new Error(`Input CSV file does not exist: ${csvFile}`);
@@ -59,6 +92,10 @@ async function csvToXlsx(options: ParsedOptions) {
     rows = normalizeNumbers(rows);
   }
 
+  if (dateFormats.length > 0) {
+    rows = normalizeDates(rows, dateFormats);
+  }
+
   const workbook = xlsx.utils.book_new();
   const worksheet = xlsx.utils.aoa_to_sheet(rows);
 
@@ -70,8 +107,8 @@ async function csvToXlsx(options: ParsedOptions) {
 
 await new Command()
   .name("convertcsv")
-  .version("1.1.7")
-  .description("Convert a CSV file to an XLSX file with optional numeric format detection.")
+  .version("1.2.0")
+  .description("Convert a CSV file to an XLSX file with optional numeric and date format detection.")
   .arguments("<csvFile:string>")
   .option(
     "-o, --output [xlsxFile:string]",
@@ -80,10 +117,21 @@ await new Command()
   .option("-d, --delimiter [delimiter:string]", "The CSV delimiter. Defaults to ';'.", {
     default: ";",
   })
-  .option("-f, --force [force:boolean]", "Force overwrite of the output file if it already exists.", { default: false })
-  .option("-n, --detect-numbers [force:boolean]", "Detect and convert numeric formats (e.g., '1,23' to '1.23').", { default: false })
+  .option("-f, --force [force:boolean]", "Force overwrite of the output file if it already exists.", {
+    default: false,
+  })
+  .option(
+    "-n, --detect-numbers [detectNumbers:boolean]",
+    "Detect and convert numeric formats (e.g., '1,23' to '1.23').",
+    {
+      default: false,
+    }
+  )
+  .option("--date-format <dateFormats:string[]>", "Specify acceptable date formats. Multiple formats can be provided, separated by commas.", {
+    collect: true,
+    default: [],
+  })
   .action(async (options, csvFile) => {
-    console.log("options:", options)
     const xlsxFile =
       options.output || join(Deno.cwd(), `${basename(csvFile, extname(csvFile))}.xlsx`);
 
@@ -93,6 +141,7 @@ await new Command()
       delimiter: options.delimiter,
       force: options.force,
       detectNumbers: options.detectNumbers,
+      dateFormats: options.dateFormat || [],
     };
 
     await csvToXlsx(parsedOptions);
