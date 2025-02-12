@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net --allow-env
+#!/usr/bin/env -S deno runwh --allow-net --allow-env
 //https://developers.cloudflare.com/api/
 //https://github.com/cloudflare/cloudflare-typescript/tree/main
 //https://developers.cloudflare.com/dns/manage-dns-records/how-to/batch-record-changes/
@@ -64,7 +64,9 @@ async function listZones() {
   //console.log(Object.keys(data.result[0]));
   //console.log(data.result[0])
   //console.table(data.result,["id","name"]);
-  console.log(data.result)
+  //console.log(data.result)
+  // console.table(data.result)
+  return data
 }
 
 async function getZoneId(domain: string): Promise<string> {
@@ -294,22 +296,32 @@ const columns: string[] = arrayOfAll<keyof RecordResponse>()(
 );
 columns.push("*");
 
+function show(options: {
+  column?: string[]
+  columns?: string[]
+  format: string
+}, data: any, defaultColumns: string[]) {
+  if (options.format === "json") {
+    console.log(JSON.stringify(data, null, 2));
+  } else {
+    const columns: string[] = ((options?.column?.length ?? 0) > 0 ? options.column : options?.columns ? options.columns.toString().split(",") : undefined)
+      ?? defaultColumns;
+    console.table(data, columns);
+  }
+}
+
 await new Command()
   .name("cloudflare")
   .version("0.1")
   .description("Manage cloudflare dns records")
   .globalType("format", new EnumType(["table", "json"]))
   .globalType("column", new EnumType(columns))
-  .command("list <domain:string>", "List all zones")
-  .env("CLOUDFLARE_API_KEY=<cloudflareApiKey:string>", "Cloudflare api key must be configured.")
-  .option("-c, --column [column:column]", "Comma separated list of columns", { collect: true })
-  .option("-cs, --columns [columns:string]", "Comma separated list of columns")
-  .option("-f, --format [format:format]", "Output format", { default: "table" })
-  .action(async (options, ...args) =>
-    options.format === "json" ?
-      console.log(JSON.stringify(await getDnsRecords(await getZoneId(args[0])), null, 2)) :
-      console.table(await getDnsRecords(await getZoneId(args[0])),
-        (options?.column?.length ?? 0) > 0 ? options.column :
-          options?.columns ? options.columns.toString().split(",") :
-            ["id", "name", "type", "content"]))
+  .globalEnv("CLOUDFLARE_API_KEY=<cloudflareApiKey:string>", "Cloudflare api key must be configured.")
+  .globalOption("-c, --column [column:column]", "Comma separated list of columns", { collect: true })
+  .globalOption("-cs, --columns [columns:string]", "Comma separated list of columns")
+  .globalOption("-f, --format [format:format]", "Output format", { default: "table" })
+  .command("domains", "List all domains")
+  .action(async (options) => show(options, (await listZones()).result, ["name","status","paused","type","development_mode","original_registrar"]))
+  .command("list <domain:string>", "List all DNS records")
+  .action(async (options, ...args) => show(options, await getDnsRecords(await getZoneId(args[0])), ["id", "name", "type", "content"]))
   .parse(Deno.args);
