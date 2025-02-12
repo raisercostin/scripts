@@ -7,6 +7,7 @@ import { Cloudflare } from "https://esm.sh/cloudflare";
 import { BatchPatch, BatchPatchParam, BatchPutParam, RecordBatchParams, RecordBatchResponse, RecordParam, RecordResponse, TXTRecordParam } from "https://esm.sh/cloudflare@4.0.0/resources/dns/records.d.ts";
 import { DNSRecord } from "https://esm.sh/cloudflare@4.0.0/resources/email-routing/dns.d.ts";
 import process from "node:process";
+import { Command, EnumType } from "https://deno.land/x/cliffy@v0.25.7/command/mod.ts";
 
 const cf = new Cloudflare({
   //apiEmail: "raisercostin@gmail.com",
@@ -135,8 +136,8 @@ async function createOrUpdateMigaduConfig(domain: string, hostedEmailVerify: str
     if (oldRecord?.id) {
       used.add(oldRecord.id)
       newRecord.id = oldRecord.id
-    }else{
-      console.log("couldn't find newRecord: ",newRecord)
+    } else {
+      console.log("couldn't find newRecord: ", newRecord)
     }
     if (oldRecord === newRecord)
       return null
@@ -276,5 +277,39 @@ async function createMigaduConfig(domain: string, hostedEmailVerify: string): Pr
 }
 //console.table(await getDnsRecords(await getZoneId("civiz.org")), ["id", "name", "type", "content"]);
 //console.log(await createMigaduConfig("agileism.org","o6wf1gfj"))
-console.log(await addDnsRecords(await createOrUpdateMigaduConfig("civiz.org", "o6wf1gfj")))
-console.table(await getDnsRecords(await getZoneId("civiz.org")), ["id", "name", "type", "content"]);
+// console.log(await addDnsRecords(await createOrUpdateMigaduConfig("civiz.org", "o6wf1gfj")))
+// console.table(await getDnsRecords(await getZoneId("civiz.org")), ["id", "name", "type", "content"]);
+
+
+type Invalid<T> = ['Needs to be all of', T];
+const arrayOfAll =
+  <T>() =>
+    <U extends T[]>(
+      ...array: U & ([T] extends [U[number]] ? unknown : Invalid<T>[])
+    ) =>
+      array;
+
+const columns: string[] = arrayOfAll<keyof RecordResponse>()(
+  "id", "name", "type", "content", "created_on", "meta", "modified_on", "proxiable", "comment_modified_on", "tags_modified_on", "comment", "proxied", "settings", "tags", "ttl"
+);
+columns.push("*");
+
+await new Command()
+  .name("cloudflare")
+  .version("0.1")
+  .description("Manage cloudflare dns records")
+  .globalType("format", new EnumType(["table", "json"]))
+  .globalType("column", new EnumType(columns))
+  .command("list <domain:string>", "List all zones")
+  .env("CLOUDFLARE_API_KEY=<cloudflareApiKey:string>", "Cloudflare api key must be configured.")
+  .option("-c, --column [column:column]", "Comma separated list of columns", { collect: true })
+  .option("-cs, --columns [columns:string]", "Comma separated list of columns")
+  .option("-f, --format [format:format]", "Output format", { default: "table" })
+  .action(async (options, ...args) =>
+    options.format === "json" ?
+      console.log(JSON.stringify(await getDnsRecords(await getZoneId(args[0])), null, 2)) :
+      console.table(await getDnsRecords(await getZoneId(args[0])),
+        (options?.column?.length ?? 0) > 0 ? options.column :
+          options?.columns ? options.columns.toString().split(",") :
+            ["id", "name", "type", "content"]))
+  .parse(Deno.args);
