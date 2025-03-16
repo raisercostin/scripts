@@ -279,7 +279,6 @@ async function createMigaduConfig(domain: string, hostedEmailVerify: string): Pr
 }
 //console.table(await getDnsRecords(await getZoneId("civiz.org")), ["id", "name", "type", "content"]);
 //console.log(await createMigaduConfig("agileism.org","o6wf1gfj"))
-// console.log(await addDnsRecords(await createOrUpdateMigaduConfig("civiz.org", "o6wf1gfj")))
 // console.table(await getDnsRecords(await getZoneId("civiz.org")), ["id", "name", "type", "content"]);
 
 
@@ -324,4 +323,7 @@ await new Command()
   .action(async (options) => show(options, (await listZones()).result, ["name","status","paused","type","development_mode","original_registrar"]))
   .command("list <domain:string>", "List all DNS records")
   .action(async (options, ...args) => show(options, await getDnsRecords(await getZoneId(args[0])), ["id", "name", "type", "content"]))
+  .command("configmigadu <domain:string> <hostedEmailVerify:string>", "Create Migadu DNS records")
+  .action(async (options, ...args) => console.log(await addDnsRecords(await createMigaduConfig(args[0],args[1]))))
   .parse(Deno.args);
+
