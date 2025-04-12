@@ -230,8 +230,8 @@ export class Shell {
           if (code !== 0 && !(args[0] === "grep" && code === 1)) {
             throw new Error(`Command failed: ${segment}`);
           }
-          segmentResult = stdoutLines.join("\n");
         }
+        segmentResult = stdoutLines.join("\n");
         //console.log("Running command:", segment, "with args:", args, "and input:", proc,code,);
       }
       if (this.logLevel.isDebug() && (i + 1) < segments.length) {
