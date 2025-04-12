@@ -6,14 +6,20 @@
 
 ## SYNOPSIS
 
-Create scripts like:
-```ts
+Create script like:
+```kubels.ts
 #!/usr/bin/env -S deno run --allow-run --allow-read --allow-write
 import { Shell } from "https://raw.githubusercontent.com/raisercostin/scripts-ts/refs/heads/main/desh.ts"
 const { shell, env } = new Shell("info") //trace,debug,info,warn,error
-const pod = await shell`kubectl get pods | grep my-service | head -n 2 | awk 'NR==2{ exit 1 } { print $1 }'`
-await shell`kubectl exec -it ${pod} -- ls /tmp`
+const pod = await shell`kubectl get pods | grep ${Deno.args[0]} | head -n 2 | awk 'NR==2 { exit 1 } { print \$1 }'`
+await shell`kubectl exec -it ${pod} -- ls ${Deno.args[1]}`
 ```
+
+Run it with
+`deno run --allow-run --allow-read --allow-write kubels.ts my-service /tmp`
+
+Install it with
+`deno install --allow-run --allow-read --allow-write --name kubels kubels.ts`
 
 ## DESCRIPTION
 
@@ -21,13 +27,24 @@ await shell`kubectl exec -it ${pod} -- ls /tmp`
 
 Each command is executed using a `shell\`\`` tagged template. It supports:
 
-- 2025-04-12
-  - Inline and multiline scripts
-  - Shell-style variables and substitutions
-  - Piped commands (`|`) with debugging support
-  - Output capture and logging control
+## HISTORY
 
-## PIPELINE SUPPORT
+### v0.1 – 2025-04-12
+- Inline and multiline scripts
+- Shell-style variables and substitutions
+- Piped commands (`|`) with debugging support
+- Output capture and logging control
+
+### Beta
+- Multiline
+- Environment vars and in script export
+- Run `.ts` scripts directly
+- Use external/internal TypeScript functions
+
+### Planned
+- Shell function blocks and libraries
+
+## PIPELINES
 
 You can pipe output between commands:
 
