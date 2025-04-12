@@ -47,7 +47,8 @@ async function getRemoteDirSize(appDir: string): Promise<number> {
   return size;
 }
 
-async function syncApps(dest: string, addTimestamp: boolean, forceOverwrite: boolean, rollOlder: boolean) {
+async function syncApps(dest: string, addTimestamp: boolean, forceOverwrite: boolean, rollOlder: boolean, filters: string[]=[]) {
+  const appFilters = filters.map(w => w.toLowerCase());
   await Deno.mkdir(dest, { recursive: true });
   const output = await shell`adb shell pm list packages -f`;
   if (!output) {
@@ -55,6 +56,7 @@ async function syncApps(dest: string, addTimestamp: boolean, forceOverwrite: boo
     return;
   }
   const lines = output.split("\n").filter(line => line.trim().length > 0);
+  const apps: string[] = [];
   for (const line of lines) {
     // Use the last '=' as separator in case the path contains '=' characters.
     const trimmedLine = line.replace(/^package:/, "").trim();
@@ -62,6 +64,10 @@ async function syncApps(dest: string, addTimestamp: boolean, forceOverwrite: boo
     if (lastEqualIndex === -1) continue;
     const fullPath = trimmedLine.substring(0, lastEqualIndex).trim();
     const packageName = trimmedLine.substring(lastEqualIndex + 1).trim();
+    apps.push(packageName);
+    // Filter by all words in appFilters
+    if (appFilters.length > 0 && !appFilters.every(word => packageName.includes(word))) continue;
+
     // Derive the app directory by removing the filename.
     const appDir = fullPath.substring(0, fullPath.lastIndexOf("/"));
     let localDirName = packageName;
@@ -97,9 +103,10 @@ async function syncApps(dest: string, addTimestamp: boolean, forceOverwrite: boo
         console.log(`Skipping ${packageName} – sizes match (remote: ${remoteSize} bytes, local: ${localSize} bytes).`);
         continue;
       } else {
+        console.log(`Pull ${packageName} – size mismatch (remote: ${remoteSize} bytes, local: ${localSize} bytes).`);
         if (rollOlder) {
           let counter = 1;
-          let newDir = `${destDir}_${counter}`;
+          let newDir = `${destDir}_old${counter}`;
           while (true) {
             try {
               await Deno.stat(newDir);
@@ -139,10 +146,12 @@ await new Command()
     .description("Transfer all installed app directories to a destination if remote size (via ls -alR) differs from local backup.")
     .option("--dest <directory:string>", "Destination directory for app sync", { default: "./apk_sync" })
     .option("--timestamp", "Append a timestamp to folder names", { default: false })
-    .option("--force", "Force overwrite if directory exists and sizes differ", { default: false })
-    .option("--rollOlder", "Rename existing local directory if sizes differ (append a counter)", { default: false })
+    .option("--force [force:boolean]", "Force overwrite if directory exists and sizes differ", { default: false })
+    .option("--rollOlder", "Rename existing local directory if sizes differ (append a counter)", { default: true })
+    .option("--filter <word:string>", "Only sync apps containing this word", { collect: true })
     .action(async (options) => {
-      await syncApps(options.dest, options.timestamp, options.force, options.rollOlder);
+      console.log("options are:", options);
+      await syncApps(options.dest, options.timestamp, options.force, options.rollOlder, options.filter ?? []);
     })
   )
   .parse(Deno.args);
