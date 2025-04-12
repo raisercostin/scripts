@@ -2,35 +2,40 @@ import { readLines } from "https://deno.land/std/io/mod.ts";
 import { red, green, blue, yellow, bold } from "https://deno.land/std/fmt/colors.ts";
 
 /* ----------------- Logging Level Setup ----------------- */
-export enum LogLevel {
-  Trace = 0,
-  Debug = 1,
-  Info = 2,
-  Warn = 3,
-  Error = 4,
-  None = 5,
-}
-export namespace LogLevel {
-  export function getLogLevel(level: string): LogLevel {
-    switch (level.toLowerCase()) {
-      case "trace":
-        return LogLevel.Trace;
-      case "debug":
-        return LogLevel.Debug;
-      case "info":
-        return LogLevel.Info;
-      case "warn":
-        return LogLevel.Warn;
-      case "error":
-        return LogLevel.Error;
-      case "none":
-        return LogLevel.None;
-      default:
-        return LogLevel.Info;
-    }
-  }
-}
+export type LogLevelCode = "trace" | "debug" | "info" | "warn" | "error" | "none";
 
+export class LogLevel {
+  private static readonly levels: Record<LogLevelCode, LogLevel> = {} as any;
+
+  static readonly Trace = new LogLevel("trace", 0);
+  static readonly Debug = new LogLevel("debug", 1);
+  static readonly Info  = new LogLevel("info",  2);
+  static readonly Warn  = new LogLevel("warn",  3);
+  static readonly Error = new LogLevel("error", 4);
+  static readonly None  = new LogLevel("none",  5);
+
+  private constructor(
+    public readonly code: LogLevelCode,
+    public readonly value: number
+  ) {
+    LogLevel.levels[code] = this;
+  }
+
+  static from(code: LogLevelCode): LogLevel {
+    return LogLevel.levels[code];
+  }
+
+  private isEnabledFor(code: LogLevelCode): boolean {
+    return this.value <= LogLevel.levels[code].value;
+  }
+
+  isTrace(): boolean { return this.isEnabledFor("trace"); }
+  isDebug(): boolean { return this.isEnabledFor("debug"); }
+  isInfo(): boolean  { return this.isEnabledFor("info"); }
+  isWarn(): boolean  { return this.isEnabledFor("warn"); }
+  isError(): boolean { return this.isEnabledFor("error"); }
+  isNone(): boolean  { return this.code === "none"; }
+}
 /* ----------------- Registry ----------------- */
 export type InternalCommand = (
   line: string,
@@ -58,9 +63,10 @@ export class Shell {
   public commandRegistry: Registry;
   // We also store the last piped output here.
   public lastPipeOutput = "";
+  public ignoreError = false;
 
-  constructor(logLevel: LogLevel = LogLevel.Info, env: Record<string, string> = {}) {
-    this.logLevel = logLevel;
+  constructor(logLevel: LogLevel|LogLevelCode = LogLevel.Info, env: Record<string, string> = {}) {
+    this.logLevel = typeof logLevel === "string" ? LogLevel.from(logLevel) : logLevel;
     this.env = env;
     this.commandRegistry = new Registry();
     this.registerDefaults();
@@ -90,7 +96,7 @@ export class Shell {
       } else {
         env[key] = await this.interpolate(valueExpr);
       }
-      if (this.logLevel === LogLevel.Debug) {
+      if (this.logLevel.isDebug()) {
         console.debug("DEBUG export", key, "=", env[key]);
       }
       return "";
@@ -124,7 +130,7 @@ export class Shell {
       const pattern = parts.slice(1).join(" ");
       const regex = new RegExp(pattern);
       const match = regex.exec(pipedInput);
-      if (this.logLevel === LogLevel.Trace) {
+      if (this.logLevel.isTrace()) {
         console.debug("DEBUG regexp", pattern, "on pipedInput:", pipedInput, "=>", match);
       }
       if (match && match[1]) {
@@ -173,7 +179,7 @@ export class Shell {
       const segment = segments[i];
       const args = segment.split(/\s+/);
       const firstWord = args[0];
-      if (this.logLevel < LogLevel.Info && i < segments.length - 1) {
+      if (this.logLevel.isDebug() && i < segments.length - 1) {
         console.log(prefix + "[SEGMENT " + (i + 1) + "/" + segments.length + "]: " + segment);
       }
       let segmentResult = "";
@@ -201,7 +207,7 @@ export class Shell {
         const stdoutPromise = (async () => {
           for await (const line of readLines(proc.stdout)) {
             stdoutLines.push(line);
-            if (this.logLevel === LogLevel.Trace) {
+            if (this.logLevel.isTrace()) {
               console.log(prefix + line);
             }
           }
@@ -209,22 +215,26 @@ export class Shell {
         const stderrPromise = (async () => {
           for await (const line of readLines(proc.stderr)) {
             stderrLines.push(line);
-            if (this.logLevel <= LogLevel.Debug) {
+            //if (this.logLevel.isDebug()) {
               console.error(prefix + line);
-            }
+            //}
           }
         })();
         await Promise.all([stdoutPromise, stderrPromise]);
         const { code } = await proc.status();
-        if (code !== 0 && !(args[0] === "grep" && code === 1)) {
-          proc.close();
-          throw new Error(`Command failed: ${segment}`);
-        }
         proc.close();
-        segmentResult = stdoutLines.join("\n");
+        //ignore code if shell configured so
+        if (this.ignoreError){
+          console.warn(`Ignored error ${segment}`)
+        }else{
+          if (code !== 0 && !(args[0] === "grep" && code === 1)) {
+            throw new Error(`Command failed: ${segment}`);
+          }
+          segmentResult = stdoutLines.join("\n");
+        }
         //console.log("Running command:", segment, "with args:", args, "and input:", proc,code,);
       }
-      if (this.logLevel < LogLevel.Info && (i + 1) < segments.length) {
+      if (this.logLevel.isDebug() && (i + 1) < segments.length) {
         console.log(prefix + "[SEGMENT " + (i + 1) + "/" + segments.length + "]: " + segment + " =>\n" + segmentResult);
       }
       input = new TextEncoder().encode(segmentResult);
@@ -244,7 +254,7 @@ export class Shell {
       const interpolatedInner = await this.interpolate(innerCmd);
       let result: string;
       if (interpolatedInner.includes("\n")) {
-        result = await this.shellScript(interpolatedInner, 1, this.logLevel);
+        result = await this.shellScript(interpolatedInner, 1);
       } else {
         result = await this.runShellCommand(interpolatedInner, "");
       }
@@ -260,7 +270,7 @@ export class Shell {
       }
       text = text.replace(match[0], value);
     }
-    if (this.logLevel === LogLevel.Debug) {
+    if (this.logLevel.isDebug()) {
       console.debug("DEBUG interpolate:", text);
     }
     return text;
@@ -268,17 +278,16 @@ export class Shell {
 
   public async shellScript(
     script: string,
-    indentLevel: number = 0,
-    verbosity: LogLevel = this.logLevel
+    indentLevel: number = 0
   ): Promise<string> {
-    if (this.logLevel <= LogLevel.Trace) {
+    if (this.logLevel.isTrace()) {
       console.info("DEBUG shellScript:["+script+"]");
     }
     const rawLines = script.split("\n");
     const lines: string[] = [];
     const balanceCount = (s: string): number =>
       (s.match(/\$\(/g)?.length || 0) - (s.match(/\)/g)?.length || 0);
-  
+
     // Combine lines for export commands with unbalanced $(" and preserve comments.
     for (let i = 0; i < rawLines.length; i++) {
       let line = rawLines[i].trim();
@@ -300,16 +309,16 @@ export class Shell {
         lines.push(line);
       }
     }
-  
+
     let lastOutput = "";
     const indent = " ".repeat(indentLevel * 2);
     for (let i = 0; i < lines.length; i++) {
       const originalLine = lines[i];
       if (originalLine.startsWith("#")) {
-        if (verbosity <= LogLevel.Info) console.log(indent + bold(yellow(originalLine)));
+        if (this.logLevel.isInfo()) console.log(indent + bold(yellow(originalLine)));
         continue;
       }
-      if (verbosity <= LogLevel.Debug) {
+      if (this.logLevel.isDebug()) {
         console.log(indent + bold(yellow("Script: ")) + originalLine);
       }
       const interpolatedLine = await this.interpolate(originalLine);
@@ -318,7 +327,7 @@ export class Shell {
       const basePrefix = `${firstWord}:${lineNum}`.padEnd(10, " ");
       const cmdPrefix = indent + bold(blue(basePrefix + "> "));
       const outPrefix = indent + bold(green(basePrefix + "< "));
-      if (verbosity <= LogLevel.Info) {
+      if (this.logLevel.isInfo()) {
         console.log(indent + cmdPrefix + interpolatedLine);
       }
       try {
@@ -327,7 +336,7 @@ export class Shell {
         } else {
           lastOutput = await this.runShellCommand(interpolatedLine, outPrefix);
         }
-        if (verbosity <= LogLevel.Info) {
+        if (this.logLevel.isInfo()) {
           const finalLines = lastOutput.split("\n").map(line => outPrefix + line);
           console.log(finalLines.join("\n"));
         }
@@ -343,8 +352,8 @@ export class Shell {
     strings: TemplateStringsArray,
     ...values: any[]
   ): Promise<string> => {
-    if(this.logLevel <= LogLevel.Trace) {
-      console.log("Shell called with:", strings, values);	
+    if(this.logLevel.isTrace()) {
+      console.log("Shell called with:", strings, values);
     }
     let script = "";
     for (let i = 0; i < strings.length; i++) {
