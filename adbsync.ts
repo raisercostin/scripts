@@ -1,4 +1,7 @@
 #!/usr/bin/env -S deno run --allow-run --allow-read --allow-write
+
+// How to install locally
+// deno install --global -f --allow-run --allow-read --allow-write --name adbsync https://raw.githubusercontent.com/raisercostin/scripts-ts/refs/heads/main/adbsync.ts
 import { Command } from "https://deno.land/x/cliffy@v0.25.7/command/mod.ts";
 import { Shell } from "https://raw.githubusercontent.com/raisercostin/scripts-ts/refs/heads/main/desh.ts";
 

@@ -1,3 +1,14 @@
+# adbsync apps
+
+Having adb install this will backup all your apps.
+
+## Install
+```
+deno install --global -f --allow-run --allow-read --allow-write --name adbsync https://raw.githubusercontent.com/raisercostin/scripts-ts/refs/heads/main/adbsync.ts
+```
+
+## Usage
+
 ```shell
 λ deno --allow-all adbsync.ts
 
