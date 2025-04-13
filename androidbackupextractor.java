@@ -1,6 +1,22 @@
 //#!/usr/bin/env jbang
 //DEPS org.bouncycastle:bcprov-jdk18on:1.80
+//DEPS info.picocli:picocli:4.7.4
 
+/**
+λ jbang https://raw.githubusercontent.com/raisercostin/scripts-ts/refs/heads/main/androidbackupextractor.java --help
+Usage: android-backup-extractor [-hV] [-p=<password>] <mode> <file1> <file2>
+Tool for packing/unpacking Android backups
+      <mode>      Operation mode: pack, unpack, or pack-kk
+      <file1>     First file parameter (backup or tar file based on mode)
+      <file2>     Second file parameter (tar or backup file based on mode)
+  -h, --help      Show this help message and exit.
+  -p, --password=<password>
+                  Password for encryption/decryption
+  -V, --version   Print version information and exit.
+
+
+  jbang https://raw.githubusercontent.com/raisercostin/scripts-ts/refs/heads/main/androidbackupextractor.java unpack com.plantparentai.app.ab com.plantparentai.app.tar
+*/
 import java.io.ByteArrayOutputStream;
 import java.io.Console;
 import java.io.DataOutputStream;
@@ -34,35 +50,39 @@ import org.bouncycastle.crypto.PBEParametersGenerator;
 import org.bouncycastle.crypto.generators.PKCS5S2ParametersGenerator;
 import org.bouncycastle.crypto.params.KeyParameter;
 
+import picocli.CommandLine;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.Option;
+import picocli.CommandLine.Parameters;
+
 /**
  * Based on https://github.com/nelenkov/android-backup-extractor
  */
-public class androidbackupextractor {
+@Command(name = "android-backup-extractor", mixinStandardHelpOptions = true, version = "1.0",
+         description = "Tool for packing/unpacking Android backups")
+class ABECommand implements Runnable {
 
-    public static void main(String[] args) {
-        Security.addProvider(new BouncyCastleProvider());
+    @Parameters(index = "0", description = "Operation mode: pack, unpack, or pack-kk")
+    private String mode;
 
-        if (args.length < 3) {
-            usage();
-            System.exit(1);
-        }
+    @Parameters(index = "1", description = "First file parameter (backup or tar file based on mode)")
+    private String file1;
 
-        String mode = args[0];
-        if (!"pack".equals(mode) && !"unpack".equals(mode) && !"pack-kk".equals(mode)) {
-            usage();
-            System.exit(1);
-        }
+    @Parameters(index = "2", description = "Second file parameter (tar or backup file based on mode)")
+    private String file2;
 
+    @Option(names = {"-p", "--password"}, description = "Password for encryption/decryption")
+    private String password;
+
+    @Override
+    public void run() {
+        // Determine mode and corresponding file arguments.
         boolean unpack = "unpack".equals(mode);
-        String backupFilename = unpack ? args[1] : args[2];
-        String tarFilename = unpack ? args[2] : args[1];
-        String password = null;
-        if (args.length > 3) {
-            password = args[3];
-        }
+        String backupFilename = unpack ? file1 : file2;
+        String tarFilename = unpack ? file2 : file1;
 
-        if (password == null) {
-            /* if password is not given, try to read it from environment */
+        // Fallback to environment variable if password is not provided.
+        if (password == null || password.isEmpty()) {
             password = System.getenv("ABE_PASSWD");
         }
 
@@ -72,21 +92,21 @@ public class androidbackupextractor {
             boolean isKitKat = "pack-kk".equals(mode);
             AndroidBackup.packTar(tarFilename, backupFilename, password, isKitKat);
         }
-
-    }
-
-    private static void usage() {
-        System.out.println("Usage:");
-        System.out.println("  unpack:\tabe unpack\t<backup.ab> <backup.tar> [password]");
-        System.out.println("  pack:\t\tabe pack\t<backup.tar> <backup.ab> [password]");
-        System.out.println("  pack for 4.4:\tabe pack-kk\t<backup.tar> <backup.ab> [password]");
-        System.out.println("If the filename is `-`, then data is read from standard input");
-        System.out.println("or written to standard output.");
-        System.out.println("Envvar ABE_PASSWD is tried when password is not given");
     }
 }
 
-// Removed package declarations and adjusted access modifiers for single-file compilation
+/**
+ * Main entry point.
+ */
+public class androidbackupextractor {
+    public static void main(String[] args) {
+        // Add BouncyCastle provider.
+        Security.addProvider(new BouncyCastleProvider());
+        int exitCode = new CommandLine(new ABECommand()).execute(args);
+        System.exit(exitCode);
+    }
+}
+
 class AndroidBackup {
 
     private static final int BACKUP_MANIFEST_VERSION = 1;
@@ -116,16 +136,15 @@ class AndroidBackup {
             InputStream rawInStream = getInputStream(backupFilename);
             CipherInputStream cipherStream = null;
 
-            // To prevent the NumberFormatException when trying to figure out the backup version
             if (Files.size(Paths.get(backupFilename)) == 0) {
                 throw new IllegalStateException("File too small in size");
             }
 
-            String magic = readHeaderLine(rawInStream); // 1
+            String magic = readHeaderLine(rawInStream);
             if (DEBUG) {
                 System.err.println("Magic: " + magic);
             }
-            String versionStr = readHeaderLine(rawInStream); // 2
+            String versionStr = readHeaderLine(rawInStream);
             if (DEBUG) {
                 System.err.println("Version: " + versionStr);
             }
@@ -134,12 +153,12 @@ class AndroidBackup {
                 throw new IllegalArgumentException("Don't know how to process version " + versionStr);
             }
 
-            String compressed = readHeaderLine(rawInStream); // 3
+            String compressed = readHeaderLine(rawInStream);
             boolean isCompressed = Integer.parseInt(compressed) == 1;
             if (DEBUG) {
                 System.err.println("Compressed: " + compressed);
             }
-            String encryptionAlg = readHeaderLine(rawInStream); // 4
+            String encryptionAlg = readHeaderLine(rawInStream);
             if (DEBUG) {
                 System.err.println("Algorithm: " + encryptionAlg);
             }
@@ -163,23 +182,21 @@ class AndroidBackup {
                     }
                 }
 
-                String userSaltHex = readHeaderLine(rawInStream); // 5
+                String userSaltHex = readHeaderLine(rawInStream);
                 byte[] userSalt = hexToByteArray(userSaltHex);
                 if (userSalt.length != PBKDF2_SALT_SIZE / 8) {
                     throw new IllegalArgumentException("Invalid salt length: " + userSalt.length);
                 }
 
-                String ckSaltHex = readHeaderLine(rawInStream); // 6
+                String ckSaltHex = readHeaderLine(rawInStream);
                 byte[] ckSalt = hexToByteArray(ckSaltHex);
 
-                int rounds = Integer.parseInt(readHeaderLine(rawInStream)); // 7
-                String userIvHex = readHeaderLine(rawInStream); // 8
+                int rounds = Integer.parseInt(readHeaderLine(rawInStream));
+                String userIvHex = readHeaderLine(rawInStream);
 
-                String masterKeyBlobHex = readHeaderLine(rawInStream); // 9
+                String masterKeyBlobHex = readHeaderLine(rawInStream);
 
-                // decrypt the master key blob
                 Cipher c = Cipher.getInstance(ENCRYPTION_MECHANISM);
-                // XXX we don't support non-ASCII passwords
                 SecretKey userKey = buildPasswordKey(password, userSalt, rounds, false);
                 byte[] IV = hexToByteArray(userIvHex);
                 IvParameterSpec ivSpec = new IvParameterSpec(IV);
@@ -187,7 +204,6 @@ class AndroidBackup {
                 byte[] mkCipher = hexToByteArray(masterKeyBlobHex);
                 byte[] mkBlob = c.doFinal(mkCipher);
 
-                // first, the master key IV
                 int offset = 0;
                 int len = mkBlob[offset++];
                 IV = Arrays.copyOfRange(mkBlob, offset, offset + len);
@@ -195,27 +211,23 @@ class AndroidBackup {
                     System.err.println("IV: " + toHex(IV));
                 }
                 offset += len;
-                // then the master key itself
                 len = mkBlob[offset++];
                 byte[] mk = Arrays.copyOfRange(mkBlob, offset, offset + len);
                 if (DEBUG) {
                     System.err.println("MK: " + toHex(mk));
                 }
                 offset += len;
-                // and finally the master key checksum hash
                 len = mkBlob[offset++];
                 byte[] mkChecksum = Arrays.copyOfRange(mkBlob, offset, offset + len);
                 if (DEBUG) {
                     System.err.println("MK checksum: " + toHex(mkChecksum));
                 }
 
-                // now validate the decrypted master key against the checksum
                 boolean useUtf = version >= BACKUP_FILE_V2;
                 byte[] calculatedCk = makeKeyChecksum(mk, ckSalt, rounds, useUtf);
                 System.err.printf("Calculated MK checksum (use UTF-8: %s): %s\n", useUtf, toHex(calculatedCk));
                 if (!Arrays.equals(calculatedCk, mkChecksum)) {
                     System.err.println("Checksum does not match.");
-                    // try the reverse
                     calculatedCk = makeKeyChecksum(mk, ckSalt, rounds, !useUtf);
                     System.err.printf("Calculated MK checksum (use UTF-8: %s): %s\n", useUtf, toHex(calculatedCk));
                 }
@@ -223,7 +235,6 @@ class AndroidBackup {
                 if (Arrays.equals(calculatedCk, mkChecksum)) {
                     ivSpec = new IvParameterSpec(IV);
                     c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(mk, "AES"), ivSpec);
-                    // Only if all of the above worked properly will 'result' be assigned
                     cipherStream = new CipherInputStream(rawInStream, c);
                 }
             }
@@ -232,7 +243,6 @@ class AndroidBackup {
                 throw new IllegalStateException("Invalid password or master key checksum.");
             }
 
-            //Get input file size for percentage printing
             double fileSize = new File(backupFilename).length();
             double percentDone = -1;
 
@@ -241,26 +251,25 @@ class AndroidBackup {
             Inflater inf = null;
             InputStream in;
             if (isCompressed) {
-                // The Inflater is needed to get the correct percentage because of compression
                 inf = new Inflater();
                 in = new InflaterInputStream(baseStream, inf);
-            } else
+            } else {
                 in = baseStream;
+            }
 
             try {
                 out = getOutputStream(filename);
                 byte[] buff = new byte[10 * 1024];
                 int read;
-                long totalRead = 0; // of the input file decompressed
-                double currentPercent; // of the input file
-                long bytesRead; // of the input file compressed
+                long totalRead = 0;
+                double currentPercent;
+                long bytesRead;
                 while ((read = in.read(buff)) > 0) {
                     out.write(buff, 0, read);
                     totalRead += read;
                     if (DEBUG && (totalRead % (100 * 1024) == 0)) {
                         System.err.printf("%d bytes read\n", totalRead);
                     }
-                    //Log the percentage extracted
                     bytesRead = inf == null ? totalRead : inf.getBytesRead();
                     currentPercent = Math.round(bytesRead / fileSize * 100);
                     if (currentPercent != percentDone) {
@@ -272,7 +281,6 @@ class AndroidBackup {
 
             } finally {
                 in.close();
-
                 if (out != null) {
                     out.flush();
                     out.close();
@@ -288,9 +296,7 @@ class AndroidBackup {
         boolean compressing = true;
 
         StringBuilder headerbuf = new StringBuilder(1024);
-
         headerbuf.append(BACKUP_FILE_HEADER_MAGIC);
-        // integer, no trailing \n
         headerbuf.append(isKitKat ? BACKUP_FILE_V2 : BACKUP_FILE_V1);
         headerbuf.append(compressing ? "\n1\n" : "\n0\n");
 
@@ -299,7 +305,6 @@ class AndroidBackup {
             InputStream in = getInputStream(tarFilename);
             OutputStream ofstream = getOutputStream(backupFilename);
             OutputStream finalOutput = ofstream;
-            // Set up the encryption stage if appropriate, and emit the correct header
             if (encrypting) {
                 finalOutput = emitAesBackupHeader(headerbuf, finalOutput, password, isKitKat);
             } else {
@@ -309,15 +314,12 @@ class AndroidBackup {
             byte[] header = headerbuf.toString().getBytes(StandardCharsets.UTF_8);
             ofstream.write(header);
 
-            // Set up the compression stage feeding into the encryption stage (if any)
             if (compressing) {
                 Deflater deflater = new Deflater(Deflater.BEST_COMPRESSION);
-                // requires Java 7
                 finalOutput = new DeflaterOutputStream(finalOutput, deflater, true);
             }
 
             out = finalOutput;
-
             byte[] buff = new byte[10 * 1024];
             int read;
             int totalRead = 0;
@@ -336,26 +338,17 @@ class AndroidBackup {
                 try {
                     out.flush();
                     out.close();
-                } catch (IOException ignored) {
-                }
+                } catch (IOException ignored) { }
             }
         }
     }
 
     private static InputStream getInputStream(String filename) throws IOException {
-        if (filename.equals("-")) {
-            return System.in;
-        } else {
-            return new FileInputStream(filename);
-        }
+        return filename.equals("-") ? System.in : new FileInputStream(filename);
     }
 
     private static OutputStream getOutputStream(String filename) throws IOException {
-        if (filename.equals("-")) {
-            return System.out;
-        } else {
-            return new FileOutputStream(filename);
-        }
+        return filename.equals("-") ? System.out : new FileOutputStream(filename);
     }
 
     private static byte[] randomBytes(int bits) {
@@ -365,52 +358,33 @@ class AndroidBackup {
     }
 
     private static OutputStream emitAesBackupHeader(StringBuilder headerbuf, OutputStream ofstream, String encryptionPassword, boolean useUtf8) throws Exception {
-        // User key will be used to encrypt the master key.
         byte[] newUserSalt = randomBytes(PBKDF2_SALT_SIZE);
         SecretKey userKey = buildPasswordKey(encryptionPassword, newUserSalt, PBKDF2_HASH_ROUNDS, useUtf8);
 
-        // the master key is random for each backup
         byte[] masterPw = new byte[MASTER_KEY_SIZE / 8];
         random.nextBytes(masterPw);
         byte[] checksumSalt = randomBytes(PBKDF2_SALT_SIZE);
 
-        // primary encryption of the datastream with the random key
         Cipher c = Cipher.getInstance(ENCRYPTION_MECHANISM);
         SecretKeySpec masterKeySpec = new SecretKeySpec(masterPw, "AES");
         c.init(Cipher.ENCRYPT_MODE, masterKeySpec);
         OutputStream finalOutput = new CipherOutputStream(ofstream, c);
 
-        // line 4: name of encryption algorithm
         headerbuf.append(ENCRYPTION_ALGORITHM_NAME);
         headerbuf.append('\n');
-        // line 5: user password salt [hex]
         headerbuf.append(toHex(newUserSalt));
         headerbuf.append('\n');
-        // line 6: master key checksum salt [hex]
         headerbuf.append(toHex(checksumSalt));
         headerbuf.append('\n');
-        // line 7: number of PBKDF2 rounds used [decimal]
         headerbuf.append(PBKDF2_HASH_ROUNDS);
         headerbuf.append('\n');
 
-        // line 8: IV of the user key [hex]
         Cipher mkC = Cipher.getInstance(ENCRYPTION_MECHANISM);
         mkC.init(Cipher.ENCRYPT_MODE, userKey);
-
         byte[] IV = mkC.getIV();
         headerbuf.append(toHex(IV));
         headerbuf.append('\n');
 
-        // line 9: master IV + key blob, encrypted by the user key [hex].
-        // Blob format:
-        // [byte] IV length = Niv
-        // [array of Niv bytes] IV itself
-        // [byte] master key length = Nmk
-        // [array of Nmk bytes] master key itself
-        // [byte] MK checksum hash length = Nck
-        // [array of Nck bytes] master key checksum hash
-        //
-        // The checksum is the (master key + checksum salt), run through the stated number of PBKDF2 rounds
         IV = c.getIV();
         byte[] mk = masterKeySpec.getEncoded();
         byte[] checksum = makeKeyChecksum(masterKeySpec.getEncoded(), checksumSalt, PBKDF2_HASH_ROUNDS, useUtf8);
@@ -444,7 +418,7 @@ class AndroidBackup {
         StringBuilder buffer = new StringBuilder(80);
         while ((c = in.read()) >= 0) {
             if (c == '\n')
-                break; // consume and discard the newlines
+                break;
             buffer.append((char) c);
         }
         return buffer.toString();
@@ -455,7 +429,6 @@ class AndroidBackup {
         if (2 * bytes != digits.length()) {
             throw new IllegalArgumentException("Hex string must have an even number of digits");
         }
-
         byte[] result = new byte[bytes];
         for (int i = 0; i < digits.length(); i += 2) {
             result[i / 2] = (byte) Integer.parseInt(digits.substring(i, i + 2), 16);
@@ -468,7 +441,6 @@ class AndroidBackup {
             System.err.println("key bytes: " + toHex(pwBytes));
             System.err.println("salt bytes: " + toHex(salt));
         }
-
         char[] mkAsChar = new char[pwBytes.length];
         for (int i = 0; i < pwBytes.length; i++) {
             mkAsChar[i] = (char) pwBytes[i];
@@ -476,7 +448,6 @@ class AndroidBackup {
         if (DEBUG) {
             System.err.printf("MK as string: [%s]\n", new String(mkAsChar));
         }
-
         Key checksum = buildCharArrayKey(mkAsChar, salt, rounds, useUtf8);
         if (DEBUG) {
             System.err.println("Key format: " + checksum.getFormat());
@@ -490,8 +461,6 @@ class AndroidBackup {
 
     public static SecretKey androidPBKDF2(char[] pwArray, byte[] salt, int rounds, boolean useUtf8) {
         PBEParametersGenerator generator = new PKCS5S2ParametersGenerator();
-        // Android treats password bytes as ASCII, which is obviously not the case when an AES key is used as a 'password'.
-        // Use the same method for compatibility.
         byte[] pwBytes = useUtf8 ? PBEParametersGenerator.PKCS5PasswordToUTF8Bytes(pwArray)
                 : PBEParametersGenerator.PKCS5PasswordToBytes(pwArray);
         generator.init(pwBytes, salt, rounds);
