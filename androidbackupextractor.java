@@ -3,6 +3,9 @@
 //DEPS info.picocli:picocli:4.7.4
 
 /**
+Based on https://github.com/nelenkov/android-backup-extractor
+More details at https://nelenkov.blogspot.com/2012/06/unpacking-android-backups.html
+
 λ jbang https://raw.githubusercontent.com/raisercostin/scripts-ts/refs/heads/main/androidbackupextractor.java --help
 Usage: android-backup-extractor [-hV] [-p=<password>] <mode> <file1> <file2>
 Tool for packing/unpacking Android backups
@@ -55,9 +58,6 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
-/**
- * Based on https://github.com/nelenkov/android-backup-extractor
- */
 @Command(name = "android-backup-extractor", mixinStandardHelpOptions = true, version = "1.0",
          description = "Tool for packing/unpacking Android backups")
 class ABECommand implements Runnable {
