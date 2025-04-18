@@ -13,7 +13,7 @@ function checkAuth(headers: Headers): boolean {
 }
 
 const editorFiles = {
-  ".c4": new URL("./fserver-mermaid-editor.html", import.meta.url),
+  ".c4": new URL("./restfs-mermaid.html", import.meta.url),
 };
 const fileAssociations: Record<string, string> = {
   ".html": "text/html",
@@ -31,25 +31,44 @@ serve(async (req) => {
   try {
     const stat = await Deno.stat(fsPath);
     if (stat.isDirectory) {
-      let list = '<ul>';
+      const wantsJson = req.headers.get('accept')?.includes('application/json');
+      const entries = [];
       for await (const entry of Deno.readDir(fsPath)) {
-        const slash = entry.isDirectory ? '/' : '';
-        const baseLink = `${pathname}${pathname.endsWith('/') ? '' : '/'}${entry.name}${slash}`;
-        if (entry.isDirectory) {
-          list += `<li><a href="${baseLink}">${entry.name}${slash}</a></li>`;
-        } else {
-          list += `<li><a href="${baseLink}">${entry.name}</a>`;
-          if (entry.name.endsWith('.c4')) {
-            list += ` (<a href="${baseLink}?edit">edit</a>)`;
-          }
-          list += `</li>`;
+        const name = entry.name + (entry.isDirectory ? '/' : '');
+        const variants = [];
+        if (!entry.isDirectory && entry.name.endsWith('.c4')) {
+          const base = entry.name.slice(0, -3);
+          variants.push(`${base}.svg`, `${base}.png`);
         }
+        entries.push({ name, isDirectory: entry.isDirectory, variants });
       }
-      list += '</ul>';
-      return new Response(
-        `<html><body><h1>Index of ${pathname}</h1>${list}</body></html>`,
-        { headers: { 'content-type': 'text/html; charset=utf-8' } }
-      );
+      if (wantsJson) {
+        return new Response(JSON.stringify(entries), {
+          headers: { 'content-type': 'application/json' }
+        });
+      } else {
+        // existing HTML path, but for each .c4:
+        //   … <a href="foo.svg">svg</a> <a href="foo.png">png</a>
+        let list = '<ul>';
+        for await (const entry of Deno.readDir(fsPath)) {
+          const slash = entry.isDirectory ? '/' : '';
+          const baseLink = `${pathname}${pathname.endsWith('/') ? '' : '/'}${entry.name}${slash}`;
+          if (entry.isDirectory) {
+            list += `<li><a href="${baseLink}">${entry.name}${slash}</a></li>`;
+          } else {
+            list += `<li><a href="${baseLink}">${entry.name}</a>`;
+            if (entry.name.endsWith('.c4')) {
+              list += ` (<a href="${baseLink}?edit">edit</a>)`;
+            }
+            list += `</li>`;
+          }
+        }
+        list += '</ul>';
+        return new Response(
+          `<html><body><h1>Index of ${pathname}</h1>${list}</body></html>`,
+          { headers: { 'content-type': 'text/html; charset=utf-8' } }
+        );
+      }
     }
 
     // File handling
