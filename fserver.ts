@@ -27,7 +27,16 @@ serve(async (req) => {
       let list = '<ul>';
       for await (const entry of Deno.readDir(fsPath)) {
         const slash = entry.isDirectory ? '/' : '';
-        list += `<li><a href="${pathname}${pathname.endsWith('/') ? '' : '/'}${entry.name}${slash}">${entry.name}${slash}</a></li>`;
+        const baseLink = `${pathname}${pathname.endsWith('/') ? '' : '/'}${entry.name}${slash}`;
+        if (entry.isDirectory) {
+          list += `<li><a href="${baseLink}">${entry.name}${slash}</a></li>`;
+        } else {
+          list += `<li><a href="${baseLink}">${entry.name}</a>`;
+          if (entry.name.endsWith('.c4')) {
+            list += ` (<a href="${baseLink}?edit">edit</a>)`;
+          }
+          list += `</li>`;
+        }
       }
       list += '</ul>';
       return new Response(`<html><body><h1>Index of ${pathname}</h1>${list}</body></html>`, {
