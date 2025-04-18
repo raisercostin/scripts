@@ -12,26 +12,62 @@ function checkAuth(headers: Headers): boolean {
   return user === "admin" && pass === PASSWORD;
 }
 
+/* FROM HERE */
 serve(async (req) => {
-  const { method, headers } = req;
-  const pathname = new URL(req.url).pathname;
+  const url = new URL(req.url);
+  const pathname = url.pathname;
+  const method = req.method;
+  const headers = req.headers;
+  const fsPath = `.${pathname}`;
 
-  if (method === "GET" && pathname === "/") {
-    const body = await Deno.readFile("./index.html");
-    return new Response(body, { headers: { "content-type": "text/html" } });
+  // Directory navigation
+  try {
+    const stat = await Deno.stat(fsPath);
+    if (stat.isDirectory) {
+      let list = '<ul>';
+      for await (const entry of Deno.readDir(fsPath)) {
+        const slash = entry.isDirectory ? '/' : '';
+        list += `<li><a href="${pathname}${pathname.endsWith('/') ? '' : '/'}${entry.name}${slash}">${entry.name}${slash}</a></li>`;
+      }
+      list += '</ul>';
+      return new Response(`<html><body><h1>Index of ${pathname}</h1>${list}</body></html>`, {
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      });
+    }
+
+    // File handling
+    if (method === 'GET') {
+      if (pathname.endsWith('.c4') && url.searchParams.has('edit')) {
+        const body = await Deno.readFile('./diageditor.html');
+        return new Response(body, { headers: { 'content-type': 'text/html' } });
+      }
+      const data = await Deno.readFile(fsPath);
+      const ct = pathname.endsWith('.html')
+        ? 'text/html'
+        : pathname.endsWith('.c4')
+        ? 'text/plain'
+        : 'application/octet-stream';
+      return new Response(data, { headers: { 'content-type': `${ct}; charset=utf-8` } });
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      return new Response('Server Error', { status: 500 });
+    }
+    // else continue to other routes
   }
 
-  if (method === "POST" && pathname === "/save") {
+  // POST /save
+  if (method === 'POST' && pathname === '/save') {
     if (!checkAuth(headers)) {
-      return new Response("Unauthorized", {
+      return new Response('Unauthorized', {
         status: 401,
-        headers: { "WWW-Authenticate": `Basic realm="${REALM}"` },
+        headers: { 'WWW-Authenticate': `Basic realm="${REALM}"` },
       });
     }
     const content = await req.text();
-    await Deno.writeTextFile("diagram.c4", content);
-    return new Response("Saved");
+    await Deno.writeTextFile('diagram.c4', content);
+    return new Response('Saved');
   }
 
-  return new Response("Not Found", { status: 404 });
+  return new Response('Not Found', { status: 404 });
 });
