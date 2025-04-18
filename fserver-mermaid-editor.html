@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mermaid C4 Editor</title>
+</head>
+<body>
+  <textarea id="editor" style="width:100%;height:200px;"></textarea>
+  <br/>
+  <button id="render">Render</button>
+  <button id="save">Save</button>
+  <div id="diagram"></div>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    //import mermaidC4 from 'https://unpkg.com/mermaid-c4-plugin@1.29.0/dist/index.esm.min.mjs';
+
+    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
+    //mermaid.use({ c4: mermaidC4 });
+
+    const editor   = document.getElementById('editor');
+    const diagram  = document.getElementById('diagram');
+    const renderBtn = document.getElementById('render');
+    const saveBtn   = document.getElementById('save');
+
+    /* ANCHOR: File‑loading + auto‑render setup */
+    const params  = new URLSearchParams(window.location.search);
+    const fileUrl = params.get('src') || window.location.pathname;
+
+    // debounce helper
+    let debounceTimer;
+    function renderDiagram() {
+      mermaid.render('generatedDiagram', editor.value)
+        .then(({ svg }) => diagram.innerHTML = svg)
+        .catch(err => diagram.innerHTML = `<pre style="color:red">${err}</pre>`);
+    }
+
+    // load file contents, then render once
+    fetch(fileUrl)
+      .then(r => r.text())
+      .then(text => {
+        editor.value = text;
+        renderDiagram();
+      })
+      .catch(err => alert('Error loading ' + fileUrl + ': ' + err));
+
+    // auto‑render after edits (500ms after last keystroke)
+    editor.addEventListener('input', () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(renderDiagram, 500);
+    });
+    /* END ANCHOR */
+
+    // manual render button (optional now)
+    renderBtn.addEventListener('click', renderDiagram);
+
+    // Save back to server, including path for server to write
+    saveBtn.addEventListener('click', async () => {
+      let pw = localStorage.getItem('PASSWORD') || '';
+      const attemptSave = async (password) => {
+        const auth = btoa(`admin:${password}`);
+        const resp = await fetch(`/save?path=${encodeURIComponent(fileUrl)}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'text/plain',
+            'Authorization': `Basic ${auth}`
+          },
+          body: editor.value
+        });
+        return resp;
+      };
+
+      let resp = await attemptSave(pw);
+      if (resp.status === 401) {
+        pw = prompt('Save failed, please enter password:');
+        localStorage.setItem('PASSWORD', pw);
+        resp = await attemptSave(pw);
+      }
+
+      alert(await resp.text());
+    });
+  </script>
+</body>
+</html>

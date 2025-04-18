@@ -12,7 +12,14 @@ function checkAuth(headers: Headers): boolean {
   return user === "admin" && pass === PASSWORD;
 }
 
-/* FROM HERE */
+const editorFiles = {
+  ".c4": new URL("./fserver-mermaid-editor.html", import.meta.url),
+};
+const fileAssociations: Record<string, string> = {
+  ".html": "text/html",
+  ".c4":   "text/plain",
+};
+
 serve(async (req) => {
   const url = new URL(req.url);
   const pathname = url.pathname;
@@ -39,30 +46,31 @@ serve(async (req) => {
         }
       }
       list += '</ul>';
-      return new Response(`<html><body><h1>Index of ${pathname}</h1>${list}</body></html>`, {
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      });
+      return new Response(
+        `<html><body><h1>Index of ${pathname}</h1>${list}</body></html>`,
+        { headers: { 'content-type': 'text/html; charset=utf-8' } }
+      );
     }
 
     // File handling
     if (method === 'GET') {
       if (pathname.endsWith('.c4') && url.searchParams.has('edit')) {
-        const body = await Deno.readFile('./diageditor.html');
+        // serve the editor HTML from module-relative path
+        const body = await Deno.readFile(editorFiles['.c4']);
         return new Response(body, { headers: { 'content-type': 'text/html' } });
       }
       const data = await Deno.readFile(fsPath);
-      const ct = pathname.endsWith('.html')
-        ? 'text/html'
-        : pathname.endsWith('.c4')
-        ? 'text/plain'
-        : 'application/octet-stream';
-      return new Response(data, { headers: { 'content-type': `${ct}; charset=utf-8` } });
+      const ext = pathname.slice(pathname.lastIndexOf('.'));
+      const ct = fileAssociations[ext] ?? 'application/octet-stream';
+      return new Response(data, {
+        headers: { 'content-type': `${ct}; charset=utf-8` },
+      });
     }
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
       return new Response('Server Error', { status: 500 });
     }
-    // else continue to other routes
+    // not found → fall through
   }
 
   // POST /save
