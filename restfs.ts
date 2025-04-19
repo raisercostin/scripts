@@ -107,14 +107,10 @@ Deno.serve(async (req) => {
         if(fileExists) {
           return await serveFile(req, fsPath);
         }else{
-          console.log(`File ${pathname} not found, serving ${editorFiles[ext]}`)
+          const editorPath = new URL(editorFiles[ext]).pathname.substring(1);
+          console.log(`File ${pathname} not found, serving ${editorPath}`)
           // 2) PNG not found → serve the HTML that will render & save it
-          const body = await Deno.readFile(editorFiles[ext]);
-          //console.log("editorFiles[ext]",editorFiles[ext])
-          //return await serveFile(req, editorFiles[ext]);
-          return new Response(body, {
-            headers: { 'content-type': 'text/html; charset=utf-8' }
-          });
+          return await serveFile(req, editorPath);
         }
       }
       return await serveFile(req, fsPath);
