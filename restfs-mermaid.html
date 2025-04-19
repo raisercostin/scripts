@@ -39,46 +39,37 @@
 
     // 1) .svg endpoint: generate SVG, POST back, then reload to serve it
     async function generateSVG() {
-      try {
-        const c4 = await fetch(baseC4).then(r => r.ok ? r.text() : Promise.reject('Missing C4'));
-        const svg = await renderToSVG(c4);
+      const c4 = await fetch(baseC4).then(r => r.ok ? r.text() : Promise.reject('Missing C4'));
+      const svg = await renderToSVG(c4);
 
-        await fetch(path, {
-          method: 'POST',
-          headers: { 'Content-Type': 'image/svg+xml' },
-          body: svg
-        });
-        window.location.href = path;
-      } catch (err) {
-        diagram.innerHTML = `<pre style="color:red">SVG error: ${err}</pre>`;
-      }
+      return await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/svg+xml' },
+        body: svg
+      });
     }
+
 
     // 2) .png endpoint: SVG→canvas→PNG, POST back, then reload
     async function generatePNG() {
-      try {
-        const c4 = await fetch(baseC4).then(r => r.ok ? r.text() : Promise.reject('Missing C4'));
-        const svg = await renderToSVG(c4);
+      const c4 = await fetch(baseC4).then(r => r.ok ? r.text() : Promise.reject('Missing C4'));
+      const svg = await renderToSVG(c4);
 
-        const img = new Image();
-        img.src = 'data:image/svg+xml;base64,' + btoa(svg);
-        await new Promise(res => img.onload = res);
+      const img = new Image();
+      img.src = 'data:image/svg+xml;base64,' + btoa(svg);
+      await new Promise(res => img.onload = res);
 
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        canvas.getContext('2d').drawImage(img, 0, 0);
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      canvas.getContext('2d').drawImage(img, 0, 0);
 
-        const blob = await new Promise(res => canvas.toBlob(res));
-        await fetch(path, {
-          method: 'POST',
-          headers: { 'Content-Type': 'image/png' },
-          body: blob
-        });
-        window.location.href = path;
-      } catch (err) {
-        diagram.innerHTML = `<pre style="color:red">PNG error: ${err}</pre>`;
-      }
+      const blob = await new Promise(res => canvas.toBlob(res));
+      return await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/png' },
+        body: blob
+      });
     }
 
     // 3) .c4?edit endpoint: show editor + live preview + save
@@ -133,20 +124,21 @@
     });
 
     // dispatch
-    if (ext === 'svg') {
-      generateSVG();
-    } else if (ext === 'png') {
-      generatePNG();
-    } else if (path.endsWith('.c4') && params.has('edit')) {
-      editC4();
-    } else {
-      // fallback message
-      diagram.innerHTML = `
-        <p>To edit: <code>?edit</code> → <em>e.g.</em> <code>${path}?edit</code></p>
-        <p>To render: request <code>.svg</code> or <code>.png</code> instead of <code>.c4</code>.</p>
-      `;
+    try{
+      if (ext === 'svg') {
+        const resp = await generateSVG();
+        if (!resp.ok) throw new Error(`Save failed: ${resp.status} ${resp.statusText}`);
+        window.location.href = path;
+      } else if (ext === 'png') {
+        const resp = await generatePNG();
+        if (!resp.ok) throw new Error(`Save failed: ${resp.status} ${resp.statusText}`);
+        window.location.href = path;
+      } else {
+        editC4();
+      }
+    }catch (err) {
+      diagram.innerHTML = `<pre style="color:red">Render error: ${err}</pre>`;
     }
-    /* END ANCHOR */
   </script>
 </body>
 </html>

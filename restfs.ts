@@ -131,15 +131,16 @@ serve(async (req) => {
   }
 
 
-  if (method === 'POST' && pathname.endsWith('.c4')) {
+  if (method === 'POST') {
     if (!checkAuth(headers)) {
       return new Response('Unauthorized', {
         status: 401,
         headers: { 'WWW-Authenticate': `Basic realm="${REALM}"` },
       });
     }
-    const content = await req.text();
-    await Deno.writeTextFile(fsPath, content);
+    
+    const buf = await req.arrayBuffer();
+    await Deno.writeFile(fsPath, new Uint8Array(buf));
     return new Response('Saved');
   }
   return new Response('Not Found', { status: 404 });
