@@ -2,64 +2,119 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Mermaid C4 Editor</title>
+  <title>Mermaid C4 Editor / Renderer</title>
 </head>
 <body>
-  <textarea id="editor" style="width:100%;height:200px;"></textarea>
+  <!-- Editor UI (only shown when ?edit on a .c4) -->
+  <textarea id="editor" style="width:100%;height:200px; display:none;"></textarea>
   <br/>
-  <button id="render">Render</button>
-  <button id="save">Save</button>
+  <button id="render" style="display:none;">Render</button>
+  <button id="save"   style="display:none;">Save</button>
+
+  <!-- Diagram output (preview or redirect target) -->
   <div id="diagram"></div>
 
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-    //import mermaidC4 from 'https://unpkg.com/mermaid-c4-plugin@1.29.0/dist/index.esm.min.mjs';
-
+    // import mermaidC4 from 'https://unpkg.com/mermaid-c4-plugin@1.29.0/dist/index.esm.min.mjs';
     mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
-    //mermaid.use({ c4: mermaidC4 });
+    // mermaid.use({ c4: mermaidC4 });
 
-    const editor   = document.getElementById('editor');
-    const diagram  = document.getElementById('diagram');
+    const editor    = document.getElementById('editor');
+    const diagram   = document.getElementById('diagram');
     const renderBtn = document.getElementById('render');
     const saveBtn   = document.getElementById('save');
 
-    /* ANCHOR: File‑loading + auto‑render setup */
-    const params  = new URLSearchParams(window.location.search);
-    const fileUrl = params.get('src') || window.location.pathname;
+    /* ANCHOR: decide mode by extension & searchParams */
+    const params   = new URLSearchParams(window.location.search);
+    const path     = window.location.pathname;
+    const ext      = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+    const baseC4   = path.replace(/\.(svg|png)$/, '.c4');
 
-    // debounce helper
-    let debounceTimer;
-    function renderDiagram() {
-      mermaid.render('generatedDiagram', editor.value)
-        .then(({ svg }) => diagram.innerHTML = svg)
-        .catch(err => diagram.innerHTML = `<pre style="color:red">${err}</pre>`);
+    // helper: render C4 source to SVG string
+    async function renderToSVG(source) {
+      const { svg } = await mermaid.render('gen', source);
+      return svg;
     }
 
-    // load file contents, then render once
-    fetch(fileUrl)
-      .then(r => r.text())
-      .then(text => {
+    // 1) .svg endpoint: generate SVG, POST back, then reload to serve it
+    async function generateSVG() {
+      try {
+        const c4 = await fetch(baseC4).then(r => r.ok ? r.text() : Promise.reject('Missing C4'));
+        const svg = await renderToSVG(c4);
+
+        await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'image/svg+xml' },
+          body: svg
+        });
+        window.location.href = path;
+      } catch (err) {
+        diagram.innerHTML = `<pre style="color:red">SVG error: ${err}</pre>`;
+      }
+    }
+
+    // 2) .png endpoint: SVG→canvas→PNG, POST back, then reload
+    async function generatePNG() {
+      try {
+        const c4 = await fetch(baseC4).then(r => r.ok ? r.text() : Promise.reject('Missing C4'));
+        const svg = await renderToSVG(c4);
+
+        const img = new Image();
+        img.src = 'data:image/svg+xml;base64,' + btoa(svg);
+        await new Promise(res => img.onload = res);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+
+        const blob = await new Promise(res => canvas.toBlob(res));
+        await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'image/png' },
+          body: blob
+        });
+        window.location.href = path;
+      } catch (err) {
+        diagram.innerHTML = `<pre style="color:red">PNG error: ${err}</pre>`;
+      }
+    }
+
+    // 3) .c4?edit endpoint: show editor + live preview + save
+    async function editC4() {
+      try {
+        const text = await fetch(path).then(r => r.ok ? r.text() : Promise.reject('Missing C4'));
         editor.value = text;
-        renderDiagram();
-      })
-      .catch(err => alert('Error loading ' + fileUrl + ': ' + err));
+        editor.style.display = 'block';
+        renderBtn.style.display = 'inline-block';
+        saveBtn.style.display   = 'inline-block';
+        renderDiagram();  // initial preview
+      } catch (err) {
+        diagram.innerHTML = `<pre style="color:red">Load error: ${err}</pre>`;
+      }
+    }
 
-    // auto‑render after edits (500ms after last keystroke)
-    editor.addEventListener('input', () => {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(renderDiagram, 500);
-    });
-    /* END ANCHOR */
+    // debounce & live preview
+    let liveTimer;
+    function renderDiagram() {
+      clearTimeout(liveTimer);
+      liveTimer = setTimeout(async () => {
+        try {
+          diagram.innerHTML = await renderToSVG(editor.value);
+        } catch (e) {
+          diagram.innerHTML = `<pre style="color:red">${e}</pre>`;
+        }
+      }, 300);
+    }
 
-    // manual render button (optional now)
     renderBtn.addEventListener('click', renderDiagram);
 
-    // Save back to server, including path for server to write
     saveBtn.addEventListener('click', async () => {
       let pw = localStorage.getItem('PASSWORD') || '';
-      const attemptSave = async (password) => {
+      async function attempt(password) {
         const auth = btoa(`admin:${password}`);
-        const resp = await fetch(`/save?path=${encodeURIComponent(fileUrl)}`, {
+        return fetch(path, {
           method: 'POST',
           headers: {
             'Content-Type': 'text/plain',
@@ -67,18 +122,31 @@
           },
           body: editor.value
         });
-        return resp;
-      };
-
-      let resp = await attemptSave(pw);
-      if (resp.status === 401) {
-        pw = prompt('Save failed, please enter password:');
-        localStorage.setItem('PASSWORD', pw);
-        resp = await attemptSave(pw);
       }
-
+      let resp = await attempt(pw);
+      if (resp.status === 401) {
+        pw = prompt('Password:');
+        localStorage.setItem('PASSWORD', pw);
+        resp = await attempt(pw);
+      }
       alert(await resp.text());
     });
+
+    // dispatch
+    if (ext === 'svg') {
+      generateSVG();
+    } else if (ext === 'png') {
+      generatePNG();
+    } else if (path.endsWith('.c4') && params.has('edit')) {
+      editC4();
+    } else {
+      // fallback message
+      diagram.innerHTML = `
+        <p>To edit: <code>?edit</code> → <em>e.g.</em> <code>${path}?edit</code></p>
+        <p>To render: request <code>.svg</code> or <code>.png</code> instead of <code>.c4</code>.</p>
+      `;
+    }
+    /* END ANCHOR */
   </script>
 </body>
 </html>
