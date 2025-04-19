@@ -1,6 +1,6 @@
 #!/usr/bin/env deno run --allow-net --allow-read --allow-write --allow-env
-import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { exists } from "jsr:@std/fs/exists";
+import { serveFile } from "https://deno.land/std@0.177.0/http/file_server.ts";
 
 const PASSWORD = Deno.env.get("PASSWORD") ?? "changeme";
 const REALM = "C4 Editor";
@@ -16,6 +16,7 @@ function checkAuth(headers: Headers): boolean {
 const editorFiles = {
   ".c4": new URL("./restfs-mermaid.html", import.meta.url),
   ".png": new URL("./restfs-mermaid.html", import.meta.url),
+  ".svg": new URL("./restfs-mermaid.html", import.meta.url),
 };
 
 const fileAssociations: Record<string, string> = {
@@ -25,7 +26,7 @@ const fileAssociations: Record<string, string> = {
   ".png":  "image/png",
 };
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   const url = new URL(req.url);
   const pathname = url.pathname;
   const method = req.method;
@@ -94,35 +95,29 @@ serve(async (req) => {
         { headers: { 'content-type': 'text/html; charset=utf-8' } }
       );
     }
+    const ext = pathname.slice(pathname.lastIndexOf('.'));
 
     // 3) File GET
-    if (method === 'GET' && pathname.endsWith('.png')) {
-      try {
-        // 1) Serve pre‑generated PNG if it exists
-        const img = await Deno.readFile(fsPath);
-        return new Response(img, { headers: { 'content-type': 'image/png' } });
-      } catch (err) {
-        if (err instanceof Deno.errors.NotFound) {
+    if (method === 'GET') {
+      if(url.searchParams.has('edit')) {
+        const body = await Deno.readFile(editorFiles[ext]);
+        return new Response(body, { headers: { 'content-type': 'text/html' } });
+      }      
+      if (editorFiles[ext]) {
+        if(fileExists) {
+          return await serveFile(req, fsPath);
+        }else{
+          console.log(`File ${pathname} not found, serving ${editorFiles[ext]}`)
           // 2) PNG not found → serve the HTML that will render & save it
-          const body = await Deno.readFile(editorFiles['.png']);
+          const body = await Deno.readFile(editorFiles[ext]);
+          //console.log("editorFiles[ext]",editorFiles[ext])
+          //return await serveFile(req, editorFiles[ext]);
           return new Response(body, {
             headers: { 'content-type': 'text/html; charset=utf-8' }
           });
         }
-        throw err;
       }
-    }
-    if (method === 'GET') {
-      // editor UI
-      if (pathname.endsWith('.c4') && url.searchParams.has('edit')) {
-        const body = await Deno.readFile(editorFiles['.c4']);
-        return new Response(body, { headers: { 'content-type': 'text/html' } });
-      }
-      // static file
-      const data = await Deno.readFile(fsPath);
-      const ext = pathname.slice(pathname.lastIndexOf('.'));
-      const ct = fileAssociations[ext] ?? 'application/octet-stream';
-      return new Response(data, { headers: { 'content-type': `${ct}; charset=utf-8` } });
+      return await serveFile(req, fsPath);
     }
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
@@ -139,14 +134,15 @@ serve(async (req) => {
       });
     }
     const file = await Deno.open(fsPath, { write: true, create: true, truncate: true });
-    try {
-      // stream request body → file
-      for await (const chunk of req.body!) {
-        await Deno.writeAll(file, chunk);
+    const ws = new WritableStream({
+      write: async (chunk) => {
+        await file.write(chunk);
+      },
+      close: async () => {
+        await file.close();
       }
-    } finally {
-      file.close();
-    }
+    });
+    await req.body!.pipeTo(ws);
     return new Response('Saved');
   }
   return new Response('Not Found', { status: 404 });
