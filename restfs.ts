@@ -138,9 +138,15 @@ serve(async (req) => {
         headers: { 'WWW-Authenticate': `Basic realm="${REALM}"` },
       });
     }
-    
-    const buf = await req.arrayBuffer();
-    await Deno.writeFile(fsPath, new Uint8Array(buf));
+    const file = await Deno.open(fsPath, { write: true, create: true, truncate: true });
+    try {
+      // stream request body → file
+      for await (const chunk of req.body!) {
+        await Deno.writeAll(file, chunk);
+      }
+    } finally {
+      file.close();
+    }
     return new Response('Saved');
   }
   return new Response('Not Found', { status: 404 });
