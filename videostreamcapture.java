@@ -3,20 +3,27 @@
 //DEPS org.slf4j:slf4j-api:1.7.36
 //DEPS ch.qos.logback:logback-classic:1.2.11
 
-//jbang --verbose videostreamcapture.java "rtsp://<user>:<password>@192.168.1.81:554/live/stream1" PT1M
+//jbang --verbose videostreamcapture.java "rtsp://<user>:<password>@192.168.1.81:554/live/stream1" PT1M [snapshotPeriodSec]
 
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
 import org.bytedeco.javacv.FFmpegLogCallback;
 import org.bytedeco.javacv.Frame;
+import org.bytedeco.javacv.Java2DFrameConverter;
 import org.bytedeco.ffmpeg.global.avutil;
 import org.bytedeco.ffmpeg.global.avcodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.File;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 
 public class videostreamcapture {
@@ -24,15 +31,19 @@ public class videostreamcapture {
 
     public static void main(String... args) throws Exception {
         if (args.length < 2) {
-            System.err.println("Usage: jbang run videostreamcapture.java <rtsp_url> <period>");
+            System.err.println("Usage: jbang run videostreamcapture.java <rtsp_url> <period> [snapshotPeriodSec]");
             System.exit(1);
         }
 
         String url    = args[0];
         String period = args[1];
-        String maskedUrl = maskCredentials(url);
+        int snapshotPeriodSec = (args.length >= 3)
+            ? Integer.parseInt(args[2])
+            : 1; // default: one snapshot per second
 
-        log.info("Starting capture for URL {} for duration {}", maskedUrl, period);
+        String maskedUrl = maskCredentials(url);
+        log.info("Starting capture for URL {} for duration {} (snapshot every {}s)",
+                 maskedUrl, period, snapshotPeriodSec);
 
         Duration duration;
         try {
@@ -41,7 +52,6 @@ public class videostreamcapture {
             log.error("Invalid duration format '{}'. Use ISO‑8601 (e.g. PT1H, P1DT12H).", period);
             return;
         }
-        Instant end = Instant.now().plus(duration);
 
         // enable FFmpeg internal logs for detail
         FFmpegLogCallback.set();
@@ -72,13 +82,32 @@ public class videostreamcapture {
                 recorder.setSampleRate(grabber.getSampleRate());
                 recorder.setAudioChannels(grabber.getAudioChannels());
                 recorder.start();
-                log.info("Recorder started (video: {}, audio: AAC @ {}bps)",
+                log.info("Recorder started (video codec={}, audio=AAC @ {}bps)",
                          grabber.getVideoCodec(), 128_000);
+
+                // snapshot setup
+                Java2DFrameConverter conv = new Java2DFrameConverter();
+                DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss");
+                long lastSnapshotMs = System.currentTimeMillis();
+                int snapCount = 0;
+                Instant end = Instant.now().plus(duration);
 
                 while (Instant.now().isBefore(end)) {
                     Frame frame = grabber.grabFrame(true, true, true, false, true);
                     if (frame != null) {
+                        // record to MP4
                         recorder.record(frame);
+
+                        // snapshot at most once per snapshotPeriodSec
+                        long nowMs = System.currentTimeMillis();
+                        if (frame.image != null && nowMs - lastSnapshotMs >= snapshotPeriodSec * 1000L) {
+                            BufferedImage img = conv.convert(frame);
+                            String ts = ZonedDateTime.now(ZoneId.systemDefault()).format(fmt);
+                            String snapName = String.format("snap-%s-%03d.jpg", ts, snapCount++);
+                            ImageIO.write(img, "jpg", new File(snapName));
+                            log.debug("Saved snapshot {}", snapName);
+                            lastSnapshotMs = nowMs;
+                        }
                     }
                 }
 
