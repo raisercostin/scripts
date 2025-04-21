@@ -6,20 +6,17 @@
 //jbang --verbose videostreamcapture.java "rtsp://<user>:<password>@192.168.1.81:554/live/stream1" PT1M
 
 import org.bytedeco.javacv.FFmpegFrameGrabber;
+import org.bytedeco.javacv.FFmpegFrameRecorder;
+import org.bytedeco.javacv.FFmpegLogCallback;
 import org.bytedeco.javacv.Frame;
-import org.bytedeco.javacv.Java2DFrameConverter;
+import org.bytedeco.ffmpeg.global.avutil;
+import org.bytedeco.ffmpeg.global.avcodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
-import java.io.File;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 
 public class videostreamcapture {
@@ -31,13 +28,9 @@ public class videostreamcapture {
             System.exit(1);
         }
 
-        System.setProperty("java.awt.headless", "true");
-
-        URI uri = URI.create(args[0]);
-        String userInfo = uri.getUserInfo();
-        String maskedUrl = args[0].replaceFirst(userInfo + "@", "***:***@");
-        String url = args[0];
+        String url    = args[0];
         String period = args[1];
+        String maskedUrl = maskCredentials(url);
 
         log.info("Starting capture for URL {} for duration {}", maskedUrl, period);
 
@@ -45,51 +38,67 @@ public class videostreamcapture {
         try {
             duration = Duration.parse(period);
         } catch (DateTimeParseException e) {
-            log.error("Invalid duration format: {}. Use ISO-8601 (e.g., PT1H or P1DT12H).", period);
+            log.error("Invalid duration format '{}'. Use ISO‑8601 (e.g. PT1H, P1DT12H).", period);
             return;
         }
         Instant end = Instant.now().plus(duration);
-        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss");
+
+        // enable FFmpeg internal logs for detail
+        FFmpegLogCallback.set();
 
         try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(url)) {
-            grabber.setVideoOption("threads", "1"); // more precise without threads
-
             grabber.setOption("rtsp_transport", "tcp");
-            grabber.setOption("hwaccel", "videotoolbox");
             grabber.start();
-            log.info("FFmpegFrameGrabber started.");
+            log.info("Grabber started: resolution={}x{} @ {}fps, audioChannels={}",
+                     grabber.getImageWidth(),
+                     grabber.getImageHeight(),
+                     grabber.getFrameRate(),
+                     grabber.getAudioChannels()
+            );
 
-            Java2DFrameConverter conv = new Java2DFrameConverter();
-            int counter = 0;
+            try (FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(
+                    "output.mp4",
+                    grabber.getImageWidth(),
+                    grabber.getImageHeight(),
+                    grabber.getAudioChannels())) {
 
-            while (Instant.now().isBefore(end)) {
-                long loopStart = System.currentTimeMillis();
+                recorder.setFormat("mp4");
+                recorder.setVideoCodec(grabber.getVideoCodec());
+                // transcode audio from pcm_alaw to AAC for MP4 compatibility
+                recorder.setAudioCodec(avcodec.AV_CODEC_ID_AAC);
+                recorder.setAudioBitrate(128_000);
+                recorder.setPixelFormat(avutil.AV_PIX_FMT_YUV420P);
+                recorder.setFrameRate(grabber.getFrameRate());
+                recorder.setSampleRate(grabber.getSampleRate());
+                recorder.setAudioChannels(grabber.getAudioChannels());
+                recorder.start();
+                log.info("Recorder started (video: {}, audio: AAC @ {}bps)",
+                         grabber.getVideoCodec(), 128_000);
 
-                Frame frame = grabber.grabImage();
-                //Frame frame = grabber.grabFrame(true, true, true, false, false);
-                //setOption("hwaccel", "videotoolbox")
-                if (frame != null) {
-                    log.debug("Captured frame #{}", counter);
-                    BufferedImage img = conv.convert(frame);
-
-                    String timestamp = ZonedDateTime.now(ZoneId.systemDefault()).format(fmt);
-                    String name = String.format("frame-%s-%03d.jpg", timestamp, counter);
-
-                    ImageIO.write(img, "jpg", new File(name));
-                    log.debug("Saved frame to {}", name);
-                    counter++;
-                } else {
-                    log.warn("No frame grabbed at {}", Instant.now());
+                while (Instant.now().isBefore(end)) {
+                    Frame frame = grabber.grabFrame(true, true, true, false, true);
+                    if (frame != null) {
+                        recorder.record(frame);
+                    }
                 }
 
-                long took  = System.currentTimeMillis() - loopStart;
-                long sleep = 1000 - took;
-                if (sleep > 0) {
-                    log.debug("Sleeping for {}ms", sleep);
-                    Thread.sleep(sleep);
-                }
+                recorder.stop();
+                log.info("Recorder stopped.");
             }
-            log.info("Capture completed. Total frames: {}", counter);
+
+            grabber.stop();
+            log.info("Grabber stopped. Finished recording {} seconds.", duration.toSeconds());
         }
+    }
+
+    private static String maskCredentials(String url) {
+        try {
+            URI uri = URI.create(url);
+            String userInfo = uri.getUserInfo();
+            if (userInfo != null) {
+                return url.replaceFirst(userInfo + "@", "***:***@");
+            }
+        } catch (Exception ignored) {}
+        return url;
     }
 }
