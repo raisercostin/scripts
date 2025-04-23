@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Vizdom Demo</title>
+  <!-- import vizdom & esbuild-wasm from esm.sh -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@vizdom/vizdom-ts-web": "https://esm.sh/@vizdom/vizdom-ts-web@latest",
+      "esbuild-wasm": "https://esm.sh/esbuild-wasm@0.18.20"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- container for the rendered SVG -->
+  <div id="viz">Loading graph…</div>
+
+  <!-- your Vizdom TypeScript code -->
+  <script id="viz-code" type="text/typescript" lang="ts">
+    import { DotParser } from "@vizdom/vizdom-ts-web";
+
+    /** 
+     * Parse a DOT string, layout it with Vizdom, and inject as SVG 
+     */
+    export async function renderViz(dot: string, containerId: string) {
+      const parser = new DotParser();
+      const dotGraph = parser.parse(dot);
+      const directed = dotGraph.to_directed();
+      const positioned = directed.layout();
+      const svg = positioned.to_svg().to_string();
+      document.getElementById(containerId)!.innerHTML = svg;
+    }
+    
+    export function renderIn(id:string){
+      renderViz(`digraph {
+           ModuleA -> ModuleB;
+           ModuleB -> ModuleC;
+           ModuleC -> ModuleA;
+         }`,id)
+    }
+  </script>
+
+  <!--typescript loader and compiler-->
+  <script type="module">
+    import esbuild from "esbuild-wasm";
+    let initialized = false;
+    const a = await loadTypescript({ id: "viz-code" })
+    a.renderIn("viz")
+
+    async function loadTypescript({ id , url }) {
+      // Initialize esbuild
+      let source = ""
+      if (id) {
+        source = document.getElementById(id).textContent;
+      } else if(url){
+        //Fetch and transpile TypeScript file
+        //url:"./Spreadsheet.tsx"
+        const response = await fetch(url);
+        if (!response.ok) {
+          console.error(`Failed to fetch ${url}`);
+          return;
+        }
+        source = await response.text();
+      }else{
+        console.error("No id or url provided")
+        return;
+      }
+      if(!initialized){
+        initialized = true;
+        await esbuild.initialize({
+          wasmURL: "https://esm.sh/esbuild-wasm@0.18.20/esbuild.wasm"
+        });
+      }
+      const { code } = await esbuild.transform(source, {
+        loader: "tsx",
+        target: "esnext"
+      });
+      // Convert transpiled TypeScript to a JavaScript module
+      const blob = new Blob([code], { type: "application/javascript" });
+      const moduleUrl = URL.createObjectURL(blob);
+      return import(moduleUrl)
+    }
+  </script>
+</body>
+</html>
