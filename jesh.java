@@ -1,6 +1,8 @@
-#!/usr/bin/env jbang
-//JAVA 21
+//#!/usr/bin/env jbang
+//JAVA 17
+//DEPS org.fusesource.jansi:jansi:2.4.0
 
+package com.namekis.jesh;
 import java.io.*;
 import java.net.URI;
 import java.awt.Desktop;
@@ -68,7 +70,7 @@ class Shell {
     String lastPipeOutput = "";
     boolean ignoreError = false;
 
-    Shell(LogLevelLevelOrCode lvl, Map<String,String> env) {
+    Shell(Object lvl, Map<String,String> env) {
         this.logLevel = (lvl instanceof LogLevel) ? (LogLevel)lvl : LogLevel.from((LogLevelCode)lvl);
         this.env = env;
         registerDefaults();
@@ -117,36 +119,54 @@ class Shell {
 
     // --- run external commands with simple pipe support
     String runShellCommand(String cmd, String prefix) throws Exception {
-        List<String> segments = Arrays.stream(cmd.split("\\|"))
-                                      .map(String::trim).collect(Collectors.toList());
-        String piped = null;
-        for (int i=0;i<segments.size();i++) {
-            String seg = segments.get(i);
-            String[] args = seg.split("\\s+");
-            String out;
-            if (registry.has(args[0])) {
-                out = registry.get(args[0]).run(seg, env, piped==null?"":piped);
-            } else {
-                ProcessBuilder pb = new ProcessBuilder(args);
-                pb.environment().putAll(env);
-                if (piped!=null) {
-                    Process p = pb.start();
-                    try(var w = p.getOutputStream()) {
-                        w.write(piped.getBytes());
-                    }
-                    out = new String(p.getInputStream().readAllBytes()).trim();
-                    p.waitFor();
-                } else {
-                    Process p = pb.start();
-                    out = new String(p.getInputStream().readAllBytes()).trim();
-                    p.waitFor();
-                }
-            }
-            piped = out;
-        }
-        lastPipeOutput = (piped==null?"":piped).trim();
-        return lastPipeOutput;
-    }
+      List<String> segments = Arrays.stream(cmd.split("\\|"))
+                                    .map(String::trim)
+                                    .collect(Collectors.toList());
+      String piped = null;
+      for (String seg : segments) {
+          String[] args = seg.split("\\s+");
+          String out;
+          if (registry.has(args[0])) {
+              // internal command
+              out = registry.get(args[0]).run(seg, env, piped == null ? "" : piped);
+          } else {
+              // external command
+              ProcessBuilder pb = new ProcessBuilder(args);
+              pb.environment().putAll(env);
+              Process p = pb.start();
+
+              if (piped != null) {
+                  try (var w = p.getOutputStream()) {
+                      w.write(piped.getBytes());
+                  }
+              }
+
+              // read both stdout and stderr
+              String stdOut = new String(p.getInputStream().readAllBytes()).trim();
+              String stdErr = new String(p.getErrorStream().readAllBytes()).trim();
+              int exitCode = p.waitFor();
+
+              // print stdout if any
+              if (!stdOut.isEmpty()) {
+                  for (var line : stdOut.split("\\R")) {
+                      System.out.println(prefix + Clr.green("out> ") + line);
+                  }
+              }
+              // on error, print stderr with err> and abort
+              if (exitCode != 0) {
+                  for (var line : stdErr.split("\\R")) {
+                      System.err.println(prefix + Clr.bold(Clr.red("err> ")) + line);
+                  }
+                  throw new RuntimeException("Command failed (" + exitCode + "): " + seg);
+              }
+              out = stdOut;
+          }
+          piped = out;
+          lastPipeOutput = piped == null ? "" : piped;
+      }
+      return lastPipeOutput;
+  }
+
 
     // --- variable & command interpolation
     String interpolate(String text) throws Exception {
@@ -204,18 +224,23 @@ class Shell {
 }
 
 public class jesh {
-    public static void main(String[] args) throws Exception {
-        LogLevel lvl = LogLevel.INFO;
-        Map<String,String> env = new HashMap<>(System.getenv());
-        Shell shell = new Shell(lvl, env);
+  public static void main(String[] args) throws Exception {
+    org.fusesource.jansi.AnsiConsole.systemInstall();
+    try{
+      LogLevel lvl = LogLevel.INFO;
+      Map<String,String> env = new HashMap<>(System.getenv());
+      Shell shell = new Shell(lvl, env);
 
-        String script;
-        if (args.length>0) {
-            script = String.join(" ", args);
-        } else {
-            script = new BufferedReader(new InputStreamReader(System.in))
-                .lines().collect(Collectors.joining("\n"));
-        }
-        shell.shellScript(script, 0);
+      String script;
+      if (args.length>0) {
+          script = String.join(" ", args);
+      } else {
+          script = new BufferedReader(new InputStreamReader(System.in))
+              .lines().collect(Collectors.joining("\n"));
+      }
+      shell.shellScript(script, 0);
+    }finally{
+      org.fusesource.jansi.AnsiConsole.systemUninstall();
     }
+  }
 }
