@@ -26,7 +26,6 @@ public class NcduWeb {
   static final Lock cacheLock = new ReentrantLock();
 
   public static void main(String[] args) throws IOException {
-    // seed initial file
     if (args.length > 0) {
       Path src = Paths.get(args[0]);
       if (Files.exists(src) && Files.isRegularFile(src)) {
@@ -41,7 +40,6 @@ public class NcduWeb {
     var app = Javalin.create(cfg -> cfg.plugins.enableDevLogging()).start(7000);
     app.before(ctx -> System.out.println(ctx.method() + " " + ctx.path()));
 
-    // home: redirect to first export if exists, else upload page
     app.get("/", ctx -> {
       try (Stream<Path> stream = Files.list(EXPORT_DIR)) {
         Optional<Path> first = stream.filter(Files::isRegularFile).findFirst();
@@ -54,10 +52,8 @@ public class NcduWeb {
       ctx.html(renderIndex());
     });
 
-    // upload
     app.post("/upload", ctx -> handleUpload(ctx, ctx.uploadedFile("f")));
 
-    // browse
     app.get("/{id}", ctx -> {
       String id = ctx.pathParam("id");
       handleBrowse(id, ctx);
@@ -140,8 +136,37 @@ public class NcduWeb {
   }
 
   static String renderBrowsePage(JsonNode root, String id) {
-    // TODO: implement JSON traversal and HTML rendering
-    return "<html><body><h1>Browsing " + id + "</h1></body></html>";
+    JsonNode dir = root.get(3);
+    JsonNode info = dir.get(0);
+    StringBuilder sb = new StringBuilder();
+    sb.append("<!DOCTYPE html><html><head>")
+        .append("<meta name=\"robots\" content=\"noindex,nofollow\">")
+        .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+        .append("<script src=\"https://cdn.tailwindcss.com\"></script>")
+        .append("<title>Browsing ").append(info.get("name").asText()).append("</title>")
+        .append("</head><body class=\"p-6 bg-white text-gray-800\">")
+        .append("<header class=\"mb-6\"><h1 class=\"text-2xl font-bold\">Browsing ")
+        .append(info.get("name").asText()).append("</h1></header>")
+        .append("<main class=\"max-w-3xl mx-auto\">")
+        .append("<table class=\"min-w-full table-auto\"><thead><tr>")
+        .append(
+            "<th>Name</th><th class=\"text-right\">Apparent size</th><th class=\"text-right\">Disk size</th></tr></thead><tbody>");
+    for (int i = 1; i < dir.size(); i++) {
+      JsonNode item = dir.get(i);
+      JsonNode node = item.isArray() ? item.get(0) : item;
+      String name = node.get("name").asText();
+      long asize = node.path("asize").asLong();
+      long dsize = node.path("dsize").asLong();
+      sb.append("<tr><td>")
+          .append(name)
+          .append("</td><td class=\"text-right\">")
+          .append(asize)
+          .append("</td><td class=\"text-right\">")
+          .append(dsize)
+          .append("</td></tr>");
+    }
+    sb.append("</tbody></table></main></body></html>");
+    return sb.toString();
   }
 
   static class CacheEntry {
