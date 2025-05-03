@@ -1,105 +1,103 @@
 #!/usr/bin/env deno run --allow-net --allow-read --allow-write
 
 /**
- * merge_params_full.ts
- *
  * Merge Modbus params from JSON/TSV sources output a full Param TSV.
  */
 
 import { Command } from "https://deno.land/x/cliffy@v0.25.7/command/mod.ts";
-import {
-  yellow,
-  cyan,
-  green,
-} from "https://deno.land/std@0.192.0/fmt/colors.ts";
+import { yellow, cyan, green } from "https://deno.land/std@0.192.0/fmt/colors.ts";
 
 //
 // ——— JSON import schema types ———
 //
 
 /** Allowed Modbus function codes (JSON schema enum) */
-export type FunctionCode = 1 | 2 | 3 | 4 | 5 | 6 | 15 | 16;
+export type FunctionCode = 1 | 2 | 3 | 4 | 5 | 6 | 15 | 16;                    // 3=Read Holding, 4=Read Input, etc.
 
-/** Allowed data types in imported JSON (JSON schema enum) */
+/** Allowed data types in imported JSON */
 export type JsonDataType =
-  | "int16"
-  | "uint16"
-  | "int32"
-  | "uint32"
-  | "int64"
-  | "uint64"
-  | "float"
-  | "double"
-  | "string"
-  | "boolean";
+  | "int16" | "uint16" | "int32" | "uint32"
+  | "int64" | "uint64" | "float" | "double"
+  | "string" | "boolean";                                                      // as per JSON schema
 
-/** Access modes for registers (JSON schema enum) */
-export type AccessMode = "read" | "write" | "read/write";
+/** Access modes for registers */
+export type AccessMode = "read" | "write" | "read/write";                      // as per JSON schema
 
-/** Single register definition as per import JSON schema */
+/** Single register definition from JSON */
 export interface RegisterEntry {
-  name: string;
-  description: string;
-  function_codes: FunctionCode[];
-  size?: number;
-  data_type: JsonDataType;
-  unit: string;
-  access: AccessMode;
-  scaling_factor?: number;
-  scaling_offset?: number;
+  name: string;                   // JSON “name”
+  description: string;            // JSON “description”
+  function_codes: FunctionCode[]; // JSON “function_codes”
+  size?: number;                  // JSON “size”
+  data_type: JsonDataType;        // JSON “data_type”
+  unit: string;                   // JSON “unit”
+  access: AccessMode;             // JSON “access”
+  scaling_factor?: number;        // JSON “scaling_factor”
+  scaling_offset?: number;        // JSON “scaling_offset”
 }
 
-/** Full set of register definitions keyed by Modbus offset */
+/** Full set of register definitions keyed by offset */
 export type RegisterDefinitions = Record<string, RegisterEntry>;
 
 //
 // ——— Union types for Param fields ———
 //
 
-/** Access level: User Installer Service */
-export type Level = "U" | "I" | "S";
+
+export type Level = "U" | "I" | "S";                                          // User / Installer / Service
 
 /** Modbus register type */
-export type ModbusRegisterType = "coil" | "discrete" | "holding" | "input";
+export type ModbusRegisterType = "coil" | "discrete" | "holding" | "input" | "unknown";    // based on function codes
 
 /** Home Assistant data type */
-export type DataType = "float32" | "uint16" | "int16" | "uint32";
+export type DataType = "float32" | "uint16" | "int16" | "uint32";              // for YAML output
 
+//
+// ——— Internal raw & final types ———
+//
+
+/** Raw input row from JSON or TSV */
 interface RawParam {
-  offset: number;
-  description: string;
-  unit: string;
-  rawDataType: string;
-  name?: string;
-  scaling_factor?: number;
-  scaling_offset?: number;
+  offset: number;             // Modbus offset
+  description: string;        // human-readable description
+  unit: string;               // measurement unit
+  rawDataType: string;        // JSON/TSV data_type
+  functionCodes?: FunctionCode[]; // from JSON, if available
+  name?: string;              // optional base name
+  scaling_factor?: number;    // optional
+  scaling_offset?: number;    // optional
 }
 
+/** Complete Param record matching Java ModbusParam */
 export interface Param {
-  param: string;
-  group: string;
-  level: Level;
-  name: string;
-  description: string;
-  values: string;
-  defaultValue: string;
-  minValue: string;
-  maxValue: string;
-  remarks: string;
-  unit: string;
-  step: string;
-  precision: string;
-  scale: string;
-  offset: string;
-  value: string;
-  type: ModbusRegisterType;
-  address: number;
-  dataType: DataType;
-  modbusValue: string;
+  param: string;              // e.g. "P40069"
+  group: string;              // parameter group, unused here
+  level: Level;               // access level, default "U"
+  name: string;               // snake_cased name
+  description: string;        // human description
+  values: string;             // enumerated values
+  defaultValue: string;       // default setting
+  minValue: string;           // minimum allowed
+  maxValue: string;           // maximum allowed
+  remarks: string;            // extra notes
+  unit: string;               // e.g. "A"
+  step: string;               // increment step
+  precision: string;          // decimal precision
+  scale: string;              // scale factor
+  offset: string;             // scale offset
+  value: string;              // current scaled value
+  type: ModbusRegisterType;   // determined from functionCodes
+  address: number;            // Modbus register address
+  dataType: DataType;         // HA data type
+  modbusValue: string;        // raw register value
 }
 
 /** CLI source specification */
 type SourceSpec = { type: "json" | "simple-tsv" | "full-tsv"; src: string };
+
+//
+// ——— Business logic ———
+//
 
 async function mergeParams(
   sources: SourceSpec[],
@@ -114,31 +112,43 @@ async function mergeParams(
     if (logLevel === "debug") console.debug(`  • ${type} → ${src}`);
     raws.push(type === "json" ? await readJson(src) : await readTsv(src));
   }
+
   const mergedRaw = mergeRawParams(raws);
   if (logLevel === "debug") console.debug(cyan(`🔗 Merged to ${mergedRaw.length} unique params`));
 
-  const params: Param[] = mergedRaw.map(r => ({
-    param:           `P${r.offset}`,
-    group:           "",
-    level:           "U",
-    name:            makeName(r),
-    description:     r.description,
-    values:          "",
-    defaultValue:    "",
-    minValue:        "",
-    maxValue:        "",
-    remarks:         "",
-    unit:            r.unit,
-    step:            "",
-    precision:       "",
-    scale:           r.scaling_factor?.toString() || "",
-    offset:          r.scaling_offset?.toString() || "",
-    value:           "",
-    type:            "holding",
-    address:         r.offset,
-    dataType:        mapDataType(r.rawDataType),
-    modbusValue:     ""
-  }));
+  const params: Param[] = mergedRaw.map(r => {
+    // determine register type
+    const codes = r.functionCodes ?? [];
+    const regType: ModbusRegisterType =
+      codes.includes(1) ? "coil" :
+      codes.includes(2) ? "discrete" :
+      codes.includes(3) ? "holding" :
+      codes.includes(4) ? "input" :
+      /* default/implies read holding */ "unknown";
+
+    return {
+      param:         `P${r.offset}`,
+      group:         "",
+      level:         "U",
+      name:          makeName(r),
+      description:   r.description,
+      values:        "",
+      defaultValue:  "",
+      minValue:      "",
+      maxValue:      "",
+      remarks:       "",
+      unit:          r.unit,
+      step:          "",
+      precision:     "",
+      scale:         r.scaling_factor?.toString() || "",
+      offset:        r.scaling_offset?.toString() || "",
+      value:         "",
+      type:          regType,
+      address:       r.offset,
+      dataType:      mapDataType(r.rawDataType),
+      modbusValue:   ""
+    };
+  });
 
   const header = [
     "param","group","level","name","description","values","defaultValue",
@@ -177,6 +187,7 @@ async function readJson(source: string): Promise<RawParam[]> {
       description:    e.description,
       unit:           e.unit,
       rawDataType:    e.data_type,
+      functionCodes:  e.function_codes,
       name:           e.name,
       scaling_factor: e.scaling_factor,
       scaling_offset: e.scaling_offset
@@ -241,11 +252,11 @@ await new Command()
   .description("Merge Fronius Modbus params and output full Param TSV")
   .option("-n, --dry-run",           "print TSV without writing")
   .option("--log-level <level>",     "log level: debug|info|warn|error|quiet", { default: "info" })
-  .option("--from-json <src:string>",        "JSON URL or file",   { collect: true })
-  .option("--from-simple-tsv <file:string>", "simple TSV file",    { collect: true })
-  .option("--from-full-tsv <file:string>",   "full TSV file",      { collect: true })
+  .option("--from-json <src:string>",        "JSON URL or file",    { collect: true })
+  .option("--from-simple-tsv <file:string>", "simple TSV file",     { collect: true })
+  .option("--from-full-tsv <file:string>",   "full TSV file",       { collect: true })
   .option("--slave <id:number>",     "Modbus slave ID",      { default: 1 })
-  .option("--output <file:string>",  "Output TSV file; omit to print to stdout")
+  .option("--output <file:string>",  "Output TSV file; omit to print")
   .action(function (options) {
     if (
       !options.fromJson?.length &&
