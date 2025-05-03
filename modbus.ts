@@ -6,6 +6,7 @@
 
 import { Command } from "https://deno.land/x/cliffy@v0.25.7/command/mod.ts";
 import { yellow, cyan, green } from "https://deno.land/std@0.192.0/fmt/colors.ts";
+import { stringify as yamlStringify } from "jsr:@std/yaml";
 
 //
 // ——— JSON import schema types ———
@@ -95,17 +96,21 @@ export interface Param {
 /** CLI source specification */
 type SourceSpec = { type: "json" | "simple-tsv" | "full-tsv"; src: string };
 
-//
-// ——— Business logic ———
-//
+interface CLIOptions {
+  fromJson?:      string[];    // --from-json
+  fromSimpleTsv?: string[];    // --from-simple-tsv
+  fromFullTsv?:   string[];    // --from-full-tsv
+  slave:          number;      // --slave
+  output?:        string;      // --output
+  dryRun:         boolean;     // --dry-run
+  logLevel:       string;      // --log-level
+  haHost:         string;      // --ha-host
+  haPort:         number;      // --ha-port
+  toHomeassist?:  string;      // --to-homeassist
+}
 
-async function mergeParams(
-  sources: SourceSpec[],
-  slave: number,
-  outputFile?: string,
-  dryRun = false,
-  logLevel = "info"
-) {
+async function mergeParams(sources: SourceSpec[],options: CLIOptions) {
+  const { slave, output, dryRun, logLevel, haHost, haPort, toHomeassist } = options;
   if (logLevel === "debug") console.debug(cyan("📥 Reading sources in order…"));
   const raws: RawParam[][] = [];
   for (const { type, src } of sources) {
@@ -167,11 +172,33 @@ async function mergeParams(
   if (dryRun) {
     console.log(yellow("⚠️  Dry run — printing TSV without writing."));
     console.log(tsv);
-  } else if (outputFile) {
-    await Deno.writeTextFile(outputFile, tsv);
-    console.log(green(`✅ Saved ${params.length} params to ${outputFile}`));
+  } else if (output) {
+    await Deno.writeTextFile(output, tsv);
+    console.log(green(`✅ Saved ${params.length} params to ${output}`));
   } else {
     console.log(tsv);
+  }
+  // ⎯⎯⎯ generate Home Assistant Modbus YAML ⎯⎯⎯
+  if (toHomeassist) {
+    const yamlObj = {
+      modbus: [{
+        name: "fronius_hub",
+        type: "tcp",
+        host: haHost,
+        port: haPort,
+        sensors: params.map(p => ({
+          name: p.name,
+          slave,
+          input_type: "holding",
+          address: p.address,
+          data_type: p.dataType,
+          unit_of_measurement: p.unit,
+        })),
+      }],
+    };
+    const yamlStr = yamlStringify(yamlObj);
+    await Deno.writeTextFile(toHomeassist, yamlStr);
+    console.log(green(`✅ Saved Home Assistant YAML to ${toHomeassist}`));
   }
 }
 
@@ -257,6 +284,10 @@ await new Command()
   .option("--from-full-tsv <file:string>",   "full TSV file",       { collect: true })
   .option("--slave <id:number>",     "Modbus slave ID",      { default: 1 })
   .option("--output <file:string>",  "Output TSV file; omit to print")
+  // ⎯⎯⎯ add Home Assistant YAML flags ⎯⎯⎯
+  .option("--ha-host <host:string>",    "Home Assistant Modbus host", { default: "192.168.1.45" })
+  .option("--ha-port <port:number>",    "Home Assistant Modbus port", { default: 502 })
+  .option("--to-homeassist <file:string>", "Write HA modbus YAML to this file")
   .action(function (options) {
     if (
       !options.fromJson?.length &&
@@ -278,12 +309,6 @@ await new Command()
           break;
       }
     }
-    return mergeParams(
-      sources,
-      options.slave,
-      options.output,
-      options.dryRun,
-      options.logLevel
-    );
+    return mergeParams(sources, options as CLIOptions);
   })
   .parse(Deno.args);
