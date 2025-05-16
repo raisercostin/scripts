@@ -1,11 +1,7 @@
 #!/usr/bin/env deno run --allow-read --allow-write
 
 import { Command } from "https://deno.land/x/cliffy@v0.25.7/command/mod.ts";
-import {
-  join,
-  normalize,
-  dirname,
-} from "https://deno.land/std@0.160.0/path/mod.ts";
+import { dirname, join, normalize } from "https://deno.land/std@0.160.0/path/mod.ts";
 import { DOMParser } from "https://deno.land/x/deno_dom/deno-dom-wasm.ts";
 
 function logProgress(message: string) {
@@ -19,6 +15,7 @@ interface CliOptions {
   showEdgeToExternal: boolean;
   showEdgeFromExternal: boolean;
   out: string;
+  filterArtifactId: string[];
 }
 
 type Edge = {
@@ -28,16 +25,6 @@ type Edge = {
   isSrcInternal: boolean;
   isDstInternal: boolean;
 };
-// … your imports and type definitions above …
-
-interface CliOptions {
-  workdir: string;
-  group: string[];
-  maxDepth: number;
-  showEdgeToExternal: boolean;
-  showEdgeFromExternal: boolean;
-  out: string;
-}
 
 type RawProj = {
   groupId: string;
@@ -56,7 +43,13 @@ type Storage = {
   edgeList: Edge[];
 };
 
-// ── Phase 1: crawl filesystem and collect raw POM data ──────────────────────
+function matchesWildcard(name: string, patterns: string[]): boolean {
+  return patterns.some(pat => {
+    const regex = new RegExp("^" + pat.replace(/\*/g, ".*") + "$");
+    return regex.test(name);
+  });
+}
+
 async function collectRawProjects(
   baseDir: string,
   maxDepth: number,
@@ -95,7 +88,6 @@ async function collectRawProjects(
           deps: [],
         };
 
-        // collect modules
         for (const m of doc.querySelectorAll("project > modules > module")) {
           const modDir = join(dir, m.textContent.trim());
           const modPom = join(modDir, "pom.xml");
@@ -113,7 +105,6 @@ async function collectRawProjects(
           }
         }
 
-        // collect dependencies
         for (const dep of doc.querySelectorAll("project > dependencies > dependency")) {
           if (dep.closest("dependencyManagement")) continue;
           rp.deps.push({
@@ -132,19 +123,16 @@ async function collectRawProjects(
   return { raw, discoveredGroups };
 }
 
-// ── Phase 2: decide which group-prefixes to use ────────────────────────────
 function determineGroupPrefixes(
-  userGroups: string[],
+  user: string[],
   discovered: Set<string>,
 ): string[] {
-  return userGroups?.length > 0 ? userGroups : Array.from(discovered);
+  return user.length > 0 ? user : Array.from(discovered);
 }
 
-// ── Phase 3: init empty storage for replay ─────────────────────────────────
 function initializeStorage(groups: string[]): Storage {
   const deps: Record<string, Set<string>> = {};
   groups.forEach(g => (deps[g] = new Set()));
-
   return {
     deps,
     projectModules: {},
@@ -154,15 +142,21 @@ function initializeStorage(groups: string[]): Storage {
   };
 }
 
-// ── Phase 4: replay raw data into our storage, applying filters ───────────
 function processRawProjects(
   raw: RawProj[],
   groupPrefixes: string[],
   storage: Storage,
+  filterPatterns: string[],
 ) {
   const { deps, projectModules, projectScm, projToGroup, edgeList } = storage;
 
   for (const rp of raw) {
+    if (filterPatterns.length > 0 &&
+        !matchesWildcard(rp.artifactId, filterPatterns)) {
+      logProgress(`Filtering out project: ${rp.artifactId}`);
+      continue;
+    }
+
     const { groupId, artifactId, scm, parent, modules, deps: rdeps } = rp;
     const isProjInt = groupPrefixes.some(p => groupId.startsWith(p));
 
@@ -185,6 +179,11 @@ function processRawProjects(
     }
 
     for (const m of modules) {
+      if (filterPatterns.length > 0 &&
+          !matchesWildcard(m.artifactId, filterPatterns)) {
+        logProgress(`Filtering out module: ${m.artifactId}`);
+        continue;
+      }
       projectModules[artifactId] ??= new Set();
       projectModules[artifactId].add(m.artifactId);
       if (m.scm) projectScm[m.artifactId] = m.scm;
@@ -198,6 +197,11 @@ function processRawProjects(
     }
 
     for (const d of rdeps) {
+      if (filterPatterns.length > 0 &&
+          !matchesWildcard(d.artifactId, filterPatterns)) {
+        logProgress(`Filtering out dependency: ${d.artifactId}`);
+        continue;
+      }
       const depInt = groupPrefixes.some(p => d.groupId.startsWith(p));
       if (isProjInt || depInt) {
         if (depInt) {
@@ -216,11 +220,7 @@ function processRawProjects(
   }
 }
 
-// ── Phase 5: emit or write out the DSL ─────────────────────────────────────
-async function outputDsl(
-  dsl: string,
-  outPath: string,
-) {
+async function outputDsl(dsl: string, outPath: string) {
   if (!outPath) {
     console.log(dsl);
   } else {
@@ -232,33 +232,36 @@ async function outputDsl(
   }
 }
 
-// ── Main orchestrator ─────────────────────────────────────────────────────
 async function extractDeps(opts: CliOptions) {
   const baseDir = normalize(opts.workdir);
   logProgress(`Scanning '${baseDir}' for pom.xml (maxDepth=${opts.maxDepth})…`);
 
-  // 1. collect raw POM data
   const { raw, discoveredGroups } = await collectRawProjects(
     baseDir,
     opts.maxDepth,
   );
 
-  // 2. decide groups
-  const groupPrefixes = determineGroupPrefixes(opts.group, discoveredGroups);
+  const groupPrefixes = determineGroupPrefixes(
+    opts.group,
+    discoveredGroups,
+  );
   logProgress(`Using group prefixes: ${groupPrefixes.join(", ")}`);
 
-  // 3. init storage
   const storage = initializeStorage(groupPrefixes);
 
-  // 4. process raw data
-  processRawProjects(raw, groupPrefixes, storage);
-
-  logProgress(
-    `Graph: ${Object.keys(storage.projToGroup).length} projects, ` +
-    `${storage.edgeList.length} edges.`
+  processRawProjects(
+    raw,
+    groupPrefixes,
+    storage,
+    opts.filterArtifactId,
   );
 
-  // 5. build and output DSL
+  logProgress(
+    `Graph has ${Object.keys(storage.projToGroup).length} projects and ${
+      storage.edgeList.length
+    } edges.`,
+  );
+
   const dsl = buildDsl(
     storage.deps,
     storage.projectModules,
@@ -266,12 +269,13 @@ async function extractDeps(opts: CliOptions) {
     storage.edgeList,
     storage.projToGroup,
     groupPrefixes,
-    { showEdgeToExternal: opts.showEdgeToExternal,
-      showEdgeFromExternal: opts.showEdgeFromExternal },
+    { showEdgeToExternal: opts.showEdgeToExternal, showEdgeFromExternal: opts.showEdgeFromExternal },
   );
 
   await outputDsl(dsl, opts.out);
 }
+
+// ── CLI setup ───────────────────────────────────────────────────────────────
 
 function buildDsl(
   deps: Record<string, Set<string>>,
@@ -373,25 +377,16 @@ function buildDsl(
       }
     }
     `.replaceAll(/^\s{4}/gm, "");
-}
-
-await new Command()
+}await new Command()
   .name("mvn2c4 Converter")
   .version("0.1")
-  .description(
-    "Convert pom.xml trees into a C4-like DSL with projects/modules/subprojects."
-  )
+  .description("Convert pom.xml trees into a C4-like DSL")
   .option("--workdir <dir:string>", "Working directory", { default: "." })
-  .option("--group <prefix:string>", "Group prefix (can repeat)", {
-    collect: true
-  })
+  .option("--group <prefix:string>", "Group prefix (repeatable)", { collect: true, default: [] })
   .option("--max-depth <n:number>", "Recursion depth", { default: 2 })
-  .option("--showEdgeToExternal", "Edges to external", { default: false })
-  .option("--showEdgeFromExternal", "Edges from external", { default: false })
-  .option(
-    "--out <file:string>",
-    "Write DSL to this file (creates directories)",
-    { default: "" }
-  )
+  .option("--showEdgeToExternal", "Include edges to external", { default: false })
+  .option("--showEdgeFromExternal", "Include edges from external", { default: false })
+  .option("--filterArtifactId <pattern:string>", "Filter artifact IDs (wildcard)", { collect: true, default: [] })
+  .option("--out <file:string>", "Output file (creates dirs)", { default: "" })
   .action((opts: CliOptions) => extractDeps(opts))
   .parse(Deno.args);
