@@ -1,7 +1,11 @@
-#!/usr/bin/env deno run --allow-read
+#!/usr/bin/env deno run --allow-read --allow-write
 
 import { Command } from "https://deno.land/x/cliffy@v0.25.7/command/mod.ts";
-import { join, normalize, sep } from "https://deno.land/std@0.160.0/path/mod.ts";
+import {
+  join,
+  normalize,
+  dirname,
+} from "https://deno.land/std@0.160.0/path/mod.ts";
 import { DOMParser } from "https://deno.land/x/deno_dom/deno-dom-wasm.ts";
 
 function logProgress(message: string) {
@@ -14,6 +18,7 @@ interface CliOptions {
   maxDepth: number;
   showEdgeToExternal: boolean;
   showEdgeFromExternal: boolean;
+  out: string;
 }
 
 type Edge = {
@@ -30,6 +35,7 @@ async function extractDeps(opts: CliOptions) {
     maxDepth,
     showEdgeToExternal,
     showEdgeFromExternal,
+    out,
   } = opts;
 
   const baseDir = normalize(workdir);
@@ -60,24 +66,23 @@ async function extractDeps(opts: CliOptions) {
         if (!doc) continue;
 
         // coordinates
-        const projectGroupId = doc
-          .querySelector("project > groupId")?.textContent.trim()
-          ?? doc
-            .querySelector("project > parent > groupId")
-            ?.textContent.trim()
-          ?? "";
-        const projectArtifact = doc
-          .querySelector("project > artifactId")?.textContent.trim()
-          ?? "";
+        const projectGroupId =
+          doc.querySelector("project > groupId")?.textContent.trim() ??
+          doc.querySelector("project > parent > groupId")?.textContent.trim() ??
+          "";
+        const projectArtifact =
+          doc.querySelector("project > artifactId")?.textContent.trim() ?? "";
 
         projToGroup[projectArtifact] = projectGroupId;
 
         // add to deps if internal
-        const isProjectInternal = groupPrefixes.some(p =>
+        const isProjectInternal = groupPrefixes.some((p) =>
           projectGroupId.startsWith(p)
         );
         if (isProjectInternal) {
-          for (const p of groupPrefixes.filter(pr => projectGroupId.startsWith(pr))) {
+          for (const p of groupPrefixes.filter((pr) =>
+            projectGroupId.startsWith(pr)
+          )) {
             deps[p].add(projectArtifact);
           }
         }
@@ -94,7 +99,7 @@ async function extractDeps(opts: CliOptions) {
         if (parentGidEl && parentAidEl) {
           const parentGid = parentGidEl.textContent.trim();
           const parentAid = parentAidEl.textContent.trim();
-          const parentInternal = groupPrefixes.some(p =>
+          const parentInternal = groupPrefixes.some((p) =>
             parentGid.startsWith(p)
           );
           edges.push({
@@ -118,16 +123,16 @@ async function extractDeps(opts: CliOptions) {
               const modXml = await Deno.readTextFile(modPom);
               const modDoc = new DOMParser().parseFromString(
                 modXml,
-                "text/html",
+                "text/html"
               );
               if (!modDoc) throw new Error();
               const mgid =
                 modDoc.querySelector("project > groupId")?.textContent.trim() ??
                 projectGroupId;
               const maid =
-                modDoc.querySelector("project > artifactId")
-                  ?.textContent.trim() ??
-                "";
+                modDoc
+                  .querySelector("project > artifactId")
+                  ?.textContent.trim() ?? "";
               projToGroup[maid] = mgid;
               projectModules[projectArtifact].add(maid);
               // collect SCM for module if present
@@ -152,23 +157,24 @@ async function extractDeps(opts: CliOptions) {
 
         // dependencies (skip dependencyManagement)
         for (const dep of doc.querySelectorAll(
-          "project > dependencies > dependency",
+          "project > dependencies > dependency"
         )) {
           if (dep.closest("dependencyManagement")) {
             logProgress("Ignoring dependency in <dependencyManagement>");
             continue;
           }
-          const gid = dep
-            .querySelector("groupId")
-            ?.textContent.trim() ?? projectGroupId;
+          const gid =
+            dep.querySelector("groupId")?.textContent.trim() ?? projectGroupId;
           const aid = dep.querySelector("artifactId")?.textContent.trim() ?? "";
-          const scope = dep.querySelector("scope")?.textContent.trim() ??
-            "compile";
+          const scope =
+            dep.querySelector("scope")?.textContent.trim() ?? "compile";
 
-          const depInternal = groupPrefixes.some(p => gid.startsWith(p));
+          const depInternal = groupPrefixes.some((p) => gid.startsWith(p));
           if (isProjectInternal || depInternal) {
             if (depInternal) {
-              for (const p of groupPrefixes.filter(pr => gid.startsWith(pr))) {
+              for (const p of groupPrefixes.filter((pr) =>
+                gid.startsWith(pr)
+              )) {
                 deps[p].add(aid);
               }
               logProgress(`Found dependency: ${gid} -> ${aid} [${scope}]`);
@@ -197,20 +203,29 @@ async function extractDeps(opts: CliOptions) {
   logProgress(
     `Graph has ${Object.keys(projToGroup).length} projects, ${
       edges.length
-    } edges.`,
+    } edges.`
   );
 
-  console.log(
-    buildDsl(
-      deps,
-      projectModules,
-      projectScm,
-      edges,
-      projToGroup,
-      groupPrefixes,
-      { showEdgeToExternal, showEdgeFromExternal },
-    ),
+  const dsl = buildDsl(
+    deps,
+    projectModules,
+    projectScm,
+    edges,
+    projToGroup,
+    groupPrefixes,
+    { showEdgeToExternal, showEdgeFromExternal }
   );
+
+  if (opts.out) {
+    // ensure parent directories exist
+    const outPath = normalize(opts.out);
+    const dir = dirname(outPath);
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(outPath, dsl);
+    console.log(`DSL written to ${outPath}`);
+  } else {
+    console.log(dsl);
+  }
 }
 
 function buildDsl(
@@ -220,13 +235,21 @@ function buildDsl(
   edges: Edge[],
   projToGroup: Record<string, string>,
   groupPrefixes: string[],
-  options: { showEdgeToExternal: boolean; showEdgeFromExternal: boolean },
+  options: { showEdgeToExternal: boolean; showEdgeFromExternal: boolean }
 ): string {
   const { showEdgeToExternal, showEdgeFromExternal } = options;
   const alias = (g: string) => g.split(".").pop()!;
 
   // ── specification
-  const rels = ["compile", "runtime", "provided", "test", "pom", "module", "parent"];
+  const rels = [
+    "compile",
+    "runtime",
+    "provided",
+    "test",
+    "pom",
+    "module",
+    "parent",
+  ];
   const spec = [
     "specification {",
     "  element libsSystem",
@@ -234,18 +257,20 @@ function buildDsl(
     "  element project",
     "  element module",
     "  element artifact",
-    ...rels.map(r => `  relationship ${r}`),
+    ...rels.map((r) => `  relationship ${r}`),
     "  tag module",
     "}",
   ];
 
   // ── model
-  const blocks = groupPrefixes.map(pref => {
+  const blocks = groupPrefixes.map((pref) => {
     const grp = alias(pref);
     const lines = [`    ${grp} = group '${pref}' {`];
 
     // each project in this prefix
-    for (const proj of [...new Set(Object.keys(projectModules).concat(Object.keys(projectScm)))] ) {
+    for (const proj of [
+      ...new Set(Object.keys(projectModules).concat(Object.keys(projectScm))),
+    ]) {
       // need full groupId to filter:
       // assume you recorded a map projToGroup[proj] earlier
       if (!projToGroup[proj].startsWith(pref)) continue;
@@ -262,30 +287,29 @@ function buildDsl(
 
     // stand-alone artifacts
     for (const a of [...deps[pref]].sort()) {
-      if(projectModules[a]) continue;
+      if (projectModules[a]) continue;
       lines.push(`      ${a} = artifact`);
     }
 
     lines.push("    }");
-    return lines.join("\n");
+    return lines.join("\n    ");
   });
 
   // ── edges
   const edgeLines = edges
-    .filter(e => {
+    .filter((e) => {
       if (e.isSrcInternal && e.isDstInternal) return true;
       if (e.isSrcInternal && !e.isDstInternal) return showEdgeToExternal;
       if (!e.isSrcInternal && e.isDstInternal) return showEdgeFromExternal;
       return false;
     })
-    .map(e => `    ${e.src} -[${e.scope}]-> ${e.dst} '${e.scope}'`);
+    .map((e) => `    ${e.src} -[${e.scope}]-> ${e.dst} '${e.scope}'`);
 
-  return `
-    ${spec.join("\n")}
+  return `${spec.join("\n")}
     model {
       libsSystem all {
-        ${blocks.join("\n")}
-        ${edgeLines.join("\n")}
+    ${blocks.join("\n    ")}
+    ${edgeLines.join("\n    ")}
       }
     }
 
@@ -303,17 +327,27 @@ function buildDsl(
         include all,all.**
       }
     }
-  `.replaceAll(/^\s{4}/gm, "")
+    `.replaceAll(/^\s{4}/gm, "");
 }
 
 await new Command()
   .name("mvn2c4 Converter")
   .version("0.1")
-  .description("Convert pom.xml trees into a C4-like DSL with projects/modules/subprojects.")
+  .description(
+    "Convert pom.xml trees into a C4-like DSL with projects/modules/subprojects."
+  )
   .option("--workdir <dir:string>", "Working directory", { default: "." })
-  .option("--group <prefix:string>", "Group prefix (can repeat)", { collect: true, required: true })
+  .option("--group <prefix:string>", "Group prefix (can repeat)", {
+    collect: true,
+    required: true,
+  })
   .option("--max-depth <n:number>", "Recursion depth", { default: 2 })
   .option("--showEdgeToExternal", "Edges to external", { default: false })
   .option("--showEdgeFromExternal", "Edges from external", { default: false })
+  .option(
+    "--out <file:string>",
+    "Write DSL to this file (creates directories)",
+    { default: "" }
+  )
   .action((opts: CliOptions) => extractDeps(opts))
   .parse(Deno.args);
