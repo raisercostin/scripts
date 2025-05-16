@@ -1,15 +1,23 @@
 specification {
   element libsSystem
   element group
-  element project
+  element project {
+    notation 'A maven project and could have modules in subdirectories.'
+  }
+  element parent{
+    notation 'A maven parent module that builds several other modules with their own groupId and artifcatId.'
+  }
+  element module{
+    notation 'A maven module is a sub-project of a project.'
+  }
   element artifact
-  element module
   relationship compile
   relationship runtime
   relationship provided
   relationship test
   relationship pom
   relationship war
+  relationship module
 }
 
 model {
@@ -21,16 +29,20 @@ model {
       namek-foo = project
       namek-bar = project
       namek-multimodule = project {
-        module1 = project
-        module2 = project {
-          war = artifact
-          uberjar = artifact
-          jar = artifact
-          src = artifact
-          docs = artifact
-          docker = artifact
-          src -[war]-> war 'war'
+        parent = parent {
+          link http://www.namekis.com
         }
+        parent -[module]-> namek.module1 'module'
+      }
+      module1 = project
+      module2 = project {
+        war = artifact
+        uberjar = artifact
+        jar = artifact
+        src = artifact
+        docs = artifact
+        docker = artifact
+        src -[war]-> war 'war'
       }
     }
     namek-foo -[runtime]-> namek-bar 'runtime'

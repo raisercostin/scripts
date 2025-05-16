@@ -7,6 +7,7 @@ import { DOMParser } from "https://deno.land/x/deno_dom/deno-dom-wasm.ts";
 function logProgress(message: string) {
   console.error(message);
 }
+
 interface CliOptions {
   workdir: string;
   group: string[];
@@ -14,6 +15,14 @@ interface CliOptions {
   showEdgeToExternal: boolean;
   showEdgeFromExternal: boolean;
 }
+
+type Edge = {
+  src: string;
+  dst: string;
+  scope: string;
+  isSrcInternal: boolean;
+  isDstInternal: boolean;
+};
 
 async function extractDeps(opts: CliOptions) {
   const {
@@ -27,24 +36,20 @@ async function extractDeps(opts: CliOptions) {
   const baseDir = normalize(workdir);
   logProgress(`Scanning '${baseDir}' for pom.xml (maxDepth=${maxDepth})…`);
 
-  // prepare storage
+  // storage
   const deps: Record<string, Set<string>> = {};
-  const prefixModules: Record<string, Set<string>> = {};
-  for (const p of groupPrefixes) {
-    deps[p] = new Set();
-    prefixModules[p] = new Set();
-  }
-
-  type Edge = {
-    src: string;
-    dst: string;
-    scope: string;
-    isSrcInternal: boolean;
-    isDstInternal: boolean;
-  };
+  const projectModules: Record<string, Set<string>> = {};
+  const projectSubprojects: Record<string, Set<string>> = {};
+  const projectScm: Record<string, string> = {};
+  const allProjects = new Set<string>();
+  const moduleArtifacts = new Set<string>();
   const edges: Edge[] = [];
 
-  // recurse & parse in one pass
+  for (const p of groupPrefixes) {
+    deps[p] = new Set();
+  }
+
+  // walk & parse
   async function walk(dir: string, depth: number) {
     if (depth > maxDepth) return;
     for await (const e of Deno.readDir(dir)) {
@@ -55,72 +60,70 @@ async function extractDeps(opts: CliOptions) {
         const doc = new DOMParser().parseFromString(xml, "text/html");
         if (!doc) continue;
 
-        // project coordinates
-        const projectGroupId = doc
-          .querySelector("project > groupId")?.textContent.trim()
+        const gid = doc.querySelector("project > groupId")?.textContent.trim()
           ?? doc.querySelector("project > parent > groupId")?.textContent.trim()
           ?? "";
-        const projectArtifact = doc
-          .querySelector("project > artifactId")?.textContent.trim()
-          ?? "";
+        const aid = doc.querySelector("project > artifactId")?.textContent.trim() ?? "";
+        const coord = `${gid}:${aid}`;
+        allProjects.add(aid);
 
-        // modules
+        // record SCM connection
+        const conn = doc.querySelector("project > scm > connection")?.textContent.trim();
+        if (conn) projectScm[aid] = conn;
+
+        // detect modules
         const moduleEls = doc.querySelectorAll("project > modules > module");
-        const projectPrefixes = groupPrefixes.filter(p => projectGroupId.startsWith(p));
-        const isProjectInternal = projectPrefixes.length > 0;
-        if (isProjectInternal) {
-          projectPrefixes.forEach(p => deps[p].add(projectArtifact));
+        if (moduleEls.length) {
+          projectModules[aid] = new Set();
           for (const m of moduleEls) {
-            const modName = m.textContent.trim();
-            projectPrefixes.forEach(p => prefixModules[p].add(modName));
+            const mod = m.textContent.trim();
+            projectModules[aid].add(mod);
+            moduleArtifacts.add(mod);
             edges.push({
-              src: projectArtifact,
-              dst: modName,
+              src: aid,
+              dst: mod,
               scope: "module",
               isSrcInternal: true,
               isDstInternal: true,
             });
-            logProgress(`Found module: ${projectGroupId}:${modName}`);
+            logProgress(`Module: ${coord} → ${mod}`);
           }
+        } else {
+          projectSubprojects[aid] = new Set();
         }
 
-        // dependencies
-        for (const dep of doc.querySelectorAll("dependency")) {
-          // skip dependencyManagement entries
+        // dependencies (skip dependencyManagement)
+        for (const dep of doc.querySelectorAll("project > dependencies > dependency")) {
           if (dep.closest("dependencyManagement")) {
             logProgress("Ignoring dependency in <dependencyManagement>");
             continue;
           }
+          const dg = dep.querySelector("groupId")?.textContent.trim() ?? gid;
+          const da = dep.querySelector("artifactId")?.textContent.trim();
+          const sc = dep.querySelector("scope")?.textContent.trim() ?? "compile";
+          if (!da) continue;
 
-          const gidEl = dep.querySelector("groupId");
-          const aidEl = dep.querySelector("artifactId");
-          const scopeEl = dep.querySelector("scope");
-          const gid = gidEl?.textContent.trim() ?? projectGroupId;
-          if (!aidEl) continue;
-          const aid = aidEl.textContent.trim();
-          const scope = scopeEl?.textContent.trim() ?? "compile";
-
-          const depPrefixes = groupPrefixes.filter(p => gid.startsWith(p));
-          const isDepInternal = depPrefixes.length > 0;
-
-          if (isProjectInternal || isDepInternal) {
-            if (isDepInternal) {
-              depPrefixes.forEach(p => deps[p].add(aid));
-              logProgress(`Found dependency: ${gid} -> ${aid} [${scope}]`);
+          const projInt = groupPrefixes.some(p => gid.startsWith(p));
+          const depInt = groupPrefixes.some(p => dg.startsWith(p));
+          if (projInt || depInt) {
+            if (depInt) {
+              deps[groupPrefixes.find(p => dg.startsWith(p))!].add(da);
+              logProgress(`Dep: ${dg}:${da} [${sc}]`);
             } else {
-              logProgress(`Skipping dependency: ${gid} not in groupPrefixes`);
+              logProgress(`Skipping internal-only logic for ${dg}`);
             }
             edges.push({
-              src: projectArtifact,
-              dst: aid,
-              scope,
-              isSrcInternal: isProjectInternal,
-              isDstInternal: isDepInternal,
+              src: aid,
+              dst: da,
+              scope: sc,
+              isSrcInternal: projInt,
+              isDstInternal: depInt,
             });
           } else {
-            logProgress(`Skipping dependency: ${gid} not in groupPrefixes`);
+            logProgress(`Skipping external dep: ${dg}:${da}`);
           }
         }
+
       } else if (e.isDirectory) {
         await walk(full, depth + 1);
       }
@@ -130,76 +133,78 @@ async function extractDeps(opts: CliOptions) {
   await walk(baseDir, 0);
 
   logProgress(
-    `Graph has ${
-      new Set(edges.flatMap(e => [e.src, e.dst])).size
-    } nodes and ${edges.length} edges.`,
+    `Graph: ${allProjects.size} projects, ${moduleArtifacts.size} modules, ${edges.length} edges.`
   );
 
-  // now build and print the DSL
-  console.log(buildDsl(deps, prefixModules, edges, groupPrefixes, {
-    showEdgeToExternal,
-    showEdgeFromExternal,
-  }));
+  console.log(buildDsl(
+    deps,
+    projectModules,
+    projectSubprojects,
+    projectScm,
+    edges,
+    groupPrefixes,
+    { showEdgeToExternal, showEdgeFromExternal }
+  ));
 }
 
 function buildDsl(
   deps: Record<string, Set<string>>,
-  prefixModules: Record<string, Set<string>>,
-  edges: {
-    src: string;
-    dst: string;
-    scope: string;
-    isSrcInternal: boolean;
-    isDstInternal: boolean;
-  }[],
+  projectModules: Record<string, Set<string>>,
+  projectSubprojects: Record<string, Set<string>>,
+  projectScm: Record<string, string>,
+  edges: Edge[],
   groupPrefixes: string[],
   options: { showEdgeToExternal: boolean; showEdgeFromExternal: boolean },
 ): string {
   const { showEdgeToExternal, showEdgeFromExternal } = options;
-  const alias = (gid: string) => gid.split(".").pop()!;
+  const alias = (g: string) => g.split(".").pop()!;
 
-  // ── specification ─────────────────────────────────────────────────────────
-  const relationships = ["compile", "runtime", "provided", "test", "pom", "module"];
-  const specLines = [
+  // spec
+  const rels = ["compile", "runtime", "provided", "test", "pom", "module"];
+  const spec = [
     "specification {",
     "  element libsSystem",
-    "  element group",
+    "  element project",
     "  element module",
+    "  element subproject",
     "  element artifact",
-    ...relationships.map(r => `  relationship ${r}`),
+    "  element group",
+    ...rels.map(r => `  relationship ${r}`),
     "  tag module",
     "}",
   ];
 
-  // ── model ─────────────────────────────────────────────────────────────────
-  const groupBlocks = groupPrefixes.map(prefix => {
-    const grp = alias(prefix);
+  // model
+  const blocks = groupPrefixes.map(pref => {
+    const grp = alias(pref);
+    const lines = [`    ${grp} = group '${pref}' {`];
 
-    // modules declared in pom or by directory structure
-    // const modules = [...prefixModules[prefix]]
-    //   .sort()
-    //   .map(m => `      ${m} = module`)
-    //   .join("\n");
+    // each project under this prefix
+    for (const [proj, mods] of Object.entries(projectModules)) {
+      if (!proj.startsWith(alias(pref))) continue;
+      const scm = projectScm[proj] ? ` #scm='${projectScm[proj]}'` : "";
+      lines.push(`      ${proj} = project${scm} {`);
+      for (const m of mods) lines.push(`        ${m} = module`);
+      lines.push("      }");
+    }
+    for (const [proj] of Object.entries(projectSubprojects)) {
+      if (!proj.startsWith(alias(pref))) continue;
+      if (projectModules[proj]?.size) continue; // skip modules
+      const scm = projectScm[proj] ? ` #scm='${projectScm[proj]}'` : "";
+      lines.push(`      ${proj} = subproject${scm}`);
+    }
 
-    // regular dependencies
-    const artifacts = [...deps[prefix]]
-      .sort()
-      .map(a => {
-        const tag = prefixModules[prefix].has(a) ? " { #module }" : "";
-        return `      ${a} = artifact${tag}`;
-      })
-      .join("\n");
-      
-    return [
-      `    ${grp} = group '${prefix}' {`,
-      artifacts,
-      "    }",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    // artifacts/dependencies
+    const arts = [...deps[pref]].sort();
+    for (const a of arts) {
+      const tag = projectModules[a] ? " #module" : "";
+      lines.push(`      ${a} = artifact${tag}`);
+    }
+
+    lines.push("    }");
+    return lines.join("\n");
   });
 
-  // ── edge lines ────────────────────────────────────────────────────────────
   const edgeLines = edges
     .filter(e => {
       if (e.isSrcInternal && e.isDstInternal) return true;
@@ -209,17 +214,18 @@ function buildDsl(
     })
     .map(e => `    ${e.src} -[${e.scope}]-> ${e.dst} '${e.scope}'`);
 
-  const modelLines = [
+  const model = [
+    "",
     "model {",
     "  libsSystem all {",
-    ...groupBlocks,
+    ...blocks,
     ...(edgeLines.length ? ["", ...edgeLines] : []),
     "  }",
     "}",
   ];
 
-  // ── views ─────────────────────────────────────────────────────────────────
-  const viewLines = [
+  const views = [
+    "",
     "views {",
     "  view libView {",
     "    title 'Library Deployment'",
@@ -229,25 +235,17 @@ function buildDsl(
     "}",
   ];
 
-  return [
-    ...specLines,
-    "",
-    ...modelLines,
-    "",
-    ...viewLines
-  ].join("\n");
+  return [...spec, ...model, ...views].join("\n");
 }
 
 await new Command()
   .name("mvn2c4 Converter")
   .version("0.1")
-  .description(`Extract dependencies from pom.xml and emit a C4-like DSL.
-    deno --allow-read c:\Users\CostinGrigore\work\costin\scripts-ts\mvn2c4.ts --group com.namekis
-  `)
-  .option("--workdir <dir:string>", "Working directory to search", { default: "." })
-  .option("--group <groupId:string>", "Group ID(s) to include", { collect: true, required: true })
-  .option("--max-depth <n:number>", "Max recursion depth", { default: 2 })
-  .action(async (opts: CliOptions) => {
-    await extractDeps(opts);
-  })
+  .description("Convert pom.xml trees into a C4-like DSL with projects/modules/subprojects.")
+  .option("--workdir <dir:string>", "Working directory", { default: "." })
+  .option("--group <prefix:string>", "Group prefix (can repeat)", { collect: true, required: true })
+  .option("--max-depth <n:number>", "Recursion depth", { default: 2 })
+  .option("--showEdgeToExternal", "Edges to external", { default: false })
+  .option("--showEdgeFromExternal", "Edges from external", { default: false })
+  .action((opts: CliOptions) => extractDeps(opts))
   .parse(Deno.args);
