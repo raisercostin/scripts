@@ -28,204 +28,249 @@ type Edge = {
   isSrcInternal: boolean;
   isDstInternal: boolean;
 };
-async function extractDeps(opts: CliOptions) {
-  const {
-    workdir,
-    group: groupPrefixes,
-    maxDepth,
-    showEdgeToExternal,
-    showEdgeFromExternal,
-    out,
-  } = opts;
+// … your imports and type definitions above …
 
-  const baseDir = normalize(workdir);
-  logProgress(`Scanning '${baseDir}' for pom.xml (maxDepth=${maxDepth})…`);
+interface CliOptions {
+  workdir: string;
+  group: string[];
+  maxDepth: number;
+  showEdgeToExternal: boolean;
+  showEdgeFromExternal: boolean;
+  out: string;
+}
 
-  // storage
-  const deps: Record<string, Set<string>> = {};
-  const projectModules: Record<string, Set<string>> = {};
-  const projectScm: Record<string, string> = {};
-  const projToGroup: Record<string, string> = {};
-  const edges: Edge[] = [];
+type RawProj = {
+  groupId: string;
+  artifactId: string;
+  scm?: string;
+  parent?: { groupId: string; artifactId: string };
+  modules: Array<{ groupId: string; artifactId: string; scm?: string }>;
+  deps: Array<{ groupId: string; artifactId: string; scope: string }>;
+};
 
-  for (const p of groupPrefixes) {
-    deps[p] = new Set();
-  }
+type Storage = {
+  deps: Record<string, Set<string>>;
+  projectModules: Record<string, Set<string>>;
+  projectScm: Record<string, string>;
+  projToGroup: Record<string, string>;
+  edgeList: Edge[];
+};
 
-  // recurse & parse
+// ── Phase 1: crawl filesystem and collect raw POM data ──────────────────────
+async function collectRawProjects(
+  baseDir: string,
+  maxDepth: number,
+): Promise<{ raw: RawProj[]; discoveredGroups: Set<string> }> {
+  const raw: RawProj[] = [];
+  const discoveredGroups = new Set<string>();
+
   async function walk(dir: string, depth: number) {
     if (depth > maxDepth) return;
-
     for await (const e of Deno.readDir(dir)) {
       const full = join(dir, e.name);
-
-      if (e.isFile && e.name === "pom.xml") {
+      if (e.isDirectory) {
+        await walk(full, depth + 1);
+      } else if (e.isFile && e.name === "pom.xml") {
         logProgress(`Parsing ${full}…`);
         const xml = await Deno.readTextFile(full);
         const doc = new DOMParser().parseFromString(xml, "text/html");
         if (!doc) continue;
 
-        // coordinates
-        const projectGroupId =
-          doc.querySelector("project > groupId")?.textContent.trim() ??
-          doc.querySelector("project > parent > groupId")?.textContent.trim() ??
-          "";
-        const projectArtifact =
-          doc.querySelector("project > artifactId")?.textContent.trim() ?? "";
+        const gid = doc.querySelector("project > groupId")?.textContent.trim()
+          ?? doc.querySelector("project > parent > groupId")?.textContent.trim()
+          ?? "";
+        const aid = doc.querySelector("project > artifactId")?.textContent.trim() ?? "";
+        discoveredGroups.add(gid);
 
-        projToGroup[projectArtifact] = projectGroupId;
+        const rp: RawProj = {
+          groupId: gid,
+          artifactId: aid,
+          scm: doc.querySelector("project > scm > connection")?.textContent.trim(),
+          parent: (() => {
+            const pg = doc.querySelector("project > parent > groupId")?.textContent.trim();
+            const pa = doc.querySelector("project > parent > artifactId")?.textContent.trim();
+            return pg && pa ? { groupId: pg, artifactId: pa } : undefined;
+          })(),
+          modules: [],
+          deps: [],
+        };
 
-        // add to deps if internal
-        const isProjectInternal = groupPrefixes.some((p) =>
-          projectGroupId.startsWith(p)
-        );
-        if (isProjectInternal) {
-          for (const p of groupPrefixes.filter((pr) =>
-            projectGroupId.startsWith(pr)
-          )) {
-            deps[p].add(projectArtifact);
-          }
-        }
-
-        // scm connection
-        const conn = doc
-          .querySelector("project > scm > connection")
-          ?.textContent.trim();
-        if (conn) projectScm[projectArtifact] = conn;
-
-        // parent relationship
-        const parentGidEl = doc.querySelector("project > parent > groupId");
-        const parentAidEl = doc.querySelector("project > parent > artifactId");
-        if (parentGidEl && parentAidEl) {
-          const parentGid = parentGidEl.textContent.trim();
-          const parentAid = parentAidEl.textContent.trim();
-          const parentInternal = groupPrefixes.some((p) =>
-            parentGid.startsWith(p)
-          );
-          edges.push({
-            src: projectArtifact,
-            dst: parentAid,
-            scope: "parent",
-            isSrcInternal: true,
-            isDstInternal: parentInternal,
-          });
-          logProgress(`Parent edge: ${projectArtifact} -> ${parentAid}`);
-        }
-
-        // modules (resolve their own POMs)
-        const moduleEls = doc.querySelectorAll("project > modules > module");
-        if (moduleEls.length) {
-          projectModules[projectArtifact] = new Set();
-          for (const m of moduleEls) {
-            const modDir = join(dir, m.textContent.trim());
-            const modPom = join(modDir, "pom.xml");
-            try {
-              const modXml = await Deno.readTextFile(modPom);
-              const modDoc = new DOMParser().parseFromString(
-                modXml,
-                "text/html"
-              );
-              if (!modDoc) throw new Error();
-              const mgid =
-                modDoc.querySelector("project > groupId")?.textContent.trim() ??
-                projectGroupId;
-              const maid =
-                modDoc
-                  .querySelector("project > artifactId")
-                  ?.textContent.trim() ?? "";
-              projToGroup[maid] = mgid;
-              projectModules[projectArtifact].add(maid);
-              // collect SCM for module if present
-              const mconn = modDoc
-                .querySelector("project > scm > connection")
-                ?.textContent.trim();
-              if (mconn) projectScm[maid] = mconn;
-              // module edge
-              edges.push({
-                src: projectArtifact,
-                dst: maid,
-                scope: "module",
-                isSrcInternal: true,
-                isDstInternal: true,
-              });
-              logProgress(`Module edge: ${projectArtifact} -> ${maid}`);
-            } catch {
-              logProgress(`Skipping module without POM: ${modDir}`);
-            }
-          }
-        }
-
-        // dependencies (skip dependencyManagement)
-        for (const dep of doc.querySelectorAll(
-          "project > dependencies > dependency"
-        )) {
-          if (dep.closest("dependencyManagement")) {
-            logProgress("Ignoring dependency in <dependencyManagement>");
-            continue;
-          }
-          const gid =
-            dep.querySelector("groupId")?.textContent.trim() ?? projectGroupId;
-          const aid = dep.querySelector("artifactId")?.textContent.trim() ?? "";
-          const scope =
-            dep.querySelector("scope")?.textContent.trim() ?? "compile";
-
-          const depInternal = groupPrefixes.some((p) => gid.startsWith(p));
-          if (isProjectInternal || depInternal) {
-            if (depInternal) {
-              for (const p of groupPrefixes.filter((pr) =>
-                gid.startsWith(pr)
-              )) {
-                deps[p].add(aid);
-              }
-              logProgress(`Found dependency: ${gid} -> ${aid} [${scope}]`);
-            } else {
-              logProgress(`Skipping details for external ${gid}`);
-            }
-            edges.push({
-              src: projectArtifact,
-              dst: aid,
-              scope,
-              isSrcInternal: isProjectInternal,
-              isDstInternal: depInternal,
+        // collect modules
+        for (const m of doc.querySelectorAll("project > modules > module")) {
+          const modDir = join(dir, m.textContent.trim());
+          const modPom = join(modDir, "pom.xml");
+          try {
+            const modXml = await Deno.readTextFile(modPom);
+            const modDoc = new DOMParser().parseFromString(modXml, "text/html");
+            if (!modDoc) throw new Error();
+            rp.modules.push({
+              groupId: modDoc.querySelector("project > groupId")?.textContent.trim() ?? gid,
+              artifactId: modDoc.querySelector("project > artifactId")?.textContent.trim() ?? "",
+              scm: modDoc.querySelector("project > scm > connection")?.textContent.trim(),
             });
-          } else {
-            logProgress(`Skipping external dep: ${gid}:${aid}`);
+          } catch {
+            logProgress(`Skipping module without POM: ${modDir}`);
           }
         }
-      } else if (e.isDirectory) {
-        await walk(full, depth + 1);
+
+        // collect dependencies
+        for (const dep of doc.querySelectorAll("project > dependencies > dependency")) {
+          if (dep.closest("dependencyManagement")) continue;
+          rp.deps.push({
+            groupId: dep.querySelector("groupId")?.textContent.trim() ?? gid,
+            artifactId: dep.querySelector("artifactId")?.textContent.trim() ?? "",
+            scope: dep.querySelector("scope")?.textContent.trim() ?? "compile",
+          });
+        }
+
+        raw.push(rp);
       }
     }
   }
 
   await walk(baseDir, 0);
+  return { raw, discoveredGroups };
+}
+
+// ── Phase 2: decide which group-prefixes to use ────────────────────────────
+function determineGroupPrefixes(
+  userGroups: string[],
+  discovered: Set<string>,
+): string[] {
+  return userGroups?.length > 0 ? userGroups : Array.from(discovered);
+}
+
+// ── Phase 3: init empty storage for replay ─────────────────────────────────
+function initializeStorage(groups: string[]): Storage {
+  const deps: Record<string, Set<string>> = {};
+  groups.forEach(g => (deps[g] = new Set()));
+
+  return {
+    deps,
+    projectModules: {},
+    projectScm: {},
+    projToGroup: {},
+    edgeList: [],
+  };
+}
+
+// ── Phase 4: replay raw data into our storage, applying filters ───────────
+function processRawProjects(
+  raw: RawProj[],
+  groupPrefixes: string[],
+  storage: Storage,
+) {
+  const { deps, projectModules, projectScm, projToGroup, edgeList } = storage;
+
+  for (const rp of raw) {
+    const { groupId, artifactId, scm, parent, modules, deps: rdeps } = rp;
+    const isProjInt = groupPrefixes.some(p => groupId.startsWith(p));
+
+    projToGroup[artifactId] = groupId;
+    if (scm) projectScm[artifactId] = scm;
+    if (isProjInt) {
+      groupPrefixes.filter(p => groupId.startsWith(p))
+        .forEach(p => deps[p].add(artifactId));
+    }
+
+    if (parent) {
+      const parentInt = groupPrefixes.some(p => parent.groupId.startsWith(p));
+      edgeList.push({
+        src: artifactId,
+        dst: parent.artifactId,
+        scope: "parent",
+        isSrcInternal: true,
+        isDstInternal: parentInt,
+      });
+    }
+
+    for (const m of modules) {
+      projectModules[artifactId] ??= new Set();
+      projectModules[artifactId].add(m.artifactId);
+      if (m.scm) projectScm[m.artifactId] = m.scm;
+      edgeList.push({
+        src: artifactId,
+        dst: m.artifactId,
+        scope: "module",
+        isSrcInternal: isProjInt,
+        isDstInternal: true,
+      });
+    }
+
+    for (const d of rdeps) {
+      const depInt = groupPrefixes.some(p => d.groupId.startsWith(p));
+      if (isProjInt || depInt) {
+        if (depInt) {
+          groupPrefixes.filter(p => d.groupId.startsWith(p))
+            .forEach(p => deps[p].add(d.artifactId));
+        }
+        edgeList.push({
+          src: artifactId,
+          dst: d.artifactId,
+          scope: d.scope,
+          isSrcInternal: isProjInt,
+          isDstInternal: depInt,
+        });
+      }
+    }
+  }
+}
+
+// ── Phase 5: emit or write out the DSL ─────────────────────────────────────
+async function outputDsl(
+  dsl: string,
+  outPath: string,
+) {
+  if (!outPath) {
+    console.log(dsl);
+  } else {
+    const file = normalize(outPath);
+    const dir = dirname(file);
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(file, dsl);
+    console.log(`DSL written to ${file}`);
+  }
+}
+
+// ── Main orchestrator ─────────────────────────────────────────────────────
+async function extractDeps(opts: CliOptions) {
+  const baseDir = normalize(opts.workdir);
+  logProgress(`Scanning '${baseDir}' for pom.xml (maxDepth=${opts.maxDepth})…`);
+
+  // 1. collect raw POM data
+  const { raw, discoveredGroups } = await collectRawProjects(
+    baseDir,
+    opts.maxDepth,
+  );
+
+  // 2. decide groups
+  const groupPrefixes = determineGroupPrefixes(opts.group, discoveredGroups);
+  logProgress(`Using group prefixes: ${groupPrefixes.join(", ")}`);
+
+  // 3. init storage
+  const storage = initializeStorage(groupPrefixes);
+
+  // 4. process raw data
+  processRawProjects(raw, groupPrefixes, storage);
 
   logProgress(
-    `Graph has ${Object.keys(projToGroup).length} projects, ${
-      edges.length
-    } edges.`
+    `Graph: ${Object.keys(storage.projToGroup).length} projects, ` +
+    `${storage.edgeList.length} edges.`
   );
 
+  // 5. build and output DSL
   const dsl = buildDsl(
-    deps,
-    projectModules,
-    projectScm,
-    edges,
-    projToGroup,
+    storage.deps,
+    storage.projectModules,
+    storage.projectScm,
+    storage.edgeList,
+    storage.projToGroup,
     groupPrefixes,
-    { showEdgeToExternal, showEdgeFromExternal }
+    { showEdgeToExternal: opts.showEdgeToExternal,
+      showEdgeFromExternal: opts.showEdgeFromExternal },
   );
 
-  if (opts.out) {
-    // ensure parent directories exist
-    const outPath = normalize(opts.out);
-    const dir = dirname(outPath);
-    await Deno.mkdir(dir, { recursive: true });
-    await Deno.writeTextFile(outPath, dsl);
-    console.log(`DSL written to ${outPath}`);
-  } else {
-    console.log(dsl);
-  }
+  await outputDsl(dsl, opts.out);
 }
 
 function buildDsl(
@@ -338,8 +383,7 @@ await new Command()
   )
   .option("--workdir <dir:string>", "Working directory", { default: "." })
   .option("--group <prefix:string>", "Group prefix (can repeat)", {
-    collect: true,
-    required: true,
+    collect: true
   })
   .option("--max-depth <n:number>", "Recursion depth", { default: 2 })
   .option("--showEdgeToExternal", "Edges to external", { default: false })
