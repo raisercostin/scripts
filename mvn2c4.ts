@@ -289,28 +289,6 @@ function buildDsl(
   const { showEdgeToExternal, showEdgeFromExternal } = options;
   const alias = (g: string) => g.split(".").pop()!;
 
-  // ── specification
-  const rels = [
-    "compile",
-    "runtime",
-    "provided",
-    "test",
-    "pom",
-    "module",
-    "parent",
-  ];
-  const spec = [
-    "specification {",
-    "  element libsSystem",
-    "  element group",
-    "  element project",
-    "  element module",
-    "  element artifact",
-    ...rels.map((r) => `  relationship ${r}`),
-    "  tag module",
-    "}",
-  ];
-
   // ── model
   const blocks = groupPrefixes.map((pref) => {
     const grp = alias(pref);
@@ -354,7 +332,30 @@ function buildDsl(
     })
     .map((e) => `    ${e.src} -[${e.scope}]-> ${e.dst} '${e.scope}'`);
 
-  return `${spec.join("\n")}
+  return `
+    specification {
+      element libsSystem {
+        style {
+          opacity 10%
+        }
+      }
+      element group {
+        style {
+          opacity 10%
+        }
+      }
+      element project
+      element module
+      element artifact
+      relationship compile
+      relationship runtime
+      relationship provided
+      relationship test
+      relationship pom
+      relationship module
+      relationship parent
+      tag module
+    }
     model {
       libsSystem all {
     ${blocks.join("\n    ")}
@@ -369,6 +370,7 @@ function buildDsl(
         include all,all.**
         exclude *<->* where kind is parent
         exclude *<->* where kind is module
+        exclude *<->* where kind is test
       }
       view mvnView {
         title 'Maven Modules/Parents'
