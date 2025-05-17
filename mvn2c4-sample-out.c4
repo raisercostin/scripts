@@ -1,26 +1,43 @@
 specification {
   element libsSystem
   element group
+  element project
   element artifact
+  element module
   relationship compile
   relationship runtime
   relationship provided
   relationship test
   relationship pom
+  relationship war
 }
 
 model {
   libsSystem all {
-    bearingpoint = group 'com.bearingpoint' {
+    guava = artifact
+    raisercositn = group 'com.raisercostin' {
     }
-    namek = group 'namek' {
-      namek-foo = artifact
-      namek-bar = artifact
-      namek-baz = artifact
+    namek = group 'com.namekis' {
+      namek-foo = project
+      namek-bar = project
+      namek-multimodule = project {
+        module1 = project
+        module2 = project {
+          war = artifact
+          uberjar = artifact
+          jar = artifact
+          src = artifact
+          docs = artifact
+          docker = artifact
+          src -[war]-> war 'war'
+        }
+      }
     }
     namek-foo -[runtime]-> namek-bar 'runtime'
-    namek-baz -[runtime]-> namek-bar 'runtime'
-    namek-bar -[runtime]-> namek-baz 'runtime'
+    namek-multimodule -[runtime]-> namek-bar 'runtime'
+    namek-bar -[runtime]-> namek-multimodule 'runtime'
+    module1 -> guava 'runtime'
+    module1 -> module2.war
   }
 }
 

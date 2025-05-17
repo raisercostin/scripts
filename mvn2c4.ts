@@ -4,138 +4,48 @@ import { Command } from "https://deno.land/x/cliffy@v0.25.7/command/mod.ts";
 import { join, normalize, sep } from "https://deno.land/std@0.160.0/path/mod.ts";
 import { DOMParser } from "https://deno.land/x/deno_dom/deno-dom-wasm.ts";
 
-// ── Find all pom.xml up to maxDepth ─────────────────────────────────────────
-async function findPomFiles(dir: string, maxDepth: number, depth = 0): Promise<string[]> {
-  if (depth > maxDepth) return [];
-  const files: string[] = [];
-  for await (const e of Deno.readDir(dir)) {
-    const full = join(dir, e.name);
-    if (e.isFile && e.name === "pom.xml") {
-      files.push(full);
-    } else if (e.isDirectory) {
-      files.push(...await findPomFiles(full, maxDepth, depth + 1));
-    }
-  }
-  return files;
-}
-
-// ── Log progress to stderr ──────────────────────────────────────────────────
 function logProgress(message: string) {
   console.error(message);
 }
-
-function parseDependencies(xml: string, groupIds: string[]): Record<string, Set<string>> {
-  const doc = new DOMParser().parseFromString(xml, "text/html");
-  const result: Record<string, Set<string>> = {};
-  for (const gid of groupIds) result[gid] = new Set();
-  if (!doc) return result;
-
-  // determine project-level groupId (including parent fallback)
-  let projectGroupId = doc.querySelector("project > groupId")?.textContent.trim()
-    ?? doc.querySelector("project > parent > groupId")?.textContent.trim()
-    ?? "";
-
-  for (const dep of doc.querySelectorAll("dependency")) {
-    // try explicit groupId, otherwise use projectGroupId
-    const gidEl = dep.querySelector("groupId");
-    const aidEl = dep.querySelector("artifactId");
-    const gid = gidEl ? gidEl.textContent.trim() : projectGroupId;
-    if (!aidEl) continue;
-    const aid = aidEl.textContent.trim();
-
-    if (groupIds.includes(gid)) {
-      result[gid].add(aid);
-      logProgress(`Found dependency: ${gid} -> ${aid}`);
-    } else {
-      logProgress(`Skipping dependency: ${gid} not in groupIds`);
-    }
-  }
-  return result;
-}
-// ── Merge multiple dep maps ─────────────────────────────────────────────────
-function mergeDeps(
-  accum: Record<string, Set<string>>,
-  next: Record<string, Set<string>>,
-) {
-  for (const k of Object.keys(next)) {
-    for (const a of next[k]) accum[k].add(a);
-  }
-}
-interface Edge { src: string; dst: string; }
-
-function buildGraph(
-  deps: Record<string, Set<string>>,
-  groupIds: string[],
-): { nodes: Set<string>; edges: Edge[] } {
-  const nodes = new Set<string>();
-  const edges: Edge[] = [];
-
-  const alias = (gid: string) => gid.split(".").pop()!;
-
-  for (const gid of groupIds) {
-    const grpNode = alias(gid);
-    nodes.add(grpNode);
-
-    for (const art of deps[gid]) {
-      nodes.add(art);
-      edges.push({ src: grpNode, dst: art });
-    }
-  }
-
-  return { nodes, edges };
-}
-// ── Build the C4-like DSL ──────────────────────────────────────────────────
-function buildDsl(deps: Record<string, Set<string>>, groupIds: string[]) {
-  const alias = (gid: string) => gid.split(".").pop()!;
-  const groups = groupIds.map(gid => {
-    const arts = [...deps[gid]].sort();
-    const lines = arts.map(a => `      ${a} = artifact`).join("\n");
-    return `
-    ${alias(gid)} = group '${gid}' {
-${lines}
-    }`.trimEnd();
-  }).join("\n\n");
-
-  return `
-specification {
-  element libsSystem
-  element group
-  element artifact
+interface CliOptions {
+  workdir: string;
+  group: string[];
+  maxDepth: number;
+  showEdgeToExternal: boolean;
+  showEdgeFromExternal: boolean;
 }
 
-// Deployment model
-model {
-  libsSystem all {
-${groups}
-  }
-}
+async function extractDeps(opts: CliOptions) {
+  const {
+    workdir,
+    group: groupPrefixes,
+    maxDepth,
+    showEdgeToExternal,
+    showEdgeFromExternal,
+  } = opts;
 
-views {
-  view libView {
-    title 'Library Deployment'
-
-    include all,all.**
-  }
-}
-`.trim();
-}
-
-async function extractDeps(
-  workdir: string,
-  groupIds: string[],
-  maxDepth: number,
-) {
-  workdir = normalize(workdir);
-  logProgress(`Scanning '${workdir}' for pom.xml (maxDepth=${maxDepth})…`);
+  const baseDir = normalize(workdir);
+  logProgress(`Scanning '${baseDir}' for pom.xml (maxDepth=${maxDepth})…`);
 
   // prepare storage
   const deps: Record<string, Set<string>> = {};
-  for (const gid of groupIds) deps[gid] = new Set();
-  type Edge = { src: string; dst: string; scope: string };
+  const prefixModules: Record<string, Set<string>> = {};
+  for (const p of groupPrefixes) {
+    deps[p] = new Set();
+    prefixModules[p] = new Set();
+  }
+
+  type Edge = {
+    src: string;
+    dst: string;
+    scope: string;
+    isSrcInternal: boolean;
+    isDstInternal: boolean;
+  };
   const edges: Edge[] = [];
 
   // recurse & parse in one pass
-  async function walkAndParse(dir: string, depth: number) {
+  async function walk(dir: string, depth: number) {
     if (depth > maxDepth) return;
     for await (const e of Deno.readDir(dir)) {
       const full = join(dir, e.name);
@@ -145,7 +55,7 @@ async function extractDeps(
         const doc = new DOMParser().parseFromString(xml, "text/html");
         if (!doc) continue;
 
-        // determine coordinates of this project
+        // project coordinates
         const projectGroupId = doc
           .querySelector("project > groupId")?.textContent.trim()
           ?? doc.querySelector("project > parent > groupId")?.textContent.trim()
@@ -154,7 +64,34 @@ async function extractDeps(
           .querySelector("project > artifactId")?.textContent.trim()
           ?? "";
 
+        // modules
+        const moduleEls = doc.querySelectorAll("project > modules > module");
+        const projectPrefixes = groupPrefixes.filter(p => projectGroupId.startsWith(p));
+        const isProjectInternal = projectPrefixes.length > 0;
+        if (isProjectInternal) {
+          projectPrefixes.forEach(p => deps[p].add(projectArtifact));
+          for (const m of moduleEls) {
+            const modName = m.textContent.trim();
+            projectPrefixes.forEach(p => prefixModules[p].add(modName));
+            edges.push({
+              src: projectArtifact,
+              dst: modName,
+              scope: "module",
+              isSrcInternal: true,
+              isDstInternal: true,
+            });
+            logProgress(`Found module: ${projectGroupId}:${modName}`);
+          }
+        }
+
+        // dependencies
         for (const dep of doc.querySelectorAll("dependency")) {
+          // skip dependencyManagement entries
+          if (dep.closest("dependencyManagement")) {
+            logProgress("Ignoring dependency in <dependencyManagement>");
+            continue;
+          }
+
           const gidEl = dep.querySelector("groupId");
           const aidEl = dep.querySelector("artifactId");
           const scopeEl = dep.querySelector("scope");
@@ -163,76 +100,119 @@ async function extractDeps(
           const aid = aidEl.textContent.trim();
           const scope = scopeEl?.textContent.trim() ?? "compile";
 
-          // only record if either side is in our groups
-          if (groupIds.includes(gid) || groupIds.includes(projectGroupId)) {
-            if (groupIds.includes(projectGroupId)) {
-              deps[projectGroupId].add(projectArtifact);
-              logProgress(`Found module: ${projectGroupId}:${projectArtifact}`);
-            }
-            if (groupIds.includes(gid)) {
-              deps[gid].add(aid);
+          const depPrefixes = groupPrefixes.filter(p => gid.startsWith(p));
+          const isDepInternal = depPrefixes.length > 0;
+
+          if (isProjectInternal || isDepInternal) {
+            if (isDepInternal) {
+              depPrefixes.forEach(p => deps[p].add(aid));
               logProgress(`Found dependency: ${gid} -> ${aid} [${scope}]`);
+            } else {
+              logProgress(`Skipping dependency: ${gid} not in groupPrefixes`);
             }
-            edges.push({ src: projectArtifact, dst: aid, scope });
+            edges.push({
+              src: projectArtifact,
+              dst: aid,
+              scope,
+              isSrcInternal: isProjectInternal,
+              isDstInternal: isDepInternal,
+            });
           } else {
-            logProgress(`Skipping dependency: ${gid} not in groupIds`);
+            logProgress(`Skipping dependency: ${gid} not in groupPrefixes`);
           }
         }
       } else if (e.isDirectory) {
-        await walkAndParse(full, depth + 1);
+        await walk(full, depth + 1);
       }
     }
   }
 
-  await walkAndParse(workdir, 0);
+  await walk(baseDir, 0);
 
-  // report graph size
-  logProgress(`Graph has ${new Set(edges.flatMap(e => [e.src, e.dst])).size} nodes and ${edges.length} edges.`);
+  logProgress(
+    `Graph has ${
+      new Set(edges.flatMap(e => [e.src, e.dst])).size
+    } nodes and ${edges.length} edges.`,
+  );
 
-  // build group blocks
+  // now build and print the DSL
+  console.log(buildDsl(deps, prefixModules, edges, groupPrefixes, {
+    showEdgeToExternal,
+    showEdgeFromExternal,
+  }));
+}
+
+function buildDsl(
+  deps: Record<string, Set<string>>,
+  prefixModules: Record<string, Set<string>>,
+  edges: {
+    src: string;
+    dst: string;
+    scope: string;
+    isSrcInternal: boolean;
+    isDstInternal: boolean;
+  }[],
+  groupPrefixes: string[],
+  options: { showEdgeToExternal: boolean; showEdgeFromExternal: boolean },
+): string {
+  const { showEdgeToExternal, showEdgeFromExternal } = options;
   const alias = (gid: string) => gid.split(".").pop()!;
-  const groupBlocks = groupIds.map(gid => {
-    const arts = [...deps[gid]].sort();
-    const artLines = arts.map(a => `      ${a} = artifact`).join("\n");
-    return `
-    ${alias(gid)} = group '${gid}' {
-${artLines}
-    }`.trimEnd();
-  }).join("\n\n");
 
-  // build edge lines
+  // ── specification ─────────────────────────────────────────────────────────
+  const relationships = ["compile", "runtime", "provided", "test", "pom", "module"];
+  const specLines = [
+    "specification {",
+    "  element libsSystem",
+    "  element group",
+    "  element artifact",
+    ...relationships.map(r => `  relationship ${r}`),
+    "}",
+  ];
+
+  // ── model ─────────────────────────────────────────────────────────────────
+  const groupBlocks = groupPrefixes.map(prefix => {
+    const grp = alias(prefix);
+    const artifactLines = [...deps[prefix]]
+      .sort()
+      .map(a => `      ${a} = artifact`)
+      .join("\n");
+    return [
+      `    ${grp} = group '${prefix}' {`,
+      artifactLines,
+      "    }",
+    ].join("\n");
+  });
+
   const edgeLines = edges
-    .map(e => `    ${e.src} -[${e.scope}]-> ${e.dst} '${e.scope}'`)
-    .join("\n");
+    .filter(e => {
+      if (e.isSrcInternal && e.isDstInternal) return true;
+      if (e.isSrcInternal && !e.isDstInternal) return showEdgeToExternal;
+      if (!e.isSrcInternal && e.isDstInternal) return showEdgeFromExternal;
+      return false;
+    })
+    .map(e => `    ${e.src} -[${e.scope}]-> ${e.dst} '${e.scope}'`);
 
-  // assemble DSL
-  const rels = ["compile", "runtime", "provided", "test", "pom"];
-  const dsl = `
-specification {
-  element libsSystem
-  element group
-  element artifact
-${rels.map(r => `  relationship ${r}`).join("\n")}
-}
+  const modelLines = [
+    "model {",
+    "  libsSystem all {",
+    ...groupBlocks,
+    ...(edgeLines.length ? ["", ...edgeLines] : []),
+    "  }",
+    "}",
+  ];
 
-model {
-  libsSystem all {
-${groupBlocks}
+  // ── views ─────────────────────────────────────────────────────────────────
+  const viewLines = [
+    "views {",
+    "  view libView {",
+    "    title 'Library Deployment'",
+    "",
+    "    include all,all.**",
+    "  }",
+    "}",
+  ];
 
-${edgeLines}
-  }
-}
-
-views {
-  view libView {
-    title 'Library Deployment'
-
-    include all,all.**
-  }
-}
-`.trim();
-
-  console.log(dsl);
+  return [...specLines, "", ...modelLines, "", ...viewLines].join("\n");
 }
 
 await new Command()
@@ -244,7 +224,7 @@ await new Command()
   .option("--workdir <dir:string>", "Working directory to search", { default: "." })
   .option("--group <groupId:string>", "Group ID(s) to include", { collect: true, required: true })
   .option("--max-depth <n:number>", "Max recursion depth", { default: 2 })
-  .action(async (opts) => {
-    await extractDeps(opts.workdir, opts.group, opts.maxDepth);
+  .action(async (opts: CliOptions) => {
+    await extractDeps(opts);
   })
   .parse(Deno.args);
