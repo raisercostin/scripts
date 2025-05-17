@@ -164,25 +164,42 @@ function buildDsl(
     "specification {",
     "  element libsSystem",
     "  element group",
+    "  element module",
     "  element artifact",
     ...relationships.map(r => `  relationship ${r}`),
+    "  tag module",
     "}",
   ];
 
   // ── model ─────────────────────────────────────────────────────────────────
   const groupBlocks = groupPrefixes.map(prefix => {
     const grp = alias(prefix);
-    const artifactLines = [...deps[prefix]]
+
+    // modules declared in pom or by directory structure
+    // const modules = [...prefixModules[prefix]]
+    //   .sort()
+    //   .map(m => `      ${m} = module`)
+    //   .join("\n");
+
+    // regular dependencies
+    const artifacts = [...deps[prefix]]
       .sort()
-      .map(a => `      ${a} = artifact`)
+      .map(a => {
+        const tag = prefixModules[prefix].has(a) ? " { #module }" : "";
+        return `      ${a} = artifact${tag}`;
+      })
       .join("\n");
+      
     return [
       `    ${grp} = group '${prefix}' {`,
-      artifactLines,
+      artifacts,
       "    }",
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   });
 
+  // ── edge lines ────────────────────────────────────────────────────────────
   const edgeLines = edges
     .filter(e => {
       if (e.isSrcInternal && e.isDstInternal) return true;
@@ -212,7 +229,13 @@ function buildDsl(
     "}",
   ];
 
-  return [...specLines, "", ...modelLines, "", ...viewLines].join("\n");
+  return [
+    ...specLines,
+    "",
+    ...modelLines,
+    "",
+    ...viewLines
+  ].join("\n");
 }
 
 await new Command()
