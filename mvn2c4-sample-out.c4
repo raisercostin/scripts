@@ -1,0 +1,33 @@
+specification {
+  element libsSystem
+  element group
+  element artifact
+  relationship compile
+  relationship runtime
+  relationship provided
+  relationship test
+  relationship pom
+}
+
+model {
+  libsSystem all {
+    bearingpoint = group 'com.bearingpoint' {
+    }
+    namek = group 'namek' {
+      namek-foo = artifact
+      namek-bar = artifact
+      namek-baz = artifact
+    }
+    namek-foo -[runtime]-> namek-bar 'runtime'
+    namek-baz -[runtime]-> namek-bar 'runtime'
+    namek-bar -[runtime]-> namek-baz 'runtime'
+  }
+}
+
+views {
+  view libView {
+    title 'Library Deployment'
+
+    include all,all.**
+  }
+}
