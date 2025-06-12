@@ -9,7 +9,10 @@
 
 import java.io.File;
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -65,6 +68,7 @@ public class chanscm implements Runnable {
           System.out.println("No entries found.");
         } else {
           printTable(rows);
+          // printTable(rows, "Channel name", "New Pos");
         }
       } catch (Exception e) {
         throw new RuntimeException("Failed to list files in " + scmFile, e);
@@ -232,76 +236,140 @@ public class chanscm implements Runnable {
   }
 
   private static List<Map<String, String>> parseChannels(File scmFile) throws IOException {
-    // 1) Figure out which Series: X section to use
+    // prep
     String series = detectSeries(scmFile);
-    logger.info("detected series: {}", series);
-    // 2) Load the map-*.dat record lengths for that series
     SeriesConfig sc = loadSeriesConfig(series);
-    logger.info("detected config: {}", sc);
-    Wini ini = loadModelIni();
 
-    List<Map<String, String>> rows = new ArrayList<>();
+    Wini ini = loadModelIni();
     try (ZipFile zip = new ZipFile(scmFile)) {
+      // load the per-transponder frequency table (DVB-CT/PTC)
+      Map<Integer, BigDecimal> freqTable = loadDvbTransponderFrequencies(zip, ini, series);
+      // load the service-provider names
+      Map<Integer, String> providerNames = loadServiceProviderNames(zip, ini, series);
+      // load the satellite name/operator map
+      Map<Integer, Satellite> sats = loadSatellites(zip, ini, series);
+
       String base = detectBasePath(zip, scmFile.getName());
       List<String> entries = findChannelEntries(zip, base, sc);
+      List<Map<String, String>> rows = new ArrayList<>();
 
       for (String entryName : entries) {
         ModelConstants mc = getMappingConstants(sc, entryName);
-        String sectionName = getSectionNameFor(entryName, mc.recordLength);
-        Section section = ini.get(sectionName);
+        String sectName = getSectionNameFor(entryName, mc.recordLength);
+        Section section = ini.get(sectName);
         DataMapping mapping = new DataMapping(section);
 
-        ZipEntry entry = zip.getEntry(entryName);
-        byte[] data = zip.getInputStream(entry).readAllBytes();
+        byte[] data = zip.getInputStream(zip.getEntry(entryName)).readAllBytes();
         int count = data.length / mc.recordLength;
 
         for (int i = 0; i < count; i++) {
           int off = i * mc.recordLength;
           mapping.setDataPtr(data, off);
-          int rawProg = mapping.getWord("offProgramNr");
-          if (rawProg == 0)
+
+          // 1) old position
+          int oldPos = mapping.getWord("offProgramNr");
+          if (oldPos == 0)
             continue;
-          // skip if not “in use” (default true when offInUse is missing)
+
+          // 2) in-use check (default true if missing)
           if (!mapping.getFlag("InUse", true))
             continue;
 
-          Map<String, String> row = new LinkedHashMap<>();
-          row.put("Source", entryName);
+          // 3) new position (logical) if available
+          int newPos = mapping.offsets.containsKey("offLogicalProgramNr")
+              ? (data[off + mapping.offsets.get("offLogicalProgramNr")] & 0xFF)
+                  | ((data[off + mapping.offsets.get("offLogicalProgramNr") + 1] & 0xFF) << 8)
+              : 0;
 
-          // iterate every off* in this section
-          for (String key : section.keySet()) {
-            if (!key.startsWith("off"))
-              continue;
-            String rawVal = section.get(key);
-            if (rawVal == null || rawVal.isBlank())
-              continue;
-
-            String name = key.substring(3); // drop “off”
-            String maskKey = "mask" + name;
-
-            if (section.containsKey(maskKey)) {
-              // boolean flag
-              row.put(name, String.valueOf(mapping.getFlag(name, false)));
-            } else if (name.equals("Name")) {
-              row.put("Name", mapping.getString(key, mc.lenName));
-            } else if (name.equals("ShortName")) {
-              int lenShort = Integer.parseInt(section.getOrDefault("lenShortName", "0"));
-              row.put("ShortName", mapping.getString(key, lenShort));
-            } else {
-              // numeric 2-byte value: only if within record bounds
-              int offVal = Integer.parseInt(rawVal.split(",")[0].trim());
-              if (offVal + 1 < mc.recordLength) {
-                row.put(name, String.valueOf(mapping.getWord(key)));
-              }
-            }
+          // 4) names
+          String name = mapping.getString("offName", mc.lenName);
+          String shortName = "";
+          if (section.containsKey("offShortName")) {
+            int shortLen = Integer.parseInt(section.getOrDefault("lenShortName", "0"));
+            shortName = mapping.getString("offShortName", shortLen);
           }
+
+          // 5) IDs
+          int onid = mapping.getWord("offOriginalNetworkId");
+          int tsid = mapping.getWord("offTransportStreamId");
+          int sid = mapping.getWord("offServiceId");
+
+          // 6) flags
+          String fav = mapping.getFavorites() > 0 ? "Checked" : "Unchecked";
+          String lock = mapping.getFlag("Lock", false) ? "Checked" : "Unchecked";
+          String skip = mapping.getFlag("Skip", false) ? "Checked" : "Unchecked";
+          String hide = mapping.getFlag("Hidden", false) ? "Checked" : "Unchecked";
+          String crypt = mapping.getFlag("Encrypted", false) ? "Checked" : "Unchecked";
+
+          // 7) service type
+          int svcTypeCode = mapping.getWord("offServiceType");
+          String svcType = svcTypeCode == 1 ? "HD-TV" : "SD-TV";
+
+          // 8) frequency & transponder
+          int transpIdx = mapping.getWord("offChannelTransponder");
+          BigDecimal freq = freqTable.getOrDefault(transpIdx, BigDecimal.ZERO);
+
+          // 9) PCR, Video, SymbolRate
+          int pcr = mapping.getWord("offPcrPid");
+          int vidPid = mapping.getWord("offVideoPid");
+          int symRate = mapping.getWord("offSymbolRate");
+
+          // 10) provider lookup
+          int src = mapping.offsets.containsKey("offSignalSource")
+              ? mapping.getWord("offSignalSource")
+              : 0;
+          int provIndex = mapping.offsets.containsKey("offServiceProviderId")
+              ? mapping.getWord("offServiceProviderId")
+              : 0;
+          String provKey = providerNames.get((src << 16) + provIndex);
+
+          // 11) network names via satellite index
+          int satIdx = mapping.offsets.containsKey("offTransponderIndex")
+              ? mapping.getWord("offTransponderIndex")
+              : -1;
+          Satellite sat = sats.get(satIdx);
+          String netName = sat != null ? sat.getName() : "";
+          String netOp = sat != null ? sat.getOperator() : "";
+
+          // assemble row
+          Map<String, String> row = new LinkedHashMap<>();
+          row.put("Old Pos", String.valueOf(oldPos));
+          row.put("New Pos", newPos > 0 ? String.valueOf(newPos) : "");
+          row.put("Channel name", name);
+          row.put("Short name", shortName);
+          row.put("Network (ONID)", String.valueOf(onid));
+          row.put("TS ID", String.valueOf(tsid));
+          row.put("Service ID", String.valueOf(sid));
+          row.put("Favorites", fav);
+          row.put("Locked", lock);
+          row.put("Skip", skip);
+          row.put("Hide", hide);
+          row.put("Crypt", crypt);
+          row.put("Service Type", svcType);
+          row.put("Frequency (MHz)", freq.toPlainString());
+          row.put("Chan/ Transp", String.valueOf(transpIdx));
+          row.put("PCR PID", String.valueOf(pcr));
+          row.put("Video PID", String.valueOf(vidPid));
+          row.put("Symbol rate", String.valueOf(symRate));
+          row.put("Network Name", netName);
+          row.put("Network Operator", netOp);
+          row.put("Provider", provKey != null ? provKey : "");
 
           rows.add(row);
         }
       }
+      return rows;
     }
-    return rows;
   }
+
+  // -----------------------------------------------------------------------------
+  // Helper stubs – you’ll need to port these directly from ScmSerializer.cs:
+  // loadDvbTransponderFrequencies(...) (ReadDvbTransponderFrequenciesFromPtc)
+  // :contentReference[oaicite:11]{index=11}
+  // loadServiceProviderNames(...) (ReadDvbServiceProviders)
+  // :contentReference[oaicite:12]{index=12}
+  // loadSatellites(...) (ReadSatellites) :contentReference[oaicite:13]{index=13}
+  // -----------------------------------------------------------------------------
 
   // picks the right INI section name for this map entry
   private static String getSectionNameFor(String entryName, int recLen) {
@@ -380,6 +448,148 @@ public class chanscm implements Runnable {
       int i = s.indexOf('\0');
       return i >= 0 ? s.substring(0, i) : s;
     }
+
+    float getFloat(String offKey) {
+      Integer off = offsets.get(offKey);
+      if (off == null || off + 3 >= data.length)
+        return Float.NaN;
+      int bits = ((data[base + off] & 0xFF) << 24)
+          | ((data[base + off + 1] & 0xFF) << 16)
+          | ((data[base + off + 2] & 0xFF) << 8)
+          | (data[base + off + 3] & 0xFF);
+      return Float.intBitsToFloat(bits);
+    }
+
+    int getFavorites() {
+      int mask = 0;
+      for (int bit = 0; bit < 32; bit++) {
+        String key = "offFavorite" + bit;
+        Integer off = offsets.get(key);
+        if (off != null && (data[base + off] & 0xFF) != 0) {
+          mask |= (1 << bit);
+        }
+      }
+      return mask;
+    }
+  }
+
+  // === 2) DVB-CT transponder → frequency table ===
+  private static Map<Integer, BigDecimal> loadDvbTransponderFrequencies(ZipFile zip, Wini ini, String series)
+      throws IOException {
+    Map<Integer, BigDecimal> table = new LinkedHashMap<>();
+    Section ser = ini.get(series);
+    int ptcLength = ser.get("PTC", int.class, 12);
+
+    // section holding offsets for PTC records
+    Section ptcSect = ini.get("PTC:" + ptcLength);
+    DataMapping mapping = new DataMapping(ptcSect);
+
+    for (String fileName : List.of("PTCAIR", "PTCCABLE")) {
+      ZipEntry entry = zip.getEntry(fileName);
+      if (entry == null)
+        continue;
+      byte[] data = zip.getInputStream(entry).readAllBytes();
+
+      int count = data.length / ptcLength;
+      for (int i = 0; i < count; i++) {
+        mapping.setDataPtr(data, i * ptcLength);
+        int transp = mapping.getWord("offChannelTransponder");
+        float freq = mapping.getFloat("offFrequency");
+        table.put(transp, BigDecimal.valueOf(freq));
+      }
+    }
+    return table;
+  }
+
+  // === 3) DVB service-provider names ===
+  private static Map<Integer, String> loadServiceProviderNames(ZipFile zip, Wini ini, String series)
+      throws IOException {
+    Map<Integer, String> names = new LinkedHashMap<>();
+    Section ser = ini.get(series);
+    int spLen = ser.get("ServiceProvider", int.class, 108);
+
+    Section spSect = ini.get("ServiceProvider:" + spLen);
+    DataMapping mapping = new DataMapping(spSect);
+
+    ZipEntry entry = zip.getEntry("ServiceProviders");
+    if (entry == null)
+      return names;
+    byte[] data = zip.getInputStream(entry).readAllBytes();
+    if (data.length % spLen != 0)
+      return names;
+
+    int offName = spSect.get("offName", int.class);
+    int count = data.length / spLen;
+    for (int i = 0; i < count; i++) {
+      int base = i * spLen;
+      mapping.setDataPtr(data, base);
+      int source = mapping.getWord("offSignalSource");
+      int index = mapping.getWord("offIndex");
+      int len = Math.min(mapping.getWord("offLenName"), spLen - offName);
+      String nm = len < 2
+          ? ""
+          : new String(data, base + offName, len, StandardCharsets.UTF_16BE);
+      names.put((source << 16) | index, nm);
+    }
+    return names;
+  }
+
+  // === 4) Satellite list (name + orbital position) ===
+  private static class Satellite {
+    private final String name;
+    private final String position;
+
+    Satellite(String name, String position) {
+      this.name = name;
+      this.position = position;
+    }
+
+    public String getName() {
+      return name;
+    }
+
+    public String getOperator() {
+      return position;
+    }
+  }
+
+  private static Map<Integer, Satellite> loadSatellites(ZipFile zip, Wini ini, String series) throws IOException {
+    Map<Integer, Satellite> sats = new LinkedHashMap<>();
+    Section ser = ini.get(series);
+    int satLen = ser.get("SatDataBase.dat", int.class);
+
+    ZipEntry entry = zip.getEntry("SatDataBase.dat");
+    if (entry == null)
+      return sats;
+    byte[] data = zip.getInputStream(entry).readAllBytes();
+    if (data.length < 4)
+      return sats;
+
+    // skip the 4-byte version header
+    int count = data.length / satLen;
+    for (int i = 0; i < count; i++) {
+      int off = 4 + i * satLen;
+      if (data[off] != 'U')
+        continue;
+
+      // little-endian ints
+      int satNr = ByteBuffer.wrap(data, off + 1, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+      int lonRaw = ByteBuffer.wrap(data, off + 141, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+      boolean isEast = ByteBuffer.wrap(data, off + 137, 4)
+          .order(ByteOrder.LITTLE_ENDIAN).getInt() != 0;
+      String pos = String.format("%d.%d%s", lonRaw / 10, lonRaw % 10, isEast ? "E" : "W");
+
+      // UTF-16BE name, 128 chars at offset+9
+      String name = new String(
+          Arrays.copyOfRange(data, off + 9, off + 9 + 128),
+          StandardCharsets.UTF_16BE);
+      int z = name.indexOf('\0');
+      if (z >= 0)
+        name = name.substring(0, z);
+
+      sats.put(satNr, new Satellite(name, pos));
+    }
+    return sats;
   }
 
   static class ModelConstants {
