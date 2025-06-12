@@ -231,23 +231,13 @@ public class chanscm implements Runnable {
     return null;
   }
 
-  static class Channel {
-    final Map<String, Object> values;
-    final DataMapping mapping;
-
-    Channel(Map<String, Object> values, DataMapping mapping) {
-      this.values = values;
-      this.mapping = mapping;
-    }
-  }
-
   private static List<Map<String, String>> parseChannels(File scmFile) throws IOException {
+    // 1) Figure out which Series: X section to use
     String series = detectSeries(scmFile);
     logger.info("detected series: {}", series);
-
+    // 2) Load the map-*.dat record lengths for that series
     SeriesConfig sc = loadSeriesConfig(series);
     logger.info("detected config: {}", sc);
-
     Wini ini = loadModelIni();
 
     List<Map<String, String>> rows = new ArrayList<>();
@@ -256,7 +246,6 @@ public class chanscm implements Runnable {
       List<String> entries = findChannelEntries(zip, base, sc);
 
       for (String entryName : entries) {
-        // pick mapping section and record length
         ModelConstants mc = getMappingConstants(sc, entryName);
         String sectionName = getSectionNameFor(entryName, mc.recordLength);
         Section section = ini.get(sectionName);
@@ -269,67 +258,42 @@ public class chanscm implements Runnable {
         for (int i = 0; i < count; i++) {
           int off = i * mc.recordLength;
           mapping.setDataPtr(data, off);
-
-          // skip unused
-          if (!mapping.getFlag("InUse"))
-            continue;
-
-          // raw big-endian program number
           int rawProg = mapping.getWord("offProgramNr");
-          // logical or slot little-endian if present
-          int number;
-          if (mapping.offsets.containsKey("offLogicalProgramNr")) {
-            int o = mapping.offsets.get("offLogicalProgramNr");
-            number = (data[off + o] & 0xFF) | ((data[off + o + 1] & 0xFF) << 8);
-          } else if (mapping.offsets.containsKey("offSlotNr")) {
-            int o = mapping.offsets.get("offSlotNr");
-            number = (data[off + o] & 0xFF) | ((data[off + o + 1] & 0xFF) << 8);
-          } else {
-            number = rawProg;
-          }
-          if (number <= 0)
+          if (rawProg == 0)
+            continue;
+          // skip if not “in use” (default true when offInUse is missing)
+          if (!mapping.getFlag("InUse", true))
             continue;
 
           Map<String, String> row = new LinkedHashMap<>();
           row.put("Source", entryName);
-          row.put("ProgramNr_raw", String.valueOf(rawProg));
-          row.put("ProgramNr_remote", String.valueOf(number));
-          row.put("Name", mapping.getString("offName", mc.lenName));
-          // ShortName if available
-          if (section.containsKey("offShortName")) {
-            int lenS = Integer.parseInt(section.getOrDefault("lenShortName", "0"));
-            row.put("ShortName", mapping.getString("offShortName", lenS));
-          }
-          // Favorites as bitmask
-          row.put("FavoritesMask", String.valueOf(mapping.getFavorites()));
-          // Boolean flags
-          for (String flag : List.of("Lock", "Deleted", "IsActive", "Encrypted", "Skip", "Hidden", "HiddenAlt")) {
-            if (mapping.offsets.containsKey("off" + flag)) {
-              row.put(flag, String.valueOf(mapping.getFlag(flag)));
+
+          // iterate every off* in this section
+          for (String key : section.keySet()) {
+            if (!key.startsWith("off"))
+              continue;
+            String rawVal = section.get(key);
+            if (rawVal == null || rawVal.isBlank())
+              continue;
+
+            String name = key.substring(3); // drop “off”
+            String maskKey = "mask" + name;
+
+            if (section.containsKey(maskKey)) {
+              // boolean flag
+              row.put(name, String.valueOf(mapping.getFlag(name, false)));
+            } else if (name.equals("Name")) {
+              row.put("Name", mapping.getString(key, mc.lenName));
+            } else if (name.equals("ShortName")) {
+              int lenShort = Integer.parseInt(section.getOrDefault("lenShortName", "0"));
+              row.put("ShortName", mapping.getString(key, lenShort));
+            } else {
+              // numeric 2-byte value: only if within record bounds
+              int offVal = Integer.parseInt(rawVal.split(",")[0].trim());
+              if (offVal + 1 < mc.recordLength) {
+                row.put(name, String.valueOf(mapping.getWord(key)));
+              }
             }
-          }
-          // DVB-CT fields
-          if (mapping.offsets.containsKey("offServiceId")) {
-            row.put("ServiceType", String.valueOf(mapping.getWord("offServiceType")));
-            row.put("ServiceId", String.valueOf(mapping.getWord("offServiceId")));
-            row.put("OriginalNetworkId", String.valueOf(mapping.getWord("offOriginalNetworkId")));
-            row.put("TransportStreamId", String.valueOf(mapping.getWord("offTransportStreamId")));
-            row.put("VideoPid", String.valueOf(mapping.getWord("offVideoPid")));
-            row.put("AudioPid", String.valueOf(mapping.getWord("offAudioPid")));
-            row.put("PcrPid", String.valueOf(mapping.getWord("offPcrPid")));
-            row.put("SymbolRate", String.valueOf(mapping.getWord("offSymbolRate")));
-          }
-          // DVB-S fields
-          if (mapping.offsets.containsKey("offTransponderIndex")) {
-            row.put("TransponderIndex", String.valueOf(mapping.getWord("offTransponderIndex")));
-            row.put("SatelliteIndex", String.valueOf(mapping.getWord("offSatelliteIndex")));
-          }
-          // Analog frequency/slot
-          if (mapping.offsets.containsKey("offFrequency")) {
-            row.put("Frequency", String.valueOf(
-                ((data[off + mapping.offsets.get("offFrequency")] & 0xFF) << 8)
-                    | (data[off + mapping.offsets.get("offFrequency") + 1] & 0xFF)));
-            row.put("SlotNr", String.valueOf(mapping.getWord("offSlotNr")));
           }
 
           rows.add(row);
@@ -339,7 +303,7 @@ public class chanscm implements Runnable {
     return rows;
   }
 
-  // maps ZIP entry → INI section name
+  // picks the right INI section name for this map entry
   private static String getSectionNameFor(String entryName, int recLen) {
     String name = entryName.contains("/")
         ? entryName.substring(entryName.lastIndexOf('/') + 1)
@@ -357,7 +321,7 @@ public class chanscm implements Runnable {
     throw new IllegalArgumentException("Unknown channel type: " + name);
   }
 
-  // minimal Java port of ChanSort’s DataMapping
+  // helper to read any off*/mask* fields from the INI section
   static class DataMapping {
     private final Section settings;
     private final Map<String, Integer> offsets = new HashMap<>();
@@ -366,10 +330,9 @@ public class chanscm implements Runnable {
 
     DataMapping(Section section) {
       this.settings = section;
-      // collect every "offXxx" key into offsets map
-      for (Map.Entry<String, String> e : section.entrySet()) {
+      for (var e : section.entrySet()) {
         String k = e.getKey();
-        if (k.startsWith("off")) {
+        if (k.startsWith("off") || k.startsWith("mask")) {
           try {
             offsets.put(k, Integer.decode(e.getValue()));
           } catch (NumberFormatException ignore) {
@@ -383,50 +346,39 @@ public class chanscm implements Runnable {
       this.base = base;
     }
 
+    boolean getFlag(String name) {
+      return getFlag(name, false);
+    }
+
+    boolean getFlag(String name, boolean defaultValue) {
+      String offKey = "off" + name;
+      Integer offVal = offsets.get(offKey);
+      if (offVal == null) {
+        return defaultValue;
+      }
+      String maskKey = "mask" + name;
+      int mask = settings.containsKey(maskKey)
+          ? Integer.decode(settings.get(maskKey))
+          : 1;
+      return (data[base + offVal] & mask) != 0;
+    }
+
     int getWord(String offKey) {
-      int off = offsets.get(offKey);
-      // big-endian for ProgramNr; we handle logical/slot little-endian in parser
-      // below
+      Integer off = offsets.get(offKey);
+      if (off == null)
+        return 0;
       return ((data[base + off] & 0xFF) << 8) | (data[base + off + 1] & 0xFF);
     }
 
     String getString(String offKey, int maxChars) {
-      int off = offsets.get(offKey);
+      Integer off = offsets.get(offKey);
+      if (off == null)
+        return "";
       int len = maxChars * 2;
       byte[] buf = Arrays.copyOfRange(data, base + off, base + off + len);
       String s = new String(buf, StandardCharsets.UTF_16BE);
       int i = s.indexOf('\0');
-      return (i >= 0) ? s.substring(0, i) : s;
-    }
-
-    boolean getFlag(String prefix) {
-      String offKey = "off" + prefix;
-      Integer offVal = offsets.get(offKey);
-      if (offVal == null) {
-        // flag not defined → treat as false
-        return false;
-      }
-      String maskKey = "mask" + prefix;
-      int mask = settings.containsKey(maskKey)
-          ? Integer.decode(settings.get(maskKey))
-          : 1;
-      int off = offVal;
-      return (data[base + off] & mask) != 0;
-    }
-
-    int getFavorites() {
-      // ChanSort stores favorites as multiple offFavoriteN offsets
-      int favMask = 0;
-      for (int bit = 0; bit < 32; bit++) {
-        String key = "offFavorite" + bit;
-        if (offsets.containsKey(key)) {
-          int off = offsets.get(key);
-          if ((data[base + off] & 0xFF) != 0) {
-            favMask |= (1 << bit);
-          }
-        }
-      }
-      return favMask;
+      return i >= 0 ? s.substring(0, i) : s;
     }
   }
 
