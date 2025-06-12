@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -40,11 +41,13 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Help.Ansi;
 import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Parameters;
+import picocli.CommandLine.Option;
 import picocli.CommandLine.Spec;
 
 @Command(name = "chanscm", mixinStandardHelpOptions = true, version = "chanscm 1.0", description = "Work with Samsung .scm channel archives", subcommands = {
     chanscm.FilesCommand.class,
-    chanscm.ChannelsCommand.class
+    chanscm.ChannelsCommand.class,
+    chanscm.LegendCommand.class,
 })
 public class chanscm implements Runnable {
   private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(chanscm.class);
@@ -75,23 +78,148 @@ public class chanscm implements Runnable {
     }
   }
 
+  @Command(name = "legend", mixinStandardHelpOptions = true, description = "Show descriptions for each output column")
+  static class LegendCommand implements Runnable {
+    public void run() {
+      List<Map<String, String>> rows = new ArrayList<>();
+      rows.add(Map.of("Column", "Channel", "Description", "Logical channel number (remote key)"));
+      rows.add(Map.of("Column", "Name", "Description", "Full channel name"));
+      rows.add(Map.of("Column", "Short", "Description", "Short channel name if provided"));
+      rows.add(Map.of(
+          "Column", "Quality",
+          "Description", "Content resolution quality (SD/HD/4K/8K)"));
+      rows.add(Map.of("Column", "Index", "Description", "Raw program number from the SCM file"));
+      rows.add(Map.of("Column", "Network (ONID)", "Description", "Original Network ID"));
+      rows.add(Map.of("Column", "TS ID", "Description", "Transport Stream ID"));
+      rows.add(Map.of("Column", "Service ID", "Description", "Service ID"));
+      rows.add(Map.of("Column", "Favorites", "Description", "Favorites bitmask (Checked/Unchecked)"));
+      rows.add(Map.of("Column", "Locked", "Description", "Channel lock flag"));
+      rows.add(Map.of("Column", "Skip", "Description", "Skip flag"));
+      rows.add(Map.of("Column", "Hide", "Description", "Hide flag"));
+      rows.add(Map.of("Column", "Crypt", "Description", "Encrypted flag"));
+      rows.add(Map.of("Column", "Frequency (MHz)", "Description", "Channel frequency"));
+      rows.add(Map.of("Column", "Chan/ Transp", "Description", "Channel ↔ Transponder index"));
+      rows.add(Map.of("Column", "PCR PID", "Description", "PCR PID"));
+      rows.add(Map.of("Column", "Video PID", "Description", "Video PID"));
+      rows.add(Map.of("Column", "Symbol rate", "Description", "Symbol rate"));
+      rows.add(Map.of("Column", "Network Name", "Description", "Satellite name"));
+      rows.add(Map.of("Column", "Network Operator", "Description", "Satellite operator"));
+      rows.add(Map.of("Column", "Provider", "Description", "Service provider name"));
+
+      // always show full legend, ignore --columns/--allColumns
+      printTable(rows, "Column", "Description");
+    }
+  }
+
+  enum OutputFormat {
+    table, csv, tsv, json
+  }
+
   @Command(name = "channels", mixinStandardHelpOptions = true, description = "List channel Number + Name from the SCM archive")
   static class ChannelsCommand implements Runnable {
     @Parameters(index = "0", description = "Path to the .scm or .zip file")
     File scmFile;
+
+    @Option(names = "--columns", description = "Comma-separated list of columns to show")
+    String columns;
+
+    @Option(names = "--allColumns", description = "Show all columns", defaultValue = "false")
+    boolean allColumns;
+
+    @Option(names = "--skipHeader", description = "Do not print header row", defaultValue = "false")
+    boolean skipHeader;
+
+    @Option(names = "--format", description = "Output format (${COMPLETION-CANDIDATES})", defaultValue = "table")
+    OutputFormat format;
+    @Option(names = "--sortBy", description = "Column to sort by", defaultValue = "Channel")
+    String sortBy;
 
     public void run() {
       try {
         List<Map<String, String>> rows = parseChannels(scmFile);
         if (rows.isEmpty()) {
           System.out.println("No channels found.");
+          return;
+        }
+        // decide which columns
+        List<String> cols;
+        if (allColumns) {
+          cols = new ArrayList<>(rows.get(0).keySet());
+        } else if (columns != null) {
+          cols = Arrays.asList(columns.split(","));
         } else {
-          printTable(rows, "New Pos", "Channel name");
+          cols = List.of("Channel", "Name", "Short", "Quality");
+        }
+        rows.sort((a, b) -> {
+          String va = a.getOrDefault(sortBy, "");
+          String vb = b.getOrDefault(sortBy, "");
+          try {
+            return Integer.compare(Integer.parseInt(va), Integer.parseInt(vb));
+          } catch (NumberFormatException e) {
+            return va.compareTo(vb);
+          }
+        });
+        // dispatch
+        switch (format) {
+          case table -> {
+            if (!skipHeader)
+              printTable(rows, cols.toArray(new String[0]));
+            else
+              printTableNoHeader(rows, cols);
+          }
+          case csv -> printCsv(rows, cols, skipHeader);
+          case tsv -> printTsv(rows, cols, skipHeader);
+          case json -> printJson(rows, cols);
         }
       } catch (Exception e) {
-        throw new RuntimeException("Failed to list files in " + scmFile, e);
+        throw new RuntimeException("Failed to list channels in " + scmFile, e);
       }
     }
+  }
+
+  private static void printTableNoHeader(List<Map<String, String>> rows, List<String> cols) {
+    for (var r : rows) {
+      for (int i = 0; i < cols.size(); i++) {
+        System.out.print(pad(r.getOrDefault(cols.get(i), ""),
+            cols.get(i).length()));
+        System.out.print(i < cols.size() - 1 ? " | " : "\n");
+      }
+    }
+  }
+
+  // CSV
+  private static void printCsv(List<Map<String, String>> rows, List<String> cols, boolean skipHeader) {
+    if (!skipHeader) {
+      System.out.println(String.join(",", cols));
+    }
+    for (var r : rows) {
+      System.out.println(cols.stream()
+          .map(c -> "\"" + r.getOrDefault(c, "").replace("\"", "\"\"") + "\"")
+          .collect(Collectors.joining(",")));
+    }
+  }
+
+  // TSV
+  private static void printTsv(List<Map<String, String>> rows, List<String> cols, boolean skipHeader) {
+    if (!skipHeader) {
+      System.out.println(String.join("\t", cols));
+    }
+    for (var r : rows) {
+      System.out.println(cols.stream()
+          .map(c -> r.getOrDefault(c, ""))
+          .collect(Collectors.joining("\t")));
+    }
+  }
+
+  // JSON array of objects (always include only these cols)
+  private static void printJson(List<Map<String, String>> rows, List<String> cols) {
+    System.out.println(rows.stream().map(r -> {
+      String body = cols.stream().map(c -> {
+        String v = r.getOrDefault(c, "").replace("\"", "\\\"");
+        return "\"" + c + "\":\"" + v + "\"";
+      }).collect(Collectors.joining(","));
+      return "{" + body + "}";
+    }).collect(Collectors.joining(",", "[", "]")));
   }
 
   private static List<Map<String, String>> listFiles(File file) throws IOException {
@@ -300,9 +428,41 @@ public class chanscm implements Runnable {
           String hide = mapping.getFlag("Hidden", false) ? "Checked" : "Unchecked";
           String crypt = mapping.getFlag("Encrypted", false) ? "Checked" : "Unchecked";
 
-          // 7) service type
-          int svcTypeCode = mapping.getWord("offServiceType");
-          String svcType = svcTypeCode == 1 ? "HD-TV" : "SD-TV";
+          // 2) derive Quality
+          // 1) Read the one-byte service type
+          int svc = mapping.getByte("offServiceType");
+          String svcType;
+          if (svc == 25)
+            svcType = "HD";
+          else if (svc == 1)
+            svcType = "SD";
+          else if (svc == 2)
+            svcType = "Radio";
+          else
+            svcType = "Other";
+
+          // 2) Compute resolution (as before)
+          int hres = mapping.getWordLE("offHRes");
+          int vres = mapping.getWordLE("offVRes");
+          String resolution;
+          if (hres >= 3840)
+            resolution = "4K";
+          else if (hres >= 1920)
+            resolution = "1080p";
+          else if (hres >= 1280)
+            resolution = "720p";
+          else if (hres > 0 && hres != 0xFFFF)
+            resolution = hres + "p";
+          else
+            resolution = "";
+
+          // 3) Merge them sensibly
+          String quality;
+          if (resolution.isEmpty()) {
+            quality = svcType;
+          } else {
+            quality = resolution + "/" + svcType;
+          }
 
           // 8) frequency & transponder
           int transpIdx = mapping.getWord("offChannelTransponder");
@@ -332,10 +492,11 @@ public class chanscm implements Runnable {
 
           // assemble row
           Map<String, String> row = new LinkedHashMap<>();
-          row.put("Old Pos", String.valueOf(oldPos));
-          row.put("New Pos", newPos > 0 ? String.valueOf(newPos) : "");
-          row.put("Channel name", name);
-          row.put("Short name", shortName);
+          row.put("Channel", newPos > 0 ? String.valueOf(newPos) : "");
+          row.put("Name", name);
+          row.put("Short", shortName);
+          row.put("Quality", quality);
+          row.put("Index", String.valueOf(oldPos));
           row.put("Network (ONID)", String.valueOf(onid));
           row.put("TS ID", String.valueOf(tsid));
           row.put("Service ID", String.valueOf(sid));
@@ -344,7 +505,6 @@ public class chanscm implements Runnable {
           row.put("Skip", skip);
           row.put("Hide", hide);
           row.put("Crypt", crypt);
-          row.put("Service Type", svcType);
           row.put("Frequency (MHz)", freq.toPlainString());
           row.put("Chan/ Transp", String.valueOf(transpIdx));
           row.put("PCR PID", String.valueOf(pcr));
@@ -437,6 +597,12 @@ public class chanscm implements Runnable {
       return ((data[base + off] & 0xFF) << 8) | (data[base + off + 1] & 0xFF);
     }
 
+    /** Read a single unsigned byte at the given offset key */
+    int getByte(String offKey) {
+      Integer off = offsets.get(offKey);
+      return (off == null) ? 0 : (data[base + off] & 0xFF);
+    }
+
     String getString(String offKey, int maxChars) {
       Integer off = offsets.get(offKey);
       if (off == null)
@@ -469,6 +635,14 @@ public class chanscm implements Runnable {
         }
       }
       return mask;
+    }
+
+    int getWordLE(String offKey) {
+      Integer off = offsets.get(offKey);
+      if (off == null || off + 1 >= data.length)
+        return 0;
+      return (data[base + off] & 0xFF)
+          | ((data[base + off + 1] & 0xFF) << 8);
     }
   }
 
@@ -709,9 +883,6 @@ public class chanscm implements Runnable {
 
   private static void printTable(List<Map<String, String>> rows, String... columns) {
     List<String> cols = columns.length == 0 ? new ArrayList<>(rows.get(0).keySet()) : Arrays.asList(columns);
-    if (!rows.isEmpty()) {
-      System.out.println("Available columns: " + rows.get(0).keySet());
-    }
     int[] widths = new int[cols.size()];
     // header widths
     for (int i = 0; i < cols.size(); i++) {
