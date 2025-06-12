@@ -68,7 +68,6 @@ public class chanscm implements Runnable {
           System.out.println("No entries found.");
         } else {
           printTable(rows);
-          // printTable(rows, "Channel name", "New Pos");
         }
       } catch (Exception e) {
         throw new RuntimeException("Failed to list files in " + scmFile, e);
@@ -87,7 +86,7 @@ public class chanscm implements Runnable {
         if (rows.isEmpty()) {
           System.out.println("No channels found.");
         } else {
-          printTable(rows);
+          printTable(rows, "New Pos", "Channel name");
         }
       } catch (Exception e) {
         throw new RuntimeException("Failed to list files in " + scmFile, e);
@@ -708,26 +707,32 @@ public class chanscm implements Runnable {
     return "";
   }
 
-  private static void printTable(List<Map<String, String>> rows) {
-    List<String> cols = new ArrayList<>(rows.get(0).keySet());
+  private static void printTable(List<Map<String, String>> rows, String... columns) {
+    List<String> cols = columns.length == 0 ? new ArrayList<>(rows.get(0).keySet()) : Arrays.asList(columns);
+    if (!rows.isEmpty()) {
+      System.out.println("Available columns: " + rows.get(0).keySet());
+    }
     int[] widths = new int[cols.size()];
+    // header widths
     for (int i = 0; i < cols.size(); i++) {
       widths[i] = cols.get(i).length();
     }
+    // data widths
     for (Map<String, String> r : rows) {
       for (int i = 0; i < cols.size(); i++) {
-        widths[i] = Math.max(widths[i], r.getOrDefault(cols.get(i), "").length());
+        String v = r.getOrDefault(cols.get(i), "");
+        widths[i] = Math.max(widths[i], v.length());
       }
     }
-    // Header
+    // header
     for (int i = 0; i < cols.size(); i++) {
       System.out.print(pad(cols.get(i), widths[i]) + (i < cols.size() - 1 ? " | " : "\n"));
     }
-    // Separator
+    // separator
     for (int i = 0; i < cols.size(); i++) {
       System.out.print("-".repeat(widths[i]) + (i < cols.size() - 1 ? "-+-" : "\n"));
     }
-    // Rows
+    // rows
     for (Map<String, String> r : rows) {
       for (int i = 0; i < cols.size(); i++) {
         System.out.print(pad(r.getOrDefault(cols.get(i), ""), widths[i])
