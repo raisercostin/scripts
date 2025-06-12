@@ -1,48 +1,43 @@
-
 //usr/bin/env jbang "$0" "$@" ; exit $?
 //DEPS info.picocli:picocli:4.7.5
-//DEPS org.fusesource.jansi:jansi:2.4.2
+//DEPS org.fusesource.jansi:jansi:2.4.0
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Enumeration;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipException;
-import java.util.zip.ZipFile;
+//https://docs.google.com/spreadsheets/d/15uvmySih-KCfDhBJ8UVFnd_taIHbJIN3/edit?gid=868106347#gid=868106347
 
 import picocli.CommandLine;
-import picocli.CommandLine.*;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.Parameters;
+import picocli.CommandLine.Help.Ansi;
 
-@Command(name = "scmlist", mixinStandardHelpOptions = true, description = "Imports Samsung .scm files and lists contents as a table.")
-class chanscm implements Runnable {
+import java.io.*;
+import java.util.*;
+import java.util.zip.*;
+
+@Command(name = "chanscm", mixinStandardHelpOptions = true, description = "Import Samsung .scm files and list channel number + name")
+public class chanscm implements Runnable {
+
   @Parameters(index = "0", description = "Path to the .scm file")
   File scmFile;
 
   public void run() {
     try {
-      List<Map<String, String>> channels = parseScm(scmFile);
+      List<Map<String, String>> channels = parseChannels(scmFile);
       if (channels.isEmpty()) {
         System.out.println("No channels found.");
-        return;
+      } else {
+        printTable(channels);
       }
-      printTable(channels);
     } catch (Exception e) {
       System.err.println("Error: " + e.getMessage());
     }
   }
 
-  private List<Map<String, String>> parseScm(File scmFile) throws IOException {
-    List<Map<String, String>> list = new ArrayList<>();
-    try (ZipFile zip = new ZipFile(scmFile)) {
-      Enumeration<? extends ZipEntry> entries = zip.entries();
-      while (entries.hasMoreElements()) {
-        ZipEntry e = entries.nextElement();
+  private List<Map<String, String>> listFiles(File file) throws IOException {
+    List<Map<String, String>> rows = new ArrayList<>();
+    try (ZipFile zip = new ZipFile(file)) {
+      Enumeration<? extends ZipEntry> en = zip.entries();
+      while (en.hasMoreElements()) {
+        ZipEntry e = en.nextElement();
         Map<String, String> row = new LinkedHashMap<>();
         row.put("Name", e.getName());
         row.put("Size", String.valueOf(e.getSize()));
@@ -50,36 +45,75 @@ class chanscm implements Runnable {
         row.put("Method", e.getMethod() == ZipEntry.DEFLATED ? "DEFLATED"
             : e.getMethod() == ZipEntry.STORED ? "STORED"
                 : String.valueOf(e.getMethod()));
-        list.add(row);
+        rows.add(row);
       }
-    } catch (ZipException ze) {
-      throw new IOException("Not a ZIP/SCM archive: " + ze.getMessage(), ze);
     }
-    return list;
+    return rows;
   }
 
-  // -- Anchor: Table print, JS-style
-  private void printTable(List<Map<String, String>> rows) {
-    List<String> columns = new ArrayList<>(rows.get(0).keySet());
-    int[] widths = new int[columns.size()];
-    for (int i = 0; i < columns.size(); i++)
-      widths[i] = columns.get(i).length();
+  private List<Map<String, String>> parseChannels(File file) throws IOException {
+    try (ZipFile zip = new ZipFile(file)) {
+      String channelEntry = null;
+      Enumeration<? extends ZipEntry> en = zip.entries();
+      while (en.hasMoreElements()) {
+        String name = en.nextElement().getName().toLowerCase();
+        if (name.contains("channel") && name.endsWith(".dat")) {
+          channelEntry = name;
+          break;
+        }
+      }
+      if (channelEntry == null) {
+        throw new IOException("No channel-info .dat file found in archive");
+      }
 
-    for (Map<String, String> row : rows)
-      for (int i = 0; i < columns.size(); i++)
-        widths[i] = Math.max(widths[i], row.getOrDefault(columns.get(i), "").length());
+      ZipEntry entry = zip.getEntry(channelEntry);
+      try (BufferedReader br = new BufferedReader(
+          new InputStreamReader(zip.getInputStream(entry)))) {
+        List<Map<String, String>> rows = new ArrayList<>();
+        String line;
+        while ((line = br.readLine()) != null) {
+          if (line.isBlank() || line.toLowerCase().startsWith("number")) {
+            continue;
+          }
+          String[] parts = line.split("[;,\\t]");
+          if (parts.length < 2)
+            continue;
+          Map<String, String> row = new LinkedHashMap<>();
+          row.put("Number", parts[0].trim());
+          row.put("Name", parts[1].trim());
+          rows.add(row);
+        }
+        return rows;
+      }
+    }
+  }
+
+  private void printTable(List<Map<String, String>> rows) {
+    List<String> cols = new ArrayList<>(rows.get(0).keySet());
+    int[] widths = new int[cols.size()];
+    for (int i = 0; i < cols.size(); i++) {
+      widths[i] = cols.get(i).length();
+    }
+    for (Map<String, String> r : rows) {
+      for (int i = 0; i < cols.size(); i++) {
+        widths[i] = Math.max(widths[i], r.getOrDefault(cols.get(i), "").length());
+      }
+    }
 
     // Header
-    for (int i = 0; i < columns.size(); i++)
-      System.out.print(pad(columns.get(i), widths[i]) + (i < columns.size() - 1 ? " | " : "\n"));
+    for (int i = 0; i < cols.size(); i++) {
+      System.out.print(pad(cols.get(i), widths[i]) + (i < cols.size() - 1 ? " | " : "\n"));
+    }
     // Separator
-    for (int i = 0; i < columns.size(); i++)
-      System.out.print("-".repeat(widths[i]) + (i < columns.size() - 1 ? "-+-" : "\n"));
+    for (int i = 0; i < cols.size(); i++) {
+      System.out.print("-".repeat(widths[i]) + (i < cols.size() - 1 ? "-+-" : "\n"));
+    }
     // Rows
-    for (Map<String, String> row : rows) {
-      for (int i = 0; i < columns.size(); i++)
-        System.out
-            .print(pad(row.getOrDefault(columns.get(i), ""), widths[i]) + (i < columns.size() - 1 ? " | " : "\n"));
+    for (Map<String, String> r : rows) {
+      for (int i = 0; i < cols.size(); i++) {
+        System.out.print(pad(r.getOrDefault(cols.get(i), ""), widths[i])
+            + (i < cols.size() - 1 ? " | " : "\n"));
+      }
     }
   }
 
@@ -88,14 +122,9 @@ class chanscm implements Runnable {
   }
 
   public static void main(String... args) {
-    org.fusesource.jansi.AnsiConsole.systemInstall();
-    try {
-      var cmd = new CommandLine(new chanscm());
-      cmd.setColorScheme(CommandLine.Help.defaultColorScheme(Help.Ansi.ON));
-      int exitCode = cmd.execute(args);
-      System.exit(exitCode);
-    } finally {
-      org.fusesource.jansi.AnsiConsole.systemUninstall();
-    }
+    CommandLine cmd = new CommandLine(new chanscm());
+    cmd.setColorScheme(CommandLine.Help.defaultColorScheme(Ansi.ON));
+    int exitCode = cmd.execute(args);
+    System.exit(exitCode);
   }
 }
