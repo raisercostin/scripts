@@ -1,4 +1,6 @@
 //usr/bin/env jbang "$0" "$@" ; exit $?
+//JBANG -q
+
 //DEPS info.picocli:picocli:4.7.5
 //DEPS org.fusesource.jansi:jansi:2.4.0
 //DEPS org.ini4j:ini4j:0.5.4
