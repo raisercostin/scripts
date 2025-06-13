@@ -4,12 +4,17 @@
 //DEPS org.ini4j:ini4j:0.5.4
 //DEPS ch.qos.logback:logback-classic:1.4.11
 //DEPS org.slf4j:slf4j-api:2.0.7
+//JAVA_OPTIONS --enable-native-access=ALL-UNNAMED
+//JAVAC_OPTIONS -Xlint:deprecation
+
+// This is a Java port of the Samsung .scm channel archive parser.
 
 //https://docs.google.com/spreadsheets/d/15uvmySih-KCfDhBJ8UVFnd_taIHbJIN3/edit?gid=868106347#gid=868106347
 
 import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.net.URI;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -788,7 +793,7 @@ public class tvchan implements Runnable {
 
   private static Wini loadModelIni() throws IOException {
     if (Files.notExists(INI_PATH)) {
-      try (var in = new URL(INI_URL).openStream()) {
+      try (var in = URI.create(INI_URL).toURL().openStream()) {
         Files.copy(in, INI_PATH, StandardCopyOption.REPLACE_EXISTING);
       }
     }
