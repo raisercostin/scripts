@@ -45,10 +45,8 @@ import picocli.CommandLine.Option;
 import picocli.CommandLine.Spec;
 
 @Command(name = "chanscm", mixinStandardHelpOptions = true, version = "chanscm 1.0", description = "Work with Samsung .scm channel archives", subcommands = {
-    chanscm.FilesCommand.class,
-    chanscm.ChannelsCommand.class,
-    chanscm.LegendCommand.class,
-})
+    chanscm.FilesCommand.class, chanscm.ChannelsCommand.class, chanscm.LegendCommand.class,
+    chanscm.Csv2ScmCommand.class })
 public class chanscm implements Runnable {
   private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(chanscm.class);
 
@@ -85,9 +83,7 @@ public class chanscm implements Runnable {
       rows.add(Map.of("Column", "Channel", "Description", "Logical channel number (remote key)"));
       rows.add(Map.of("Column", "Name", "Description", "Full channel name"));
       rows.add(Map.of("Column", "Short", "Description", "Short channel name if provided"));
-      rows.add(Map.of(
-          "Column", "Quality",
-          "Description", "Content resolution quality (SD/HD/4K/8K)"));
+      rows.add(Map.of("Column", "Quality", "Description", "Content resolution quality (SD/HD/4K/8K)"));
       rows.add(Map.of("Column", "Index", "Description", "Raw program number from the SCM file"));
       rows.add(Map.of("Column", "Network (ONID)", "Description", "Original Network ID"));
       rows.add(Map.of("Column", "TS ID", "Description", "Transport Stream ID"));
@@ -115,7 +111,8 @@ public class chanscm implements Runnable {
     table, csv, tsv, json
   }
 
-  @Command(name = "channels", mixinStandardHelpOptions = true, description = "List channel Number + Name from the SCM archive")
+  @Command(name = "channels", aliases = {
+      "scm2csv" }, mixinStandardHelpOptions = true, description = "Dump channel list (SCM -> CSV/TSV/JSON/table)")
   static class ChannelsCommand implements Runnable {
     @Parameters(index = "0", description = "Path to the .scm or .zip file")
     File scmFile;
@@ -129,7 +126,7 @@ public class chanscm implements Runnable {
     @Option(names = "--skipHeader", description = "Do not print header row", defaultValue = "false")
     boolean skipHeader;
 
-    @Option(names = "--format", description = "Output format (${COMPLETION-CANDIDATES})", defaultValue = "table")
+    @Option(names = "--format", description = "Output format (${COMPLETION-CANDIDATES})", defaultValue = "csv")
     OutputFormat format;
     @Option(names = "--sortBy", description = "Column to sort by", defaultValue = "Channel")
     String sortBy;
@@ -161,15 +158,15 @@ public class chanscm implements Runnable {
         });
         // dispatch
         switch (format) {
-          case table -> {
-            if (!skipHeader)
-              printTable(rows, cols.toArray(new String[0]));
-            else
-              printTableNoHeader(rows, cols);
-          }
-          case csv -> printCsv(rows, cols, skipHeader);
-          case tsv -> printTsv(rows, cols, skipHeader);
-          case json -> printJson(rows, cols);
+        case table -> {
+          if (!skipHeader)
+            printTable(rows, cols.toArray(new String[0]));
+          else
+            printTableNoHeader(rows, cols);
+        }
+        case csv -> printCsv(rows, cols, skipHeader);
+        case tsv -> printTsv(rows, cols, skipHeader);
+        case json -> printJson(rows, cols);
         }
       } catch (Exception e) {
         throw new RuntimeException("Failed to list channels in " + scmFile, e);
@@ -177,11 +174,29 @@ public class chanscm implements Runnable {
     }
   }
 
+  @Command(name = "csv2scm", mixinStandardHelpOptions = true, description = "Build a Samsung .scm file from edited CSV")
+  static class Csv2ScmCommand implements Runnable {
+    @Parameters(index = "0", description = "Source .scm or .zip (for model/series detection)")
+    File templateScm;
+    @Parameters(index = "1", description = "Edited CSV file (with same columns as scm2csv)")
+    File csvFile;
+    @Option(names = "--output", description = "Where to write the new .scm", required = true)
+    File outScm;
+
+    public void run() {
+      // 1) unzip templateScm to tempDir
+      // 2) parse csvFile into List<Map<String,String>> rows
+      // 3) for each row, locate the right map-*.dat + record offset
+      // and patch the binary bytes (programNr, name, flags…)
+      // 4) rezip tempDir → outScm
+      // TODO: implement the above
+    }
+  }
+
   private static void printTableNoHeader(List<Map<String, String>> rows, List<String> cols) {
     for (var r : rows) {
       for (int i = 0; i < cols.size(); i++) {
-        System.out.print(pad(r.getOrDefault(cols.get(i), ""),
-            cols.get(i).length()));
+        System.out.print(pad(r.getOrDefault(cols.get(i), ""), cols.get(i).length()));
         System.out.print(i < cols.size() - 1 ? " | " : "\n");
       }
     }
@@ -193,8 +208,7 @@ public class chanscm implements Runnable {
       System.out.println(String.join(",", cols));
     }
     for (var r : rows) {
-      System.out.println(cols.stream()
-          .map(c -> "\"" + r.getOrDefault(c, "").replace("\"", "\"\"") + "\"")
+      System.out.println(cols.stream().map(c -> "\"" + r.getOrDefault(c, "").replace("\"", "\"\"") + "\"")
           .collect(Collectors.joining(",")));
     }
   }
@@ -205,9 +219,7 @@ public class chanscm implements Runnable {
       System.out.println(String.join("\t", cols));
     }
     for (var r : rows) {
-      System.out.println(cols.stream()
-          .map(c -> r.getOrDefault(c, ""))
-          .collect(Collectors.joining("\t")));
+      System.out.println(cols.stream().map(c -> r.getOrDefault(c, "")).collect(Collectors.joining("\t")));
     }
   }
 
@@ -233,8 +245,7 @@ public class chanscm implements Runnable {
         row.put("Size", String.valueOf(e.getSize()));
         row.put("Compressed", String.valueOf(e.getCompressedSize()));
         row.put("Method", e.getMethod() == ZipEntry.DEFLATED ? "DEFLATED"
-            : e.getMethod() == ZipEntry.STORED ? "STORED"
-                : String.valueOf(e.getMethod()));
+            : e.getMethod() == ZipEntry.STORED ? "STORED" : String.valueOf(e.getMethod()));
         rows.add(row);
       }
     }
@@ -289,14 +300,14 @@ public class chanscm implements Runnable {
     Matcher m = Pattern.compile(".*_(\\d{4})\\.scm$").matcher(scmFile.getName());
     if (m.matches()) {
       switch (m.group(1)) {
-        case "1001":
-          return "Series:C";
-        case "1101":
-          return "Series:D";
-        case "1201":
-          return "Series:E";
-        default:
-          return null;
+      case "1001":
+        return "Series:C";
+      case "1101":
+        return "Series:D";
+      case "1201":
+        return "Series:E";
+      default:
+        return null;
       }
     }
     return null;
@@ -327,14 +338,14 @@ public class chanscm implements Runnable {
     List<Set<Character>> candidates = new ArrayList<>();
 
     // map-AirA: 320⇒D/E, 292⇒C, 248⇒B
-    candidates.add(detectLetterByLength(zip, "map-AirA",
-        Map.of(320, Set.of('D', 'E'), 292, Set.of('C'), 248, Set.of('B'))));
+    candidates
+        .add(detectLetterByLength(zip, "map-AirA", Map.of(320, Set.of('D', 'E'), 292, Set.of('C'), 248, Set.of('B'))));
     // map-AirD
-    candidates.add(detectLetterByLength(zip, "map-AirD",
-        Map.of(320, Set.of('D', 'E'), 292, Set.of('C'), 248, Set.of('B'))));
+    candidates
+        .add(detectLetterByLength(zip, "map-AirD", Map.of(320, Set.of('D', 'E'), 292, Set.of('C'), 248, Set.of('B'))));
     // map-CableD
-    candidates.add(detectLetterByLength(zip, "map-CableD",
-        Map.of(520, Set.of('D', 'E'), 484, Set.of('C'), 412, Set.of('B'))));
+    candidates.add(
+        detectLetterByLength(zip, "map-CableD", Map.of(520, Set.of('D', 'E'), 484, Set.of('C'), 412, Set.of('B'))));
 
     // intersect all sets, keep B/C/D/E
     Set<Character> valid = new HashSet<>(Set.of('B', 'C', 'D', 'E'));
@@ -348,8 +359,7 @@ public class chanscm implements Runnable {
     return null;
   }
 
-  private static Set<Character> detectLetterByLength(
-      ZipFile zip, String entryName, Map<Integer, Set<Character>> map) {
+  private static Set<Character> detectLetterByLength(ZipFile zip, String entryName, Map<Integer, Set<Character>> map) {
     ZipEntry e = zip.getEntry(entryName);
     if (e == null)
       return null;
@@ -474,18 +484,13 @@ public class chanscm implements Runnable {
           int symRate = mapping.getWord("offSymbolRate");
 
           // 10) provider lookup
-          int src = mapping.offsets.containsKey("offSignalSource")
-              ? mapping.getWord("offSignalSource")
-              : 0;
-          int provIndex = mapping.offsets.containsKey("offServiceProviderId")
-              ? mapping.getWord("offServiceProviderId")
+          int src = mapping.offsets.containsKey("offSignalSource") ? mapping.getWord("offSignalSource") : 0;
+          int provIndex = mapping.offsets.containsKey("offServiceProviderId") ? mapping.getWord("offServiceProviderId")
               : 0;
           String provKey = providerNames.get((src << 16) + provIndex);
 
           // 11) network names via satellite index
-          int satIdx = mapping.offsets.containsKey("offTransponderIndex")
-              ? mapping.getWord("offTransponderIndex")
-              : -1;
+          int satIdx = mapping.offsets.containsKey("offTransponderIndex") ? mapping.getWord("offTransponderIndex") : -1;
           Satellite sat = sats.get(satIdx);
           String netName = sat != null ? sat.getName() : "";
           String netOp = sat != null ? sat.getOperator() : "";
@@ -532,9 +537,7 @@ public class chanscm implements Runnable {
 
   // picks the right INI section name for this map entry
   private static String getSectionNameFor(String entryName, int recLen) {
-    String name = entryName.contains("/")
-        ? entryName.substring(entryName.lastIndexOf('/') + 1)
-        : entryName;
+    String name = entryName.contains("/") ? entryName.substring(entryName.lastIndexOf('/') + 1) : entryName;
     if (name.startsWith("map-AirA") || name.startsWith("map-CableA"))
       return "Analog:" + recLen;
     if (name.startsWith("map-AirD") || name.startsWith("map-CableD"))
@@ -584,9 +587,7 @@ public class chanscm implements Runnable {
         return defaultValue;
       }
       String maskKey = "mask" + name;
-      int mask = settings.containsKey(maskKey)
-          ? Integer.decode(settings.get(maskKey))
-          : 1;
+      int mask = settings.containsKey(maskKey) ? Integer.decode(settings.get(maskKey)) : 1;
       return (data[base + offVal] & mask) != 0;
     }
 
@@ -618,10 +619,8 @@ public class chanscm implements Runnable {
       Integer off = offsets.get(offKey);
       if (off == null || off + 3 >= data.length)
         return Float.NaN;
-      int bits = ((data[base + off] & 0xFF) << 24)
-          | ((data[base + off + 1] & 0xFF) << 16)
-          | ((data[base + off + 2] & 0xFF) << 8)
-          | (data[base + off + 3] & 0xFF);
+      int bits = ((data[base + off] & 0xFF) << 24) | ((data[base + off + 1] & 0xFF) << 16)
+          | ((data[base + off + 2] & 0xFF) << 8) | (data[base + off + 3] & 0xFF);
       return Float.intBitsToFloat(bits);
     }
 
@@ -641,8 +640,7 @@ public class chanscm implements Runnable {
       Integer off = offsets.get(offKey);
       if (off == null || off + 1 >= data.length)
         return 0;
-      return (data[base + off] & 0xFF)
-          | ((data[base + off + 1] & 0xFF) << 8);
+      return (data[base + off] & 0xFF) | ((data[base + off + 1] & 0xFF) << 8);
     }
   }
 
@@ -699,9 +697,7 @@ public class chanscm implements Runnable {
       int source = mapping.getWord("offSignalSource");
       int index = mapping.getWord("offIndex");
       int len = Math.min(mapping.getWord("offLenName"), spLen - offName);
-      String nm = len < 2
-          ? ""
-          : new String(data, base + offName, len, StandardCharsets.UTF_16BE);
+      String nm = len < 2 ? "" : new String(data, base + offName, len, StandardCharsets.UTF_16BE);
       names.put((source << 16) | index, nm);
     }
     return names;
@@ -748,14 +744,11 @@ public class chanscm implements Runnable {
       // little-endian ints
       int satNr = ByteBuffer.wrap(data, off + 1, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
       int lonRaw = ByteBuffer.wrap(data, off + 141, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-      boolean isEast = ByteBuffer.wrap(data, off + 137, 4)
-          .order(ByteOrder.LITTLE_ENDIAN).getInt() != 0;
+      boolean isEast = ByteBuffer.wrap(data, off + 137, 4).order(ByteOrder.LITTLE_ENDIAN).getInt() != 0;
       String pos = String.format("%d.%d%s", lonRaw / 10, lonRaw % 10, isEast ? "E" : "W");
 
       // UTF-16BE name, 128 chars at offset+9
-      String name = new String(
-          Arrays.copyOfRange(data, off + 9, off + 9 + 128),
-          StandardCharsets.UTF_16BE);
+      String name = new String(Arrays.copyOfRange(data, off + 9, off + 9 + 128), StandardCharsets.UTF_16BE);
       int z = name.indexOf('\0');
       if (z >= 0)
         name = name.substring(0, z);
@@ -773,11 +766,7 @@ public class chanscm implements Runnable {
     final int offLogicalProgramNr;
     final int offSlotNr;
 
-    ModelConstants(int recordLength,
-        int offProgramNr,
-        int offName,
-        int lenName,
-        int offLogicalProgramNr,
+    ModelConstants(int recordLength, int offProgramNr, int offName, int lenName, int offLogicalProgramNr,
         int offSlotNr) {
       this.recordLength = recordLength;
       this.offProgramNr = offProgramNr;
@@ -788,14 +777,13 @@ public class chanscm implements Runnable {
     }
 
     public String toString() {
-      return String.format(
-          "MC[len=%d,prog=%d,logical=%d,slot=%d,nameOff=%d,lenName=%d]",
-          recordLength, offProgramNr, offLogicalProgramNr, offSlotNr, offName, lenName);
+      return String.format("MC[len=%d,prog=%d,logical=%d,slot=%d,nameOff=%d,lenName=%d]", recordLength, offProgramNr,
+          offLogicalProgramNr, offSlotNr, offName, lenName);
     }
   }
 
-  private static final String INI_URL = "https://raw.githubusercontent.com/PredatH0r/ChanSort/master/" +
-      "ChanSort.Loader.Samsung/ChanSort.Loader.Samsung.ini";
+  private static final String INI_URL = "https://raw.githubusercontent.com/PredatH0r/ChanSort/master/"
+      + "ChanSort.Loader.Samsung/ChanSort.Loader.Samsung.ini";
   private static final Path INI_PATH = Paths.get("ChanSort.Loader.Samsung.ini");
 
   private static Wini loadModelIni() throws IOException {
@@ -811,13 +799,10 @@ public class chanscm implements Runnable {
   static record SeriesConfig(Map<String, Integer> recLen) {
     int getRecordLength(String entryName) throws IOException {
       // strip any “Clone/” or folder prefix
-      String name = entryName.contains("/")
-          ? entryName.substring(entryName.lastIndexOf('/') + 1)
-          : entryName;
+      String name = entryName.contains("/") ? entryName.substring(entryName.lastIndexOf('/') + 1) : entryName;
       Integer len = recLen.get(name);
       if (len == null) {
-        throw new IOException("No record length for map file '"
-            + name + "' in series config");
+        throw new IOException("No record length for map file '" + name + "' in series config");
       }
       return len;
     }
@@ -828,8 +813,8 @@ public class chanscm implements Runnable {
     Wini ini = loadModelIni();
     Section s = ini.get(series);
     Map<String, Integer> recs = new HashMap<>();
-    for (String key : List.of("map-AirA", "map-AirD", "map-CableD",
-        "map-SateD", "map-AstraHDPlusD", "map-CyfraPlusD")) {
+    for (String key : List.of("map-AirA", "map-AirD", "map-CableD", "map-SateD", "map-AstraHDPlusD",
+        "map-CyfraPlusD")) {
       String val = s.get(key);
       if (val != null)
         recs.put(key, Integer.parseInt(val));
@@ -839,8 +824,7 @@ public class chanscm implements Runnable {
 
   // 3) Given a ZIP entry name and the SeriesConfig, pick the right INI section
   // and read the three offsets (program number, name offset, name length).
-  private static ModelConstants getMappingConstants(
-      SeriesConfig sc, String entryName) throws IOException {
+  private static ModelConstants getMappingConstants(SeriesConfig sc, String entryName) throws IOException {
     int recLen = sc.getRecordLength(entryName);
     String section;
     if (entryName.contains("map-AirA") || entryName.contains("map-CableA")) {
@@ -862,12 +846,8 @@ public class chanscm implements Runnable {
     int offProg = Integer.parseInt(m.get("offProgramNr"));
     int offName = Integer.parseInt(m.get("offName"));
     int lenName = Integer.parseInt(m.getOrDefault("lenName", m.get("offNameLength")));
-    int offLogical = m.containsKey("offLogicalProgramNr")
-        ? Integer.parseInt(m.get("offLogicalProgramNr"))
-        : -1;
-    int offSlot = m.containsKey("offSlotNr")
-        ? Integer.parseInt(m.get("offSlotNr"))
-        : -1;
+    int offLogical = m.containsKey("offLogicalProgramNr") ? Integer.parseInt(m.get("offLogicalProgramNr")) : -1;
+    int offSlot = m.containsKey("offSlotNr") ? Integer.parseInt(m.get("offSlotNr")) : -1;
 
     return new ModelConstants(recLen, offProg, offName, lenName, offLogical, offSlot);
   }
@@ -906,8 +886,7 @@ public class chanscm implements Runnable {
     // rows
     for (Map<String, String> r : rows) {
       for (int i = 0; i < cols.size(); i++) {
-        System.out.print(pad(r.getOrDefault(cols.get(i), ""), widths[i])
-            + (i < cols.size() - 1 ? " | " : "\n"));
+        System.out.print(pad(r.getOrDefault(cols.get(i), ""), widths[i]) + (i < cols.size() - 1 ? " | " : "\n"));
       }
     }
   }
