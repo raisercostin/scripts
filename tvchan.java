@@ -44,11 +44,11 @@ import picocli.CommandLine.Parameters;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Spec;
 
-@Command(name = "chanscm", mixinStandardHelpOptions = true, version = "chanscm 1.0", description = "Work with Samsung .scm channel archives", subcommands = {
-    chanscm.FilesCommand.class, chanscm.ChannelsCommand.class, chanscm.LegendCommand.class,
-    chanscm.Csv2ScmCommand.class })
-public class chanscm implements Runnable {
-  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(chanscm.class);
+@Command(name = "tvchan", mixinStandardHelpOptions = true, version = "tvchan 1.0", description = "Works with Samsung .scm channel archives. Inspired by chansort.", subcommands = {
+    tvchan.FilesCommand.class, tvchan.ChannelsCommand.class, tvchan.LegendCommand.class,
+    tvchan.Csv2ScmCommand.class })
+public class tvchan implements Runnable {
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(tvchan.class);
 
   @Spec
   private CommandSpec spec;
@@ -898,7 +898,7 @@ public class chanscm implements Runnable {
   public static void main(String... args) {
     org.fusesource.jansi.AnsiConsole.systemInstall();
     try {
-      CommandLine cmd = new CommandLine(new chanscm());
+      CommandLine cmd = new CommandLine(new tvchan());
       cmd.setColorScheme(CommandLine.Help.defaultColorScheme(Ansi.ON));
       int exitCode = cmd.execute(args);
       System.exit(exitCode);
