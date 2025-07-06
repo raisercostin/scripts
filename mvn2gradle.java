@@ -16,6 +16,8 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
 
@@ -24,7 +26,13 @@ import org.zeroturnaround.exec.InvalidExitValueException;
 import org.zeroturnaround.exec.ProcessExecutor;
 
 import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
+import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
+import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper;
+import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty;
+import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlRootElement;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Option;
@@ -59,6 +67,10 @@ public class mvn2gradle {
     public Integer call() throws Exception {
       return GradleKtsGenerator.sync(this);
     }
+  }
+
+  public static class Projects {
+    public List<PomModel> project = new ArrayList<>();
   }
 
   @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlRootElement(localName = "project")
@@ -648,7 +660,11 @@ public class mvn2gradle {
           logger.info("Generating effective-pom.xml");
           generateEffectivePom(cli.projectDir);
         }
-        pom = loadEffectivePom(cli.projectDir, cli.ignoreUnknown);
+        Projects projects = loadEffectivePom(cli.projectDir, cli.ignoreUnknown);
+        if (projects.project == null || projects.project.isEmpty()) {
+          throw new IllegalStateException("No projects found in effective POM");
+        }
+        pom = projects.project.get(0);
       } else if (cli.usePomInheritance) {
         pom = loadPom(cli.projectDir, cli.ignoreUnknown);
       } else {
@@ -729,14 +745,15 @@ public class mvn2gradle {
         depResult = new DependencyEmitResult("", "");
       } else {
         pom.dependencies.dependency.sort(java.util.Comparator
-          .comparing((Dependency d) -> toGradleConf(d.scope))
-          .thenComparing(d -> d.artifactId));
+            .comparing((Dependency d) -> toGradleConf(d.scope))
+            .thenComparing(d -> d.artifactId));
         if (inlineVersions) {
           String depBlock = pom.dependencies.dependency.stream()
               .map(dep -> String.format("    implementation(\"%s:%s:%s\")",
                   dep.groupId,
                   dep.artifactId,
-                  resolveVersion(dep, pom, useEffectivePom) != null ? resolveVersion(dep, pom, useEffectivePom) : "unknown"))
+                  resolveVersion(dep, pom, useEffectivePom) != null ? resolveVersion(dep, pom, useEffectivePom)
+                      : "unknown"))
               .collect(java.util.stream.Collectors.joining("\n"));
           depResult = new DependencyEmitResult("", depBlock);
         } else {
@@ -854,18 +871,34 @@ public class mvn2gradle {
       return System.getProperty("os.name").toLowerCase().contains("win");
     }
 
-    private static PomModel loadEffectivePom(File projectDir, boolean ignoreUnknown) throws IOException {
+    public static Projects loadEffectivePom(File projectDir, boolean ignoreUnknown) throws IOException {
       Path effPomPath = projectDir.toPath().resolve("effective-pom.xml");
       if (!Files.exists(effPomPath)) {
         throw new FileNotFoundException("No effective-pom.xml found at " + effPomPath +
             ". Generate one by running: mvn help:effective-pom -Doutput=effective-pom.xml");
       }
+
+      JacksonXmlModule module = new JacksonXmlModule();
+      module.setDefaultUseWrapper(false); // optional depending on your XML structure
+
+      XmlMapper xmlMapper = new XmlMapper(module);
+      xmlMapper.setDefaultUseWrapper(false);
+      xmlMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, !ignoreUnknown);
       String xml = Files.readString(effPomPath);
-      XmlMapper xmlMapper = new XmlMapper();
-      xmlMapper.configure(
-          com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
-          !ignoreUnknown);
-      return xmlMapper.readValue(xml, PomModel.class);
+
+      try {
+        // Try parse as Projects (multi-module)
+        return xmlMapper.readValue(xml, Projects.class);
+      } catch (UnrecognizedPropertyException e) {
+        // If failed because no 'project' wrapper, parse single PomModel then wrap it
+        if (e.getMessage().contains("Unrecognized field") && e.getMessage().contains("project")) {
+          PomModel singlePom = xmlMapper.readValue(xml, PomModel.class);
+          Projects projects = new Projects();
+          projects.project.add(singlePom);
+          return projects;
+        }
+        throw e;
+      }
     }
 
     private static java.util.Set<String> collectUsedProperties(PomModel pom) {
