@@ -765,6 +765,10 @@ public class mvn2gradle {
               mavenCentral()
           }
 
+          tasks.withType<JavaCompile> {
+              options.compilerArgs.add("-Xlint:unchecked")
+          }
+
           dependencies {
           %s
           }
