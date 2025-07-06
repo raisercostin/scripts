@@ -906,30 +906,30 @@ public class mvn2gradle {
 
     public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions, Projects effectivePom,
         Set<String> moduleArtifacts) {
+
+      // 1. Emit Maven property variables for all referenced properties in dependency
+      // versions
+      String gradlePropertyBlock = emitReferencedMavenPropertiesKts(pom);
+
+      // 2. Collect Gradle plugins and config snippets as before
       StringBuilder pluginConfigSnippets = new StringBuilder();
       Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets);
-      // When calling emitDeps (or generate), pass moduleArtifacts:
+
+      // 3. Emit dependencies and any version variables
       DependencyEmitResult depResult = emitDeps(pom, useEffectivePom, inlineVersions, effectivePom, moduleArtifacts);
 
+      // 4. Standard project attributes
       String group = resolveProperties(pom.groupId, pom);
       String version = resolveProperties(pom.version, pom);
       String javaVersion = extractJavaVersionFromEffectivePom(pom);
+
       if (depResult.hasLombok)
         pluginsMap.put("io.freefair.lombok", "8.6");
-      String pluginsEntries = StreamEx.of(pluginsMap.entrySet())
-          .map(e -> e.getValue() == null ? "    id(\"" + e.getKey() + "\")"
-              : "    id(\"" + e.getKey() + "\") version \"" + e.getValue() + "\"")
-          .joining("\n");
 
-      String pluginsBlock = """
-          plugins {
-              id("java")
-              id("eclipse")
-              %s
-          }
-          """.formatted(pluginsEntries);
+      String pluginsBlock = buildPluginsBlockKts(pluginsMap);
 
       return String.format("""
+          %s
           %s
 
           %s
@@ -940,7 +940,6 @@ public class mvn2gradle {
           }
 
           group = "%s"
-          
           version = "%s"
           layout.buildDirectory.set(file("$projectDir/target/gradle"))
 
@@ -952,7 +951,6 @@ public class mvn2gradle {
           tasks.withType<JavaCompile> {
               options.compilerArgs.add("-Xlint:unchecked")
               options.encoding = "UTF-8"
-              //eclipse
               destinationDirectory.set(
                   layout.buildDirectory.dir(
                       "classes/java/" + if (name.contains("Test", ignoreCase = true)) "test" else "main"
@@ -962,46 +960,17 @@ public class mvn2gradle {
           eclipse {
               classpath {
                   defaultOutputDir = layout.buildDirectory.dir("eclipse/classes/java/main").get().asFile
-                  //defaultOutputDir = file("$projectDir/target/eclipse/classes")
                   file {
                       whenMerged {
                           val entries = (this as org.gradle.plugins.ide.eclipse.model.Classpath).entries
-                          //entries.add(org.gradle.plugins.ide.eclipse.model.SourceFolder("src/custom", "customOutputFolder"))
                           entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.ProjectDependency>()
                               .forEach { it.entryAttributes["without_test_code"] = "false" }
                           entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.SourceFolder>()
                               .filter { it.path.startsWith("/") }
                               .forEach { it.entryAttributes["without_test_code"] = "false" }
                       }
-          
                       withXml {
                         val node = asNode()
-                        /*
-                        node.children()
-                            .filterIsInstance<groovy.util.Node>()
-                            .filter { it.attribute("kind") == "src" }
-                            .forEach { child ->
-                                logger.warn("child.class=${child.javaClass.name}")
-                                child.javaClass.methods.forEach { method ->
-                                    logger.warn("method: ${method.name} (${method.parameterCount} params)")
-                                }
-                                child.javaClass.declaredFields.forEach { field ->
-                                    logger.warn("field: ${field.name} type=${field.type}")
-                                }
-                                val kind = child.attribute("kind")
-                                val path = child.attribute("path")?.toString()
-                                logger.debug("Processing classpathentry: kind=$kind, path=$path child=$child")
-                                if (kind == "src" && path != "target/gradle/generated/javacc") {
-                                  logger.warn("Processing classpathentry: kind=$kind, path=$path")
-                                    // e.g. project dependency paths start with "/" in Eclipse .classpath
-                                    if (path != null && path.startsWith("/")) {
-                                        //child.attributes["without_test_code"]="false"
-                                        //child.setValue(mapOf("without_test_code" to "false"))
-                                        child.appendNode("without_test_code", "false")
-                                    }
-                                }
-                            }
-                        */
                         node.appendNode("classpathentry", mapOf(
                             "kind" to "src",
                             "path" to "target/gradle/generated/javacc"
@@ -1015,27 +984,131 @@ public class mvn2gradle {
           %s
           }
           %s
-          """, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
+          """, gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
           depResult.dependencyBlock, pluginConfigSnippets);
-          //      tasks.withType<Test> {
-          //        useJUnitPlatform()
-          //    }
-          //    tasks.withType<ProcessResources> {
-          //        filesMatching("**/*.properties") {
-          //            filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
-          //        }
-          //    }
-          //    tasks.withType<ProcessResources> {
-          //        filesMatching("**/*.xml") {
-          //            filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
-          //        }
-          //    }
-          //    tasks.withType<ProcessResources> {
-          //        filesMatching("**/*.txt") {
-          //            filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
-          //        }
-          //    }
     }
+
+    private static String emitReferencedMavenPropertiesKts(PomModel pom) {
+      // --- Control inclusion of property usages ---
+      final boolean includeDependencies = true;
+      final boolean includeDependencyManagement = false;
+      final boolean includeProfileDependencies = true;
+      // --- Control inclusion of property source ---
+      final boolean includeOwnProperties = true;
+      final boolean includeParentProperties = true;
+
+      Set<String> referencedKeys = StreamEx.<String>empty()
+          // Dependencies
+          .append(includeDependencies && pom.dependencies != null && pom.dependencies.dependency != null
+              ? StreamEx.of(pom.dependencies.dependency).flatMap(d -> {
+                if (d.version == null)
+                  return StreamEx.empty();
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}").matcher(d.version);
+                List<String> keys = new ArrayList<>();
+                while (m.find())
+                  keys.add(m.group(1));
+                return StreamEx.of(keys);
+              })
+              : StreamEx.empty())
+          // DependencyManagement
+          .append(includeDependencyManagement && pom.dependencyManagement != null
+              && pom.dependencyManagement.dependencies != null
+              && pom.dependencyManagement.dependencies.dependency != null
+                  ? StreamEx.of(pom.dependencyManagement.dependencies.dependency).flatMap(d -> {
+                    if (d.version == null)
+                      return StreamEx.empty();
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}").matcher(d.version);
+                    List<String> keys = new ArrayList<>();
+                    while (m.find())
+                      keys.add(m.group(1));
+                    return StreamEx.of(keys);
+                  })
+                  : StreamEx.empty())
+          // Profile Dependencies
+          .append(includeProfileDependencies && pom.profiles != null && pom.profiles.profile != null
+              ? StreamEx.of(pom.profiles.profile)
+                  .flatMap(profile -> profile.dependencies != null && profile.dependencies.dependency != null
+                      ? StreamEx.of(profile.dependencies.dependency).flatMap(d -> {
+                        if (d.version == null)
+                          return StreamEx.empty();
+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}")
+                            .matcher(d.version);
+                        List<String> keys = new ArrayList<>();
+                        while (m.find())
+                          keys.add(m.group(1));
+                        return StreamEx.of(keys);
+                      })
+                      : StreamEx.empty())
+              : StreamEx.empty())
+          .distinct().toSet();
+
+      Map<String, String> allProps = includeOwnProperties && pom.properties != null && pom.properties.any != null
+          ? pom.properties.any
+          : java.util.Collections.emptyMap();
+
+      if (includeParentProperties && pom.parentPom != null) {
+        allProps = new java.util.LinkedHashMap<>(allProps);
+        Map<String, String> parentProps = pom.parentPom.properties != null && pom.parentPom.properties.any != null
+            ? pom.parentPom.properties.any
+            : java.util.Collections.emptyMap();
+        allProps.putAll(parentProps); // child overrides parent
+      }
+
+      var finalProps = allProps;
+      return StreamEx.of(referencedKeys).map(key -> {
+        String value = finalProps.get(key);
+        if (value == null)
+          return null;
+        String safeKey = key.replaceAll("[^a-zA-Z0-9_]", "_");
+        return "val %s = \"%s\"".formatted(safeKey, value);
+      }).nonNull().joining("\n");
+    }
+
+    // --- Helper: return all POMs from this one up the parent chain, root first
+    private static java.util.List<PomModel> getAllPomsRecursive(PomModel pom) {
+      java.util.LinkedList<PomModel> chain = new java.util.LinkedList<>();
+      PomModel current = pom;
+      while (current != null) {
+        chain.addFirst(current);
+        current = current.parentPom;
+      }
+      return chain;
+    }
+
+    // --- Helper: build plugins block (Kotlin/Gradle KTS, not Groovy, not
+    // deprecated)
+    private static String buildPluginsBlockKts(Map<String, String> pluginsMap) {
+      String pluginsEntries = StreamEx.of(pluginsMap.entrySet())
+          .map(e -> e.getValue() == null ? "    id(\"" + e.getKey() + "\")"
+              : "    id(\"" + e.getKey() + "\") version \"" + e.getValue() + "\"")
+          .joining("\n");
+      return """
+          plugins {
+              id("java")
+              id("eclipse")
+              %s
+          }
+          """.formatted(pluginsEntries);
+    }
+
+    // tasks.withType<Test> {
+    // useJUnitPlatform()
+    // }
+    // tasks.withType<ProcessResources> {
+    // filesMatching("**/*.properties") {
+    // filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
+    // }
+    // }
+    // tasks.withType<ProcessResources> {
+    // filesMatching("**/*.xml") {
+    // filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
+    // }
+    // }
+    // tasks.withType<ProcessResources> {
+    // filesMatching("**/*.txt") {
+    // filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
+    // }
+    // }
 
     private static DependencyEmitResult emitDeps(PomModel pom, boolean useEffectivePom, boolean inlineVersions,
         Projects effectivePom, Set<String> moduleArtifacts) {
@@ -1329,21 +1402,6 @@ public class mvn2gradle {
         }
         throw e;
       }
-    }
-
-    private static java.util.Set<String> collectUsedProperties(PomModel pom) {
-      java.util.Set<String> used = new java.util.LinkedHashSet<>();
-      if (pom.dependencies != null && pom.dependencies.dependency != null) {
-        for (Dependency d : pom.dependencies.dependency) {
-          if (d.version != null) {
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}").matcher(d.version);
-            while (m.find()) {
-              used.add(m.group(1));
-            }
-          }
-        }
-      }
-      return used;
     }
 
     private static String emitGradleProperties(PomModel pom, java.util.Set<String> usedProperties) {
