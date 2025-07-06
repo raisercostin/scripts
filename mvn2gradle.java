@@ -664,9 +664,35 @@ public class mvn2gradle {
 
       PomModel rootPom = loadPom(cli.projectDir, cli.ignoreUnknown, effectivePom);
 
+      // Generate settings.gradle.kts for root project and modules
+      String settingsGradle = generateSettingsGradleKts(rootPom);
+      Files.writeString(cli.projectDir.toPath().resolve("settings.gradle.kts"), settingsGradle);
+      log.info("Generated settings.gradle.kts");
+
+      // Generate build.gradle.kts recursively for root and modules
       generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom);
 
       return 0;
+    }
+
+    public static String generateSettingsGradleKts(PomModel pom) {
+      if (pom.modules == null || pom.modules.module == null || pom.modules.module.isEmpty()) {
+        // No modules, just return root project name declaration
+        return String.format("rootProject.name = \"%s\"\n", pom.artifactId);
+      }
+      StringBuilder sb = new StringBuilder();
+      sb.append(String.format("rootProject.name = \"%s\"\n\n", pom.artifactId));
+      sb.append("include(\n");
+      for (int i = 0; i < pom.modules.module.size(); i++) {
+        String module = pom.modules.module.get(i);
+        sb.append("    \"").append(module).append("\"");
+        if (i < pom.modules.module.size() - 1) {
+          sb.append(",");
+        }
+        sb.append("\n");
+      }
+      sb.append(")\n");
+      return sb.toString();
     }
 
     private static void generateForModulesRecursively(Path baseDir, PomModel pom, Cli cli, Projects effectivePom)
@@ -778,14 +804,18 @@ public class mvn2gradle {
         pom.dependencies.dependency.sort(java.util.Comparator
             .comparing((Dependency d) -> toGradleConf(d.scope))
             .thenComparing(d -> d.artifactId));
+
         if (inlineVersions) {
           String depBlock = pom.dependencies.dependency.stream()
-              .map(dep -> String.format("    implementation(\"%s:%s:%s\")",
-                  dep.groupId,
-                  dep.artifactId,
-                  resolveVersion(dep, pom, useEffectivePom, effectivePom) != null
-                      ? resolveVersion(dep, pom, useEffectivePom, effectivePom)
-                      : "unknown"))
+              .map(dep -> {
+                String group = resolveGroupIdForPom(pom);
+                // String group = resolveProperties(dep.groupId, pom);
+                String artifact = resolveProperties(dep.artifactId, pom);
+                String version = resolveVersion(dep, pom, useEffectivePom, effectivePom);
+                if (version == null)
+                  version = "unknown";
+                return String.format("    implementation(\"%s:%s:%s\")", group, artifact, version);
+              })
               .collect(java.util.stream.Collectors.joining("\n"));
           depResult = new DependencyEmitResult("", depBlock);
         } else {
@@ -864,7 +894,11 @@ public class mvn2gradle {
           }
         }
       }
-
+      
+      if(pom.parentPom != null) {
+        return extractJavaVersionFromEffectivePom(pom.parentPom);
+      }
+      log.warn("No Java version found in POM, defaulting to 1.8");
       return "1.8";
     }
 
@@ -989,18 +1023,29 @@ public class mvn2gradle {
 
       if (pom.dependencies != null && pom.dependencies.dependency != null) {
         for (Dependency d : pom.dependencies.dependency) {
+          String resolvedGroupId = resolveGroupId(d, pom);
+          String resolvedArtifactId = resolveProperties(d.artifactId, pom);
           String version = d.version;
+
           String versionExpr;
           String conf = toGradleConf(d.scope);
 
-          if ((version == null || version.isBlank()) && d.groupId != null && d.artifactId != null) {
-            // Need to extract and emit variable
-            String varName = "ver_" + d.groupId.replaceAll("[^a-zA-Z0-9]", "_")
-                + "_" + d.artifactId.replaceAll("[^a-zA-Z0-9]", "_");
-            String extracted = extractVersionFromProjects(d.groupId, d.artifactId, effectivePom);
+          if ((version == null || version.isBlank()) && resolvedGroupId != null && resolvedArtifactId != null) {
+            // variable name construction as before...
+            String scopePart = (d.scope == null || d.scope.isBlank()) ? ""
+                : "_" + d.scope.replaceAll("[^a-zA-Z0-9]", "_");
+            String typePart = (d.type == null || d.type.isBlank()) ? "" : "_" + d.type.replaceAll("[^a-zA-Z0-9]", "_");
+            String classifierPart = (d.classifier == null || d.classifier.isBlank()) ? ""
+                : "_" + d.classifier.replaceAll("[^a-zA-Z0-9]", "_");
+
+            String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_")
+                + "_" + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_")
+                + scopePart + typePart + classifierPart;
+
+            String extracted = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
             if (extracted == null || extracted.isBlank()) {
               varDecls.append(String.format("val %s = \"unknown\" // FIXME: version missing for %s:%s\n", varName,
-                  d.groupId, d.artifactId));
+                  resolvedGroupId, resolvedArtifactId));
             } else {
               varDecls.append(String.format("val %s = \"%s\"\n", varName, replaceMavenPropsWithKotlinVars(extracted)));
             }
@@ -1011,13 +1056,41 @@ public class mvn2gradle {
             versionExpr = ":unknown"; // fallback
           }
 
-          log.info("Adding dependency: {} {}:{}{}", conf, d.groupId, d.artifactId, versionExpr);
+          log.info("Adding dependency: {} {}:{}{}", conf, resolvedGroupId, resolvedArtifactId, versionExpr);
 
-          deps.append(String.format("    %s(\"%s:%s%s\")\n",
-              conf, d.groupId, d.artifactId, versionExpr));
+          String versionPart = versionExpr.startsWith(":") ? versionExpr.substring(1) : versionExpr;
+          String classifierPart = (d.classifier != null && !d.classifier.isBlank()) ? ":" + d.classifier : "";
+          String typePart = (d.type != null && !d.type.isBlank() && !"jar".equals(d.type)) ? "@" + d.type : "";
+
+          String depCoordinate = String.format("%s:%s:%s%s%s",
+              resolvedGroupId,
+              resolvedArtifactId,
+              versionPart,
+              classifierPart,
+              typePart);
+
+          deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
         }
       }
       return new DependencyEmitResult(varDecls.toString(), deps.toString());
+    }
+
+    private static String resolveGroupId(Dependency dep, PomModel pom) {
+      if (dep != null && dep.groupId != null && !dep.groupId.isBlank()) {
+        return resolveProperties(dep.groupId, pom);
+      }
+      PomModel current = pom;
+      while (current != null) {
+        if (current.groupId != null && !current.groupId.isBlank()) {
+          return resolveProperties(current.groupId, current);
+        }
+        current = current.parentPom;
+      }
+      return null;
+    }
+
+    private static String resolveGroupIdForPom(PomModel pom) {
+      return resolveGroupId(null, pom);
     }
 
     private static String extractVersionFromProjects(String groupId, String artifactId, Projects projects) {
@@ -1072,13 +1145,20 @@ public class mvn2gradle {
         String key = m.group(1);
         String replacement = null;
 
-        // Try to find the property value in pom properties recursively
-        PomModel current = pom;
-        while (current != null && replacement == null) {
-          if (current.properties != null && current.properties.any != null) {
-            replacement = current.properties.any.get(key);
+        // Special cases for common Maven properties
+        if ("project.groupId".equals(key)) {
+          replacement = pom.groupId != null ? pom.groupId : "";
+        } else if ("project.version".equals(key)) {
+          replacement = pom.version != null ? pom.version : "";
+        } else {
+          // Lookup in properties recursively
+          PomModel current = pom;
+          while (current != null && replacement == null) {
+            if (current.properties != null && current.properties.any != null) {
+              replacement = current.properties.any.get(key);
+            }
+            current = current.parentPom;
           }
-          current = current.parentPom;
         }
 
         if (replacement == null) {
