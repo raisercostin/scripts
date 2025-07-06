@@ -380,6 +380,10 @@ public class mvn2gradle {
 
     private Plugin() {
     }
+
+    public String getEffectiveGroupId() {
+      return groupId != null ? groupId : "org.apache.maven.plugins";
+    }
   }
 
   private static class PluginConfiguration {
@@ -780,7 +784,7 @@ public class mvn2gradle {
       Set<String> moduleArtifacts = collectModuleArtifactIds(rootPom, cli.projectDir, cli.ignoreUnknown, effectivePom);
 
       // Generate build.gradle.kts recursively for root and modules
-      generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, moduleArtifacts);
+      generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, moduleArtifacts, true);
 
       return 0;
     }
@@ -801,7 +805,7 @@ public class mvn2gradle {
     }
 
     private static void generateForModulesRecursively(Path baseDir, PomModel pom, Cli cli, Projects effectivePom,
-        Set<String> moduleArtifacts) {
+        Set<String> moduleArtifacts, boolean isRoot) {
       log.info("Generating build.gradle.kts for {}", pom.artifactId);
 
       String gradleKts = generate(pom, cli.useEffectivePom, cli.inlineVersions, effectivePom, moduleArtifacts);
@@ -817,10 +821,36 @@ public class mvn2gradle {
           Path moduleDir = baseDir.resolve(moduleName);
           if (Files.exists(moduleDir)) {
             PomModel modulePom = GradleKtsGenerator.loadPom(moduleDir.toFile(), cli.ignoreUnknown, effectivePom);
-            generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, moduleArtifacts);
+            generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, moduleArtifacts, false);
           } else {
             log.warn("Module directory not found: {}", moduleDir);
           }
+        }
+      }
+      deleteAndWarnIfSettingsGradleKtsExists(baseDir, isRoot);
+    }
+
+    private static void deleteAndWarnIfSettingsGradleKtsExists(Path dir, boolean isRoot) {
+      Path settingsGradle = dir.resolve("settings.gradle.kts");
+      if (isRoot) {
+        // If this is the root module, we expect settings.gradle.kts to be present
+        if (!Files.exists(settingsGradle)) {
+          log.warn("Expected settings.gradle.kts not found in root module: {}", dir);
+        }
+        return;
+      }
+      if (Files.exists(settingsGradle)) {
+        int counter = 1;
+        Path renamed = settingsGradle.resolveSibling("settings.gradle.kts.bak" + counter);
+        while (Files.exists(renamed)) {
+          counter++;
+          renamed = settingsGradle.resolveSibling("settings.gradle.kts.bak" + counter);
+        }
+        try {
+          Files.move(settingsGradle, renamed);
+          log.warn("Renamed unexpected settings.gradle.kts in submodule: {} → {}", settingsGradle, renamed);
+        } catch (IOException e) {
+          log.error("Failed to rename stray settings.gradle.kts in {}: {}", dir, e.getMessage(), e);
         }
       }
     }
@@ -1246,12 +1276,68 @@ public class mvn2gradle {
       }
     }
 
+    private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin, PomModel pom) {
+      List<PluginExecutionContext> result = new ArrayList<>();
+      Set<String> seenExecutionIds = new HashSet<>();
+      collectPluginExecutionsRecursive(plugin, pom, result, seenExecutionIds);
+      return result;
+    }
+
+    private static void collectPluginExecutionsRecursive(Plugin plugin, PomModel pom,
+        List<PluginExecutionContext> result, Set<String> seenExecutionIds) {
+      if (pom == null || pom.build == null || pom.build.plugins == null || pom.build.plugins.plugin == null)
+        return;
+      for (Plugin p : pom.build.plugins.plugin) {
+        if (plugin.getEffectiveGroupId().equals(p.getEffectiveGroupId()) && plugin.artifactId.equals(p.artifactId)) {
+          if (p.executions != null && p.executions.execution != null) {
+            for (Execution exec : p.executions.execution) {
+              if (exec.inherited != null && Boolean.FALSE.equals(exec.inherited))
+                continue;
+              // Deduplicate by id (child wins)
+              if (exec.id != null && !seenExecutionIds.add(exec.id))
+                continue;
+              if (exec.goals != null && exec.goals.goal != null) {
+                for (String goal : exec.goals.goal) {
+                  PluginConfiguration config = exec.configuration != null ? exec.configuration : p.configuration;
+                  result.add(new PluginExecutionContext(p, goal, config));
+                }
+              }
+            }
+          }
+          // Only add default execution if no executions and not already handled by child
+          if ((p.executions == null || p.executions.execution == null || p.executions.execution.isEmpty())
+              && seenExecutionIds.isEmpty()) {
+            result.add(new PluginExecutionContext(p, "default", p.configuration));
+          }
+        }
+      }
+      // Now recurse to parent
+      collectPluginExecutionsRecursive(plugin, pom.parentPom, result, seenExecutionIds);
+    }
+
     private static Map<String, String> collectGradlePluginsAndConfigs(PomModel pom,
         StringBuilder pluginConfigSnippets) {
       Map<String, String> pluginsMap = new LinkedHashMap<>();
+      Set<String> visited = new HashSet<>(); // to avoid duplicates when traversing parents
+
+      collectGradlePluginsAndConfigsRecursive(pom, pluginConfigSnippets, pluginsMap, visited);
+
+      return pluginsMap;
+    }
+
+    private static void collectGradlePluginsAndConfigsRecursive(PomModel pom, StringBuilder pluginConfigSnippets,
+        Map<String, String> pluginsMap, Set<String> visited) {
+
+      if (pom == null)
+        return;
+
       if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
         for (Plugin plugin : pom.build.plugins.plugin) {
-          List<PluginExecutionContext> execs = getPluginExecutions(plugin);
+          String pluginUniqueKey = plugin.groupId + ":" + plugin.artifactId;
+          if (!visited.add(pluginUniqueKey))
+            continue; // already seen in child, so skip
+          // --- Call executions for the plugin, on this POM only! ---
+          List<PluginExecutionContext> execs = getPluginExecutions(plugin, pom);
           for (PluginExecutionContext ctx : execs) {
             String pluginKey = ctx.plugin.groupId + ":" + ctx.plugin.artifactId + ":" + ctx.goal;
             log.info("Processing plugin execution: {}", pluginKey);
@@ -1270,29 +1356,9 @@ public class mvn2gradle {
           }
         }
       }
-      return pluginsMap;
-    }
 
-    private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin) {
-      List<PluginExecutionContext> result = new ArrayList<>();
-      // If plugin.executions exist, extract goal(s) and configuration(s)
-      if (plugin.executions != null && plugin.executions.execution != null) {
-        for (Execution exec : plugin.executions.execution) {
-          if (exec.goals != null && exec.goals.goal != null) {
-            for (String goal : exec.goals.goal) {
-              PluginConfiguration config = exec.configuration != null ? exec.configuration : plugin.configuration;
-              result.add(new PluginExecutionContext(plugin, goal, config));
-            }
-          }
-        }
-      }
-      // If no executions, treat the plugin's direct <goal> as "default"
-      if ((plugin.executions == null || plugin.executions.execution == null || plugin.executions.execution.isEmpty())
-          && plugin.artifactId != null) {
-        // Register "default" goal for plugins without <executions>
-        result.add(new PluginExecutionContext(plugin, "default", plugin.configuration));
-      }
-      return result;
+      // Always recurse to parent, even if current has no plugins
+      collectGradlePluginsAndConfigsRecursive(pom.parentPom, pluginConfigSnippets, pluginsMap, visited);
     }
 
     private static String extractJavaVersionFromEffectivePom(PomModel pom) {
@@ -1470,7 +1536,7 @@ public class mvn2gradle {
       StringBuffer sb = new StringBuffer();
       while (m.find()) {
         String safeKey = toKotlinVar(m.group(1));
-        m.appendReplacement(sb, "\\$" + safeKey); 
+        m.appendReplacement(sb, "\\$" + safeKey);
       }
       m.appendTail(sb);
       return sb.toString();
