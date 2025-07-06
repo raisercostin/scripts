@@ -988,6 +988,10 @@ public class mvn2gradle {
           depResult.dependencyBlock, pluginConfigSnippets);
     }
 
+    static String toKotlinVar(String key) {
+      return key.replaceAll("[^a-zA-Z0-9_]", "_");
+    }
+
     private static String emitReferencedMavenPropertiesKts(PomModel pom) {
       // --- Control inclusion of property usages ---
       final boolean includeDependencies = true;
@@ -1059,7 +1063,7 @@ public class mvn2gradle {
         String value = finalProps.get(key);
         if (value == null)
           return null;
-        String safeKey = key.replaceAll("[^a-zA-Z0-9_]", "_");
+        String safeKey = toKotlinVar(key);
         return "val %s = \"%s\"".formatted(safeKey, value);
       }).nonNull().joining("\n");
     }
@@ -1171,7 +1175,7 @@ public class mvn2gradle {
           String resolvedVersion = resolveVersion(dep, pom, useEffectivePom, effectivePom);
           if (resolvedVersion == null)
             resolvedVersion = "unknown";
-          versionExpr = resolvedVersion;
+          versionExpr = replaceMavenPropsWithKotlinVars(resolvedVersion);
         } else {
           if ((version == null || version.isBlank()) && resolvedGroupId != null && resolvedArtifactId != null) {
             String scopePart = (dep.scope == null || dep.scope.isBlank()) ? ""
@@ -1465,8 +1469,8 @@ public class mvn2gradle {
       java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}").matcher(value);
       StringBuffer sb = new StringBuffer();
       while (m.find()) {
-        String safeKey = m.group(1).replace('.', '_');
-        m.appendReplacement(sb, "\\$" + safeKey);
+        String safeKey = toKotlinVar(m.group(1));
+        m.appendReplacement(sb, "\\$" + safeKey); 
       }
       m.appendTail(sb);
       return sb.toString();
