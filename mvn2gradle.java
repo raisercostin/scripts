@@ -1333,13 +1333,13 @@ public class mvn2gradle {
 
       if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
         for (Plugin plugin : pom.build.plugins.plugin) {
-          String pluginUniqueKey = plugin.groupId + ":" + plugin.artifactId;
+          String pluginUniqueKey = plugin.getEffectiveGroupId() + ":" + plugin.artifactId;
           if (!visited.add(pluginUniqueKey))
             continue; // already seen in child, so skip
           // --- Call executions for the plugin, on this POM only! ---
           List<PluginExecutionContext> execs = getPluginExecutions(plugin, pom);
           for (PluginExecutionContext ctx : execs) {
-            String pluginKey = ctx.plugin.groupId + ":" + ctx.plugin.artifactId + ":" + ctx.goal;
+            String pluginKey = ctx.plugin.getEffectiveGroupId() + ":" + ctx.plugin.artifactId + ":" + ctx.goal;
             log.info("Processing plugin execution: {}", pluginKey);
             PluginConvertor conv = pluginConversionRegistry.get(pluginKey);
             if (conv != null && conv.isEnabled(ctx, pom)) {
