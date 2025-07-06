@@ -19,13 +19,12 @@ import java.nio.file.Path;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
 
+import org.fusesource.jansi.AnsiConsole;
+import org.zeroturnaround.exec.InvalidExitValueException;
+import org.zeroturnaround.exec.ProcessExecutor;
+
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
-
-import org.fusesource.jansi.AnsiConsole;
-
-import org.zeroturnaround.exec.ProcessExecutor;
-import org.zeroturnaround.exec.InvalidExitValueException;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Option;
@@ -41,7 +40,7 @@ public class mvn2gradle {
   }
 
   @CommandLine.Command(name = "mvn2gradle", mixinStandardHelpOptions = true, description = "Convert Maven pom.xml in given directory to build.gradle.kts (single-module base)")
-  public static class Cli implements Callable<Integer> {
+  private static class Cli implements Callable<Integer> {
     @CommandLine.Parameters(index = "0", description = "Directory containing pom.xml")
     private File projectDir;
 
@@ -58,36 +57,12 @@ public class mvn2gradle {
 
     @Override
     public Integer call() throws Exception {
-      configureLogging();
-      PomModel pom;
-      if (useEffectivePom) {
-        Path effPomPath = projectDir.toPath().resolve("effective-pom.xml");
-        if (!Files.exists(effPomPath)) {
-          // Optionally auto-run mvn help:effective-pom here
-          logger.info("Generating effective-pom.xml");
-          GradleKtsGenerator.generateEffectivePom(projectDir);
-        }
-        pom = GradleKtsGenerator.loadEffectivePom(projectDir, ignoreUnknown);
-      } else if (usePomInheritance) {
-        pom = GradleKtsGenerator.loadPom(projectDir, ignoreUnknown); // your recursive parent logic
-      } else {
-        throw new IllegalArgumentException("Must specify --use-effective-pom or --use-pom-inheritance");
-      }
-      logger.info("Generating build.gradle.kts for {}", pom.artifactId);
-      String gradleKts = GradleKtsGenerator.generate(pom, useEffectivePom, inlineVersions);
-      Path gradlePath = projectDir.toPath().resolve("build.gradle.kts");
-      Files.writeString(gradlePath, gradleKts);
-      logger.info("Done: {}", gradlePath.toAbsolutePath());
-      return 0;
-    }
-
-    private void configureLogging() {
-      // Custom logback config if needed; otherwise uses default config.
+      return GradleKtsGenerator.sync(this);
     }
   }
 
   @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlRootElement(localName = "project")
-  public static class PomModel {
+  private static class PomModel {
     // --- Root attributes (namespace, schema) ---
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(isAttribute = true, localName = "xmlns")
     public String xmlns;
@@ -132,7 +107,7 @@ public class mvn2gradle {
 
   // ----- Supporting classes for Maven POM -----
 
-  public static class Parent {
+  private static class Parent {
     public String groupId;
     public String artifactId;
     public String version;
@@ -142,7 +117,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Licenses {
+  private static class Licenses {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "license")
     public java.util.List<License> license;
@@ -151,7 +126,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class License {
+  private static class License {
     public String name;
     public String url;
     public String distribution;
@@ -161,7 +136,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Developers {
+  private static class Developers {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "developer")
     public java.util.List<Developer> developer;
@@ -170,7 +145,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Developer {
+  private static class Developer {
     public String id;
     public String name;
     public String email;
@@ -184,7 +159,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Scm {
+  private static class Scm {
     public String connection;
     public String developerConnection;
     public String url;
@@ -194,7 +169,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class IssueManagement {
+  private static class IssueManagement {
     public String system;
     public String url;
 
@@ -202,7 +177,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class DistributionManagement {
+  private static class DistributionManagement {
     public DeploymentRepository repository;
     public DeploymentRepository snapshotRepository;
     public String site;
@@ -211,7 +186,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class DeploymentRepository {
+  private static class DeploymentRepository {
     public String id;
     public String name;
     public String url;
@@ -226,7 +201,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Organization {
+  private static class Organization {
     public String name;
     public String url;
 
@@ -234,14 +209,14 @@ public class mvn2gradle {
     }
   }
 
-  public static class DependencyManagement {
+  private static class DependencyManagement {
     public Dependencies dependencies;
 
     private DependencyManagement() {
     }
   }
 
-  public static class Dependencies {
+  private static class Dependencies {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "dependency")
     public java.util.List<Dependency> dependency;
@@ -250,7 +225,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Dependency {
+  private static class Dependency {
     public String groupId;
     public String artifactId;
     public String version;
@@ -264,7 +239,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Exclusions {
+  private static class Exclusions {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "exclusion")
     public java.util.List<Exclusion> exclusion;
@@ -273,7 +248,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Exclusion {
+  private static class Exclusion {
     public String groupId;
     public String artifactId;
 
@@ -281,7 +256,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Properties {
+  private static class Properties {
     @com.fasterxml.jackson.annotation.JsonAnySetter
     public java.util.TreeMap<String, String> any = new java.util.TreeMap<>();
 
@@ -289,7 +264,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Build {
+  private static class Build {
     public String finalName;
     public String sourceDirectory;
     public String testSourceDirectory;
@@ -310,7 +285,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Resources {
+  private static class Resources {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "resource")
     public java.util.List<Resource> resource;
@@ -319,7 +294,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class TestResources {
+  private static class TestResources {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "testResource")
     public java.util.List<Resource> testResource;
@@ -328,7 +303,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Resource {
+  private static class Resource {
     public String directory;
     public String targetPath;
     public Boolean filtering;
@@ -340,7 +315,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Includes {
+  private static class Includes {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<String> include;
 
@@ -348,7 +323,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Excludes {
+  private static class Excludes {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<String> exclude;
 
@@ -356,14 +331,14 @@ public class mvn2gradle {
     }
   }
 
-  public static class PluginManagement {
+  private static class PluginManagement {
     public Plugins plugins;
 
     private PluginManagement() {
     }
   }
 
-  public static class Plugins {
+  private static class Plugins {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "plugin")
     public java.util.List<Plugin> plugin;
@@ -372,10 +347,11 @@ public class mvn2gradle {
     }
   }
 
-  public static class Plugin {
+  private static class Plugin {
     public String groupId;
     public String artifactId;
     public String version;
+    public Boolean inherited;
     public Executions executions;
     public Dependencies dependencies;
     public PluginConfiguration configuration;
@@ -384,7 +360,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class PluginConfiguration {
+  private static class PluginConfiguration {
     // maven-compiler-plugin - properties
     public String source;
     public String target;
@@ -396,7 +372,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Executions {
+  private static class Executions {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "execution")
     public java.util.List<Execution> execution;
@@ -405,17 +381,18 @@ public class mvn2gradle {
     }
   }
 
-  public static class Execution {
+  private static class Execution {
     public String id;
     public String phase;
     public Goals goals;
     public Object configuration;
+    public Boolean inherited;
 
     private Execution() {
     }
   }
 
-  public static class Goals {
+  private static class Goals {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "goal")
     public java.util.List<String> goal;
@@ -424,7 +401,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Modules {
+  private static class Modules {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "module")
     public java.util.List<String> module;
@@ -433,7 +410,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Repositories {
+  private static class Repositories {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "repository")
     public java.util.List<Repository> repository;
@@ -442,7 +419,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Repository {
+  private static class Repository {
     public String id;
     public String name;
     public String url;
@@ -454,7 +431,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class PluginRepositories {
+  private static class PluginRepositories {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<PluginRepository> pluginRepository;
 
@@ -462,7 +439,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class PluginRepository {
+  private static class PluginRepository {
     public String id;
     public String name;
     public String url;
@@ -474,7 +451,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class RepositoryPolicy {
+  private static class RepositoryPolicy {
     public String enabled;
     public String updatePolicy;
     public String checksumPolicy;
@@ -483,7 +460,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Extensions {
+  private static class Extensions {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<Extension> extension;
 
@@ -491,7 +468,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Extension {
+  private static class Extension {
     public String groupId;
     public String artifactId;
     public String version;
@@ -500,7 +477,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Reporting {
+  private static class Reporting {
     public Boolean excludeDefaults;
     public String outputDirectory;
     public ReportPlugins plugins;
@@ -509,7 +486,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ReportPlugins {
+  private static class ReportPlugins {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<ReportPlugin> plugin;
 
@@ -517,7 +494,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ReportPlugin {
+  private static class ReportPlugin {
     public String groupId;
     public String artifactId;
     public String version;
@@ -529,7 +506,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ReportPluginExecutions {
+  private static class ReportPluginExecutions {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<ReportPluginExecution> execution;
 
@@ -537,7 +514,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ReportPluginExecution {
+  private static class ReportPluginExecution {
     public String id;
     public String phase;
     public String goals; // can be a list in some schemas
@@ -547,7 +524,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ReportPluginConfiguration {
+  private static class ReportPluginConfiguration {
     private java.util.Map<String, Object> any = new java.util.HashMap<>();
 
     @JsonAnySetter
@@ -563,7 +540,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ReportSets {
+  private static class ReportSets {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<ReportSet> reportSet;
 
@@ -571,7 +548,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ReportSet {
+  private static class ReportSet {
     public String id;
     public Reports reports;
     public String inherited; // "true"/"false"
@@ -580,7 +557,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Reports {
+  private static class Reports {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<String> report;
 
@@ -588,7 +565,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Profiles {
+  private static class Profiles {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<Profile> profile;
 
@@ -596,7 +573,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Profile {
+  private static class Profile {
     public String id;
     public Activation activation;
     public Properties properties;
@@ -616,7 +593,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class Activation {
+  private static class Activation {
     public ActivationProperty property;
     public String activeByDefault;
     public String jdk;
@@ -628,7 +605,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ActivationProperty {
+  private static class ActivationProperty {
     public String name;
     public String value;
 
@@ -636,7 +613,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ActivationOs {
+  private static class ActivationOs {
     public String name;
     public String family;
     public String arch;
@@ -646,7 +623,7 @@ public class mvn2gradle {
     }
   }
 
-  public static class ActivationFile {
+  private static class ActivationFile {
     public String exists;
     public String missing;
 
@@ -654,14 +631,38 @@ public class mvn2gradle {
     }
   }
 
-  public static class ActivationCustom {
+  private static class ActivationCustom {
     // Could contain scripts, etc.
     private ActivationCustom() {
     }
   }
 
-  public static class GradleKtsGenerator {
-    public static PomModel loadPom(File projectDirOrPomFile, boolean ignoreUnknown) throws IOException {
+  private static class GradleKtsGenerator {
+    private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(GradleKtsGenerator.class);
+    private static Integer sync(Cli cli) throws Exception {
+      PomModel pom;
+      if (cli.useEffectivePom) {
+        Path effPomPath = cli.projectDir.toPath().resolve("effective-pom.xml");
+        if (!Files.exists(effPomPath)) {
+          logger.info("Generating effective-pom.xml");
+          generateEffectivePom(cli.projectDir);
+        }
+        pom = loadEffectivePom(cli.projectDir, cli.ignoreUnknown);
+      } else if (cli.usePomInheritance) {
+        pom = loadPom(cli.projectDir, cli.ignoreUnknown);
+      } else {
+        throw new IllegalArgumentException("Must specify --use-effective-pom or --use-pom-inheritance");
+      }
+      logger.info("Generating build.gradle.kts for {}", pom.artifactId);
+      String gradleKts = generate(pom, cli.useEffectivePom, cli.inlineVersions);
+      Path gradlePath = cli.projectDir.toPath().resolve("build.gradle.kts");
+      Files.writeString(gradlePath, gradleKts);
+      logger.info("Done: {}", gradlePath.toAbsolutePath());
+      return 0;
+    }
+
+
+    private static PomModel loadPom(File projectDirOrPomFile, boolean ignoreUnknown) throws IOException {
       if (projectDirOrPomFile.isDirectory()) {
         Path pomPath = projectDirOrPomFile.toPath().resolve("pom.xml");
         return loadPomFromFile(pomPath.toFile(), ignoreUnknown);
@@ -672,11 +673,7 @@ public class mvn2gradle {
 
     private static PomModel loadPomFromFile(File pomFile, boolean ignoreUnknown) throws IOException {
       logger.info("Loading POM from {}", pomFile.getAbsolutePath());
-      String xml = Files.readString(pomFile.toPath());
-      XmlMapper xmlMapper = new XmlMapper();
-      xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
-          !ignoreUnknown);
-      PomModel pom = xmlMapper.readValue(xml, PomModel.class);
+      PomModel pom = parsePom(pomFile, ignoreUnknown);
 
       // Recursively load parent (full chain)
       if (pom.parent != null) {
@@ -726,7 +723,7 @@ public class mvn2gradle {
       }
     }
 
-    public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions) {
+    private static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions) {
       var deps = pom.dependencies != null ? pom.dependencies.dependency : null;
 
       String valDefs = "";
@@ -794,7 +791,7 @@ public class mvn2gradle {
           depBlock);
     }
 
-    public static String extractJavaVersionFromEffectivePom(PomModel pom) {
+    private static String extractJavaVersionFromEffectivePom(PomModel pom) {
       if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
         for (Plugin plugin : pom.build.plugins.plugin) {
           if ("maven-compiler-plugin".equals(plugin.artifactId) && plugin.configuration != null) {
@@ -831,7 +828,7 @@ public class mvn2gradle {
       return "1.8";
     }
 
-    public static String resolveVersion(Dependency d, PomModel pom, boolean useEffectivePom) {
+    private static String resolveVersion(Dependency d, PomModel pom, boolean useEffectivePom) {
       if (d.version != null && !d.version.isBlank()) {
         return d.version;
       }
@@ -843,7 +840,7 @@ public class mvn2gradle {
       }
     }
 
-    public static void generateEffectivePom(File projectDir)
+    private static void generateEffectivePom(File projectDir)
         throws IOException, InterruptedException, TimeoutException {
       String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
       int exit;
@@ -868,7 +865,7 @@ public class mvn2gradle {
       return System.getProperty("os.name").toLowerCase().contains("win");
     }
 
-    public static PomModel loadEffectivePom(File projectDir, boolean ignoreUnknown) throws IOException {
+    private static PomModel loadEffectivePom(File projectDir, boolean ignoreUnknown) throws IOException {
       Path effPomPath = projectDir.toPath().resolve("effective-pom.xml");
       if (!Files.exists(effPomPath)) {
         throw new FileNotFoundException("No effective-pom.xml found at " + effPomPath +
@@ -985,14 +982,21 @@ public class mvn2gradle {
     }
 
     private static String toGradleConf(String scope) {
-      if (scope == null || scope.isEmpty() || "compile".equals(scope))
+      if (scope == null || scope.isBlank() || "compile".equals(scope) || "compile+runtime".equals(scope)) {
         return "implementation";
-      if ("provided".equals(scope) || "providedCompile".equals(scope))
+      }
+      if ("provided".equals(scope) || "providedCompile".equals(scope)) {
         return "compileOnly";
-      if ("runtime".equals(scope))
+      }
+      if ("runtime".equals(scope)) {
         return "runtimeOnly";
-      if ("test".equals(scope) || "testCompile".equals(scope))
+      }
+      if ("test".equals(scope) || "testCompile".equals(scope) || "testRuntime".equals(scope)) {
         return "testImplementation";
+      }
+      if ("system".equals(scope)) {
+        return "compileOnly";
+      }
       return "implementation";
     }
   }
