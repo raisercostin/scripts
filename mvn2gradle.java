@@ -776,7 +776,8 @@ public class mvn2gradle {
       PomModel rootPom = loadPom(cli.projectDir, cli.ignoreUnknown, effectivePom);
 
       // Generate settings.gradle.kts for root project and modules
-      String settingsGradle = generateSettingsGradleKts(rootPom, cli.mavenCompatible);
+      String settingsGradle = generateSettingsGradleKts(rootPom, cli.projectDir, cli.ignoreUnknown,
+          cli.useEffectivePom ? rootPom.effectivePom : null);
       Files.writeString(cli.projectDir.toPath().resolve("settings.gradle.kts"), settingsGradle);
       log.info("Generated settings.gradle.kts");
 
@@ -789,19 +790,35 @@ public class mvn2gradle {
       return 0;
     }
 
-    public static String generateSettingsGradleKts(PomModel pom, boolean mavenCompatible) {
+    public static String generateSettingsGradleKts(PomModel rootPom, File rootDir, boolean ignoreUnknown,
+        Projects effectivePom) {
+      String rootName = rootPom.artifactId != null ? rootPom.artifactId : "rootProject";
+      List<String> includes = collectAllModulePaths(rootPom, "", rootDir, ignoreUnknown, effectivePom);
 
-      if (pom.modules == null || pom.modules.module == null || pom.modules.module.isEmpty()) {
-        return "rootProject.name = \"%s\"\n".formatted(pom.artifactId);
-      }
-      String includes = one.util.streamex.StreamEx.of(pom.modules.module).map(m -> "    \"" + m + "\"").joining(",\n");
+      String includesStr = StreamEx.of(includes).map(m -> "include(\"" + m + "\")").joining("\n");
+
       return """
           rootProject.name = "%s"
 
-          include(
           %s
-          )
-          """.formatted(pom.artifactId, includes);
+          """.formatted(rootName, includesStr);
+    }
+
+    private static List<String> collectAllModulePaths(PomModel pom, String parentPath, File baseDir,
+        boolean ignoreUnknown, Projects effectivePom) {
+      if (pom.modules == null || pom.modules.module == null || pom.modules.module.isEmpty()) {
+        return List.of();
+      }
+
+      return StreamEx.of(pom.modules.module).flatMap(moduleName -> {
+        String fullPath = parentPath.isEmpty() ? moduleName : parentPath + ":" + moduleName;
+        File moduleDir = baseDir.toPath().resolve(moduleName).toFile();
+        PomModel childPom = GradleKtsGenerator.loadPom(moduleDir, ignoreUnknown, effectivePom);
+        List<String> nested = childPom != null
+            ? collectAllModulePaths(childPom, fullPath, moduleDir, ignoreUnknown, effectivePom)
+            : List.of();
+        return StreamEx.of(fullPath).append(nested);
+      }).toList();
     }
 
     private static void generateForModulesRecursively(Path baseDir, PomModel pom, Cli cli, Projects effectivePom,
