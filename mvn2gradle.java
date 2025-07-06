@@ -719,7 +719,8 @@ public class mvn2gradle {
                       arguments = mapOf("grammar_encoding" to "UTF-8", "static" to "false")
                   }
               }
-              sourceSets["main"].java.srcDir("build/generated/javacc")"""));
+              sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/javacc"))
+              """));
       register(new PluginConvertor("org.apache.maven.plugins:maven-checkstyle-plugin:default", "checkstyle", null,
           (ctx, pom) -> ctx.configuration.skip() ? "//checkstyle skip" : """
               checkstyle {
@@ -941,7 +942,7 @@ public class mvn2gradle {
           group = "%s"
           
           version = "%s"
-          layout.buildDirectory.set(file("$projectDir/target/build"))
+          layout.buildDirectory.set(file("$projectDir/target/gradle"))
 
           repositories {
               mavenLocal()
@@ -958,10 +959,43 @@ public class mvn2gradle {
                   )
               )
           }
-
           eclipse {
               classpath {
-                  defaultOutputDir = layout.buildDirectory.dir("classes/java/main").get().asFile
+                  defaultOutputDir = layout.buildDirectory.dir("eclipse/classes/java/main").get().asFile
+                  //defaultOutputDir = file("$projectDir/target/eclipse/classes")
+                  file {
+                      withXml {
+                        val node = asNode()
+                        node.children()
+                            .filterIsInstance<groovy.util.Node>()
+                            .filter { it.attribute("kind") == "src" }
+                            .forEach { child ->
+                                logger.warn("child.class=${child.javaClass.name}")
+                                child.javaClass.methods.forEach { method ->
+                                    logger.warn("method: ${method.name} (${method.parameterCount} params)")
+                                }
+                                child.javaClass.declaredFields.forEach { field ->
+                                    logger.warn("field: ${field.name} type=${field.type}")
+                                }
+                                val kind = child.attribute("kind")
+                                val path = child.attribute("path")?.toString()
+                                logger.debug("Processing classpathentry: kind=$kind, path=$path child=$child")
+                                if (kind == "src" && path != "target/gradle/generated/javacc") {
+                                  logger.warn("Processing classpathentry: kind=$kind, path=$path")
+                                    // e.g. project dependency paths start with "/" in Eclipse .classpath
+                                    if (path != null && path.startsWith("/")) {
+                                        //child.attributes["without_test_code"]="false"
+                                        //child.setValue(mapOf("without_test_code" to "false"))
+                                        child.appendNode("without_test_code", "false")
+                                    }
+                                }
+                            }
+                        node.appendNode("classpathentry", mapOf(
+                            "kind" to "src",
+                            "path" to "target/gradle/generated/javacc"
+                        ))
+                     }
+                  }
               }
           }
 
