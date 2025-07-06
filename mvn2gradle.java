@@ -895,10 +895,12 @@ public class mvn2gradle {
       Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets);
 
       DependencyEmitResult depResult = emitDeps(pom, useEffectivePom, inlineVersions, effectivePom);
+      if (depResult.hasLombok)
+        pluginsMap.put("io.freefair.lombok", "8.6");
+
       String group = resolveProperties(pom.groupId, pom);
       String version = resolveProperties(pom.version, pom);
       String javaVersion = extractJavaVersionFromEffectivePom(pom);
-
 
       StringBuilder pluginsBlock = buildGradlePluginsBlock(pluginsMap);
 
@@ -934,85 +936,91 @@ public class mvn2gradle {
 
     private static DependencyEmitResult emitDeps(PomModel pom, boolean useEffectivePom, boolean inlineVersions,
         Projects effectivePom) {
-      DependencyEmitResult depResult;
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
-        depResult = new DependencyEmitResult("", "");
-      } else {
-        pom.dependencies.dependency.sort(
-            java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope)).thenComparing(d -> d.artifactId));
+        return new DependencyEmitResult("", "", false);
+      }
+      pom.dependencies.dependency.sort(
+          java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope)).thenComparing(d -> d.artifactId));
+
+      StringBuilder varDecls = new StringBuilder();
+      StringBuilder deps = new StringBuilder();
+      boolean hasLombok = false;
+
+      for (Dependency dep : pom.dependencies.dependency) {
+        String resolvedGroupId = resolveGroupId(dep, pom);
+        String resolvedArtifactId = resolveProperties(dep.artifactId, pom);
+        String version = dep.version;
+        String conf = toGradleConf(dep.scope);
+
+        // ---- Lombok special case ----
+        if ("org.projectlombok".equals(resolvedGroupId) && "lombok".equals(resolvedArtifactId)) {
+          hasLombok = true;
+          String lombokVersion = (version == null || version.isBlank())
+              ? extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom)
+              : version;
+          if (lombokVersion == null || lombokVersion.isBlank())
+            lombokVersion = "unknown";
+          deps.append("    compileOnly(\"org.projectlombok:lombok:" + lombokVersion + "\")\n");
+          deps.append("    annotationProcessor(\"org.projectlombok:lombok:" + lombokVersion + "\")\n");
+          deps.append("    testCompileOnly(\"org.projectlombok:lombok:" + lombokVersion + "\")\n");
+          deps.append("    testAnnotationProcessor(\"org.projectlombok:lombok:" + lombokVersion + "\")\n");
+          // Optionally ensure plugin registration (not shown here)
+          continue;
+        }
+        // -----------------------------
+
+        String versionExpr;
         if (inlineVersions) {
-          String depBlock = pom.dependencies.dependency.stream().map(dep -> {
-            String group = resolveGroupIdForPom(pom);
-            // String group = resolveProperties(dep.groupId, pom);
-            String artifact = resolveProperties(dep.artifactId, pom);
-            String version = resolveVersion(dep, pom, useEffectivePom, effectivePom);
-            if (version == null)
-              version = "unknown";
-            return String.format("    implementation(\"%s:%s:%s\")", group, artifact, version);
-          }).collect(java.util.stream.Collectors.joining("\n"));
-          depResult = new DependencyEmitResult("", depBlock);
+          String resolvedVersion = resolveVersion(dep, pom, useEffectivePom, effectivePom);
+          if (resolvedVersion == null)
+            resolvedVersion = "unknown";
+          versionExpr = resolvedVersion;
         } else {
-          StringBuilder deps = new StringBuilder();
-          StringBuilder varDecls = new StringBuilder();
-          
-          if (pom.dependencies != null && pom.dependencies.dependency != null) {
-            for (Dependency d1 : pom.dependencies.dependency) {
-              String resolvedGroupId = resolveGroupId(d1, pom);
-              String resolvedArtifactId = resolveProperties(d1.artifactId, pom);
-              String version = d1.version;
-          
-              String versionExpr;
-              String conf = toGradleConf(d1.scope);
-          
-              if ((version == null || version.isBlank()) && resolvedGroupId != null && resolvedArtifactId != null) {
-                // variable name construction as before...
-                String scopePart = (d1.scope == null || d1.scope.isBlank()) ? ""
-                    : "_" + d1.scope.replaceAll("[^a-zA-Z0-9]", "_");
-                String typePart = (d1.type == null || d1.type.isBlank()) ? "" : "_" + d1.type.replaceAll("[^a-zA-Z0-9]", "_");
-                String classifierPart = (d1.classifier == null || d1.classifier.isBlank()) ? ""
-                    : "_" + d1.classifier.replaceAll("[^a-zA-Z0-9]", "_");
-          
-                String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_"
-                    + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart + typePart + classifierPart;
-          
-                String extracted = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
-                if (extracted == null || extracted.isBlank()) {
-                  varDecls.append(String.format("val %s = \"unknown\" // FIXME: version missing for %s:%s\n", varName,
-                      resolvedGroupId, resolvedArtifactId));
-                } else {
-                  varDecls.append(String.format("val %s = \"%s\"\n", varName, replaceMavenPropsWithKotlinVars(extracted)));
-                }
-                versionExpr = ":$" + varName;
-              } else if (version != null && !version.isBlank()) {
-                versionExpr = ":" + replaceMavenPropsWithKotlinVars(version);
-              } else {
-                versionExpr = ":unknown"; // fallback
-              }
-          
-              log.info("Adding dependency: {} {}:{}{}", conf, resolvedGroupId, resolvedArtifactId, versionExpr);
-          
-              String versionPart = versionExpr.startsWith(":") ? versionExpr.substring(1) : versionExpr;
-              String classifierPart = (d1.classifier != null && !d1.classifier.isBlank()) ? ":" + d1.classifier : "";
-              String typePart = (d1.type != null && !d1.type.isBlank() && !"jar".equals(d1.type)) ? "@" + d1.type : "";
-          
-              String depCoordinate = String.format("%s:%s:%s%s%s", resolvedGroupId, resolvedArtifactId, versionPart,
-                  classifierPart, typePart);
-              if (d1.exclusions != null && d1.exclusions.exclusion != null && !d1.exclusions.exclusion.isEmpty()) {
-                deps.append(String.format("    %s(\"%s\") {\n", conf, depCoordinate));
-                for (Exclusion excl : d1.exclusions.exclusion) {
-                  deps.append(
-                      String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
-                }
-                deps.append("    }\n");
-              } else {
-                deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
-              }
+          if ((version == null || version.isBlank()) && resolvedGroupId != null && resolvedArtifactId != null) {
+            String scopePart = (dep.scope == null || dep.scope.isBlank()) ? ""
+                : "_" + dep.scope.replaceAll("[^a-zA-Z0-9]", "_");
+            String typePart = (dep.type == null || dep.type.isBlank()) ? ""
+                : "_" + dep.type.replaceAll("[^a-zA-Z0-9]", "_");
+            String classifierPart = (dep.classifier == null || dep.classifier.isBlank()) ? ""
+                : "_" + dep.classifier.replaceAll("[^a-zA-Z0-9]", "_");
+            String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_"
+                + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart + typePart + classifierPart;
+            String extracted = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
+            if (extracted == null || extracted.isBlank()) {
+              varDecls.append(String.format("val %s = \"unknown\" // FIXME: version missing for %s:%s\n", varName,
+                  resolvedGroupId, resolvedArtifactId));
+            } else {
+              varDecls.append(String.format("val %s = \"%s\"\n", varName, replaceMavenPropsWithKotlinVars(extracted)));
             }
+            versionExpr = "$" + varName;
+          } else if (version != null && !version.isBlank()) {
+            versionExpr = replaceMavenPropsWithKotlinVars(version);
+          } else {
+            versionExpr = "unknown"; // fallback
           }
-          depResult = new DependencyEmitResult(varDecls.toString(), deps.toString());
+        }
+
+        log.info("Adding dependency: {} {}:{}:{}", conf, resolvedGroupId, resolvedArtifactId, versionExpr);
+
+        String depCoordinate = String.format("%s:%s:%s", resolvedGroupId, resolvedArtifactId, versionExpr);
+        String classifierPart = (dep.classifier != null && !dep.classifier.isBlank()) ? ":" + dep.classifier : "";
+        String typePart = (dep.type != null && !dep.type.isBlank() && !"jar".equals(dep.type)) ? "@" + dep.type : "";
+        depCoordinate += classifierPart + typePart;
+
+        // Exclusions
+        if (dep.exclusions != null && dep.exclusions.exclusion != null && !dep.exclusions.exclusion.isEmpty()) {
+          deps.append(String.format("    %s(\"%s\") {\n", conf, depCoordinate));
+          for (Exclusion excl : dep.exclusions.exclusion) {
+            deps.append(
+                String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
+          }
+          deps.append("    }\n");
+        } else {
+          deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
         }
       }
-      return depResult;
+
+      return new DependencyEmitResult(varDecls.toString(), deps.toString(), hasLombok);
     }
 
     private static Map<String, String> collectGradlePluginsAndConfigs(PomModel pom,
@@ -1227,10 +1235,12 @@ public class mvn2gradle {
     private static class DependencyEmitResult {
       final String variableBlock;
       final String dependencyBlock;
+      private boolean hasLombok;
 
-      DependencyEmitResult(String variableBlock, String dependencyBlock) {
+      DependencyEmitResult(String variableBlock, String dependencyBlock, boolean hasLombok) {
         this.variableBlock = variableBlock;
         this.dependencyBlock = dependencyBlock;
+        this.hasLombok = hasLombok;
       }
     }
 
