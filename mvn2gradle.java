@@ -725,21 +725,23 @@ public class mvn2gradle {
 
     public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions) {
       DependencyEmitResult depResult;
-      if (inlineVersions) {
-        var deps = pom.dependencies != null ? pom.dependencies.dependency : null;
-        String depBlock = "";
-        if (deps != null) {
-          depBlock = deps.stream()
+      if (pom.dependencies == null || pom.dependencies.dependency == null) {
+        depResult = new DependencyEmitResult("", "");
+      } else {
+        pom.dependencies.dependency.sort(java.util.Comparator
+          .comparing((Dependency d) -> toGradleConf(d.scope))
+          .thenComparing(d -> d.artifactId));
+        if (inlineVersions) {
+          String depBlock = pom.dependencies.dependency.stream()
               .map(dep -> String.format("    implementation(\"%s:%s:%s\")",
                   dep.groupId,
                   dep.artifactId,
-                  resolveVersion(dep, pom, useEffectivePom) != null ? resolveVersion(dep, pom, useEffectivePom)
-                      : "unknown"))
+                  resolveVersion(dep, pom, useEffectivePom) != null ? resolveVersion(dep, pom, useEffectivePom) : "unknown"))
               .collect(java.util.stream.Collectors.joining("\n"));
+          depResult = new DependencyEmitResult("", depBlock);
+        } else {
+          depResult = emitGradleDependenciesWithVars(pom, pom);
         }
-        depResult = new DependencyEmitResult("", depBlock);
-      } else {
-        depResult = emitGradleDependenciesWithVars(pom, pom);
       }
 
       String javaVersion = extractJavaVersionFromEffectivePom(pom);
