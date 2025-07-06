@@ -1,4 +1,4 @@
-
+// Description: Convert Maven pom.xml to Gradle build.gradle.kts
 //usr/bin/env jbang "$0" "$@" ; exit $?
 //DEPS info.picocli:picocli:4.7.7
 //DEPS org.slf4j:slf4j-api:2.0.9
@@ -650,6 +650,70 @@ public class mvn2gradle {
 
   private static class GradleKtsGenerator {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(GradleKtsGenerator.class);
+    private static final java.util.Map<String, java.util.function.BiFunction<PluginExecutionContext, PomModel, String>> pluginConversionRegistry = new java.util.HashMap<>();
+
+    // Register API
+    public static void register(String mavenPluginCoord,
+        java.util.function.BiFunction<PluginExecutionContext, PomModel, String> handler) {
+      pluginConversionRegistry.put(mavenPluginCoord, handler);
+    }
+
+    // Data structure for passing plugin execution info (add as static inner class)
+    public static class PluginExecutionContext {
+      public final Plugin plugin;
+      public final String goal;
+      public final PluginConfiguration configuration;
+
+      public PluginExecutionContext(Plugin plugin, String goal, PluginConfiguration configuration) {
+        this.plugin = plugin;
+        this.goal = goal;
+        this.configuration = configuration;
+      }
+    }
+
+    static {
+      register("org.codehaus.mojo:javacc-maven-plugin:javacc", (ctx, pom) -> """
+          plugins {
+            id "org.javacc.javacc" version "4.0.1"
+          }
+          compileJavacc {
+            arguments = [grammar_encoding: 'UTF-8', static: 'false']
+          }
+          """);
+//      tasks.named("generateSources") {
+//        dependsOn("javaccGenerate")
+//    }
+
+      register("org.apache.maven.plugins:maven-checkstyle-plugin:default", (ctx, pom) -> """
+          plugins {
+              checkstyle
+          }
+
+          checkstyle {
+              isIgnoreFailures = true // Equivalent to <skip>true</skip>
+          }
+          """);
+
+      register("org.apache.maven.plugins:maven-jar-plugin:test-jar", (ctx, pom) -> """
+          tasks.register<Jar>("testJar") {
+              archiveClassifier.set("tests")
+              from(sourceSets.test.get().output)
+          }
+          artifacts {
+              archives(tasks.named("testJar"))
+          }
+          """);
+      
+      register("org.codehaus.mojo:build-helper-maven-plugin:add-source", (ctx, pom) -> """
+          sourceSets {
+              main {
+                  java {
+                      srcDir("target/generated-sources/javacc")
+                  }
+              }
+          }
+          """);
+    }
 
     public static Integer sync(Cli cli) throws Exception {
       Projects effectivePom = null;
@@ -702,6 +766,7 @@ public class mvn2gradle {
       String gradleKts = generate(pom, cli.useEffectivePom, cli.inlineVersions, effectivePom);
 
       Files.writeString(baseDir.resolve("build.gradle.kts"), gradleKts);
+      applyPluginConversions(pom, baseDir.resolve("build.gradle.kts"));
 
       if (pom.modules != null && pom.modules.module != null) {
         for (String moduleName : pom.modules.module) {
@@ -713,6 +778,38 @@ public class mvn2gradle {
             log.warn("Module directory not found: {}", moduleDir);
           }
         }
+      }
+    }
+
+    private static void applyPluginConversions(PomModel pom, Path buildGradlePath) throws IOException {
+      if (pom.build == null || pom.build.plugins == null || pom.build.plugins.plugin == null)
+        return;
+      StringBuilder extra = new StringBuilder();
+
+      for (Plugin plugin : pom.build.plugins.plugin) {
+        String groupId = plugin.groupId;
+        String artifactId = plugin.artifactId;
+        // For each execution and goal (if any)
+        if (plugin.executions != null && plugin.executions.execution != null) {
+          for (Execution exec : plugin.executions.execution) {
+            if (exec.goals != null && exec.goals.goal != null) {
+              for (String goal : exec.goals.goal) {
+                String key = groupId + ":" + artifactId + ":" + goal;
+                var handler = pluginConversionRegistry.get(key);
+                if (handler != null) {
+                  extra.append(handler.apply(new PluginExecutionContext(plugin, goal, plugin.configuration), pom));
+                } else {
+                  log.warn("No plugin conversion registered for: {}", key);
+                }
+              }
+            }
+          }
+        }
+      }
+      if (extra.length() > 0) {
+        // Append to the end of build.gradle.kts
+        Files.write(buildGradlePath, ("\n" + extra).getBytes(), java.nio.file.StandardOpenOption.APPEND);
+        log.info("Appended plugin conversion DSL for {}", pom.artifactId);
       }
     }
 
@@ -759,8 +856,7 @@ public class mvn2gradle {
 
     private static File findParentPomFile(PomModel child, File projectDir) throws IOException {
       // 1. Try <relativePath> or default to "../pom.xml" (local parent, not in .m2)
-      String relPath = (child.parent.relativePath == null || child.parent.relativePath.isBlank())
-          ? "../pom.xml"
+      String relPath = (child.parent.relativePath == null || child.parent.relativePath.isBlank()) ? "../pom.xml"
           : child.parent.relativePath;
       File localParent = new File(projectDir, relPath).getCanonicalFile();
       if (localParent.exists()) {
@@ -772,8 +868,8 @@ public class mvn2gradle {
       String artifactId = child.parent.artifactId;
       String version = child.parent.version;
       File m2 = new File(System.getProperty("user.home"), ".m2/repository");
-      File repoPom = new File(m2, String.format(
-          "%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
+      File repoPom = new File(m2,
+          String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
       if (repoPom.exists()) {
         return repoPom;
       }
@@ -786,8 +882,7 @@ public class mvn2gradle {
     private static PomModel parsePom(File pomFile, boolean ignoreUnknown) {
       try {
         XmlMapper xmlMapper = new XmlMapper();
-        xmlMapper.configure(
-            com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+        xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
             !ignoreUnknown);
         return xmlMapper.readValue(pomFile, PomModel.class);
       } catch (IOException e) {
@@ -801,22 +896,19 @@ public class mvn2gradle {
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
         depResult = new DependencyEmitResult("", "");
       } else {
-        pom.dependencies.dependency.sort(java.util.Comparator
-            .comparing((Dependency d) -> toGradleConf(d.scope))
-            .thenComparing(d -> d.artifactId));
+        pom.dependencies.dependency.sort(
+            java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope)).thenComparing(d -> d.artifactId));
 
         if (inlineVersions) {
-          String depBlock = pom.dependencies.dependency.stream()
-              .map(dep -> {
-                String group = resolveGroupIdForPom(pom);
-                // String group = resolveProperties(dep.groupId, pom);
-                String artifact = resolveProperties(dep.artifactId, pom);
-                String version = resolveVersion(dep, pom, useEffectivePom, effectivePom);
-                if (version == null)
-                  version = "unknown";
-                return String.format("    implementation(\"%s:%s:%s\")", group, artifact, version);
-              })
-              .collect(java.util.stream.Collectors.joining("\n"));
+          String depBlock = pom.dependencies.dependency.stream().map(dep -> {
+            String group = resolveGroupIdForPom(pom);
+            // String group = resolveProperties(dep.groupId, pom);
+            String artifact = resolveProperties(dep.artifactId, pom);
+            String version = resolveVersion(dep, pom, useEffectivePom, effectivePom);
+            if (version == null)
+              version = "unknown";
+            return String.format("    implementation(\"%s:%s:%s\")", group, artifact, version);
+          }).collect(java.util.stream.Collectors.joining("\n"));
           depResult = new DependencyEmitResult("", depBlock);
         } else {
           depResult = emitGradleDependenciesWithVars(pom, effectivePom);
@@ -853,12 +945,7 @@ public class mvn2gradle {
           dependencies {
           %s
           }
-          """,
-          depResult.variableBlock,
-          javaVersion, javaVersion,
-          group,
-          version,
-          depResult.dependencyBlock);
+          """, depResult.variableBlock, javaVersion, javaVersion, group, version, depResult.dependencyBlock);
     }
 
     private static String extractJavaVersionFromEffectivePom(PomModel pom) {
@@ -894,8 +981,8 @@ public class mvn2gradle {
           }
         }
       }
-      
-      if(pom.parentPom != null) {
+
+      if (pom.parentPom != null) {
         return extractJavaVersionFromEffectivePom(pom.parentPom);
       }
       log.warn("No Java version found in POM, defaulting to 1.8");
@@ -928,14 +1015,10 @@ public class mvn2gradle {
       String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
       int exit;
       try {
-        exit = new ProcessExecutor()
-            .directory(projectDir)
-            .command(mavenCmd, "help:effective-pom", "-Doutput=effective-pom.xml")
-            .redirectOutput(System.out)
-            .redirectError(System.err)
-            .exitValues(0) // Only allow zero exit value
-            .execute()
-            .getExitValue();
+        exit = new ProcessExecutor().directory(projectDir)
+            .command(mavenCmd, "help:effective-pom", "-Doutput=effective-pom.xml").redirectOutput(System.out)
+            .redirectError(System.err).exitValues(0) // Only allow zero exit value
+            .execute().getExitValue();
       } catch (InvalidExitValueException e) {
         throw new IOException("Maven failed with exit code: " + e.getExitValue(), e);
       }
@@ -951,8 +1034,8 @@ public class mvn2gradle {
     public static Projects loadEffectivePom(File projectDir, boolean ignoreUnknown) throws IOException {
       Path effPomPath = projectDir.toPath().resolve("effective-pom.xml");
       if (!Files.exists(effPomPath)) {
-        throw new FileNotFoundException("No effective-pom.xml found at " + effPomPath +
-            ". Generate one by running: mvn help:effective-pom -Doutput=effective-pom.xml");
+        throw new FileNotFoundException("No effective-pom.xml found at " + effPomPath
+            + ". Generate one by running: mvn help:effective-pom -Doutput=effective-pom.xml");
       }
 
       JacksonXmlModule module = new JacksonXmlModule();
@@ -1038,9 +1121,8 @@ public class mvn2gradle {
             String classifierPart = (d.classifier == null || d.classifier.isBlank()) ? ""
                 : "_" + d.classifier.replaceAll("[^a-zA-Z0-9]", "_");
 
-            String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_")
-                + "_" + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_")
-                + scopePart + typePart + classifierPart;
+            String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_"
+                + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart + typePart + classifierPart;
 
             String extracted = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
             if (extracted == null || extracted.isBlank()) {
@@ -1062,12 +1144,8 @@ public class mvn2gradle {
           String classifierPart = (d.classifier != null && !d.classifier.isBlank()) ? ":" + d.classifier : "";
           String typePart = (d.type != null && !d.type.isBlank() && !"jar".equals(d.type)) ? "@" + d.type : "";
 
-          String depCoordinate = String.format("%s:%s:%s%s%s",
-              resolvedGroupId,
-              resolvedArtifactId,
-              versionPart,
-              classifierPart,
-              typePart);
+          String depCoordinate = String.format("%s:%s:%s%s%s", resolvedGroupId, resolvedArtifactId, versionPart,
+              classifierPart, typePart);
 
           deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
         }
@@ -1120,9 +1198,8 @@ public class mvn2gradle {
     private static String extractVersion(String groupId, String artifactId, PomModel pom) {
       PomModel current = pom;
       while (current != null) {
-        if (current.dependencyManagement != null &&
-            current.dependencyManagement.dependencies != null &&
-            current.dependencyManagement.dependencies.dependency != null) {
+        if (current.dependencyManagement != null && current.dependencyManagement.dependencies != null
+            && current.dependencyManagement.dependencies.dependency != null) {
           for (Dependency dep : current.dependencyManagement.dependencies.dependency) {
             if (groupId.equals(dep.groupId) && artifactId.equals(dep.artifactId) && dep.version != null) {
               return resolveProperties(dep.version, current);
