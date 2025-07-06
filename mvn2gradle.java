@@ -964,8 +964,19 @@ public class mvn2gradle {
                   defaultOutputDir = layout.buildDirectory.dir("eclipse/classes/java/main").get().asFile
                   //defaultOutputDir = file("$projectDir/target/eclipse/classes")
                   file {
+                      whenMerged {
+                          val entries = (this as org.gradle.plugins.ide.eclipse.model.Classpath).entries
+                          //entries.add(org.gradle.plugins.ide.eclipse.model.SourceFolder("src/custom", "customOutputFolder"))
+                          entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.ProjectDependency>()
+                              .forEach { it.entryAttributes["without_test_code"] = "false" }
+                          entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.SourceFolder>()
+                              .filter { it.path.startsWith("/") }
+                              .forEach { it.entryAttributes["without_test_code"] = "false" }
+                      }
+          
                       withXml {
                         val node = asNode()
+                        /*
                         node.children()
                             .filterIsInstance<groovy.util.Node>()
                             .filter { it.attribute("kind") == "src" }
@@ -990,6 +1001,7 @@ public class mvn2gradle {
                                     }
                                 }
                             }
+                        */
                         node.appendNode("classpathentry", mapOf(
                             "kind" to "src",
                             "path" to "target/gradle/generated/javacc"
