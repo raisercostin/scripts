@@ -639,6 +639,7 @@ public class mvn2gradle {
 
   private static class GradleKtsGenerator {
     private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(GradleKtsGenerator.class);
+
     private static Integer sync(Cli cli) throws Exception {
       PomModel pom;
       if (cli.useEffectivePom) {
@@ -660,7 +661,6 @@ public class mvn2gradle {
       logger.info("Done: {}", gradlePath.toAbsolutePath());
       return 0;
     }
-
 
     private static PomModel loadPom(File projectDirOrPomFile, boolean ignoreUnknown) throws IOException {
       if (projectDirOrPomFile.isDirectory()) {
@@ -723,14 +723,12 @@ public class mvn2gradle {
       }
     }
 
-    private static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions) {
-      var deps = pom.dependencies != null ? pom.dependencies.dependency : null;
-
-      String valDefs = "";
-      String depBlock = "";
-
-      if (deps != null) {
-        if (inlineVersions) {
+    public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions) {
+      DependencyEmitResult depResult;
+      if (inlineVersions) {
+        var deps = pom.dependencies != null ? pom.dependencies.dependency : null;
+        String depBlock = "";
+        if (deps != null) {
           depBlock = deps.stream()
               .map(dep -> String.format("    implementation(\"%s:%s:%s\")",
                   dep.groupId,
@@ -738,27 +736,12 @@ public class mvn2gradle {
                   resolveVersion(dep, pom, useEffectivePom) != null ? resolveVersion(dep, pom, useEffectivePom)
                       : "unknown"))
               .collect(java.util.stream.Collectors.joining("\n"));
-        } else {
-          valDefs = deps.stream().map(dep -> {
-            String varName = "ver_" + dep.groupId.replace('.', '_').replace('-', '_')
-                + "_" + dep.artifactId.replace('.', '_').replace('-', '_');
-            String version = resolveVersion(dep, pom, useEffectivePom);
-            String versionVal;
-            if (version != null && !"unknown".equals(version)) {
-              versionVal = "\"" + version + "\"";
-            } else {
-              versionVal = "\"unknown\" // FIXME: version missing for " + dep.groupId + ":" + dep.artifactId;
-            }
-            return "val " + varName + " = " + versionVal;
-          }).collect(java.util.stream.Collectors.joining("\n"));
-
-          depBlock = deps.stream().map(dep -> {
-            String varName = "ver_" + dep.groupId.replace('.', '_').replace('-', '_')
-                + "_" + dep.artifactId.replace('.', '_').replace('-', '_');
-            return "    implementation(\"" + dep.groupId + ":" + dep.artifactId + ":$" + varName + "\")";
-          }).collect(java.util.stream.Collectors.joining("\n"));
         }
+        depResult = new DependencyEmitResult("", depBlock);
+      } else {
+        depResult = emitGradleDependenciesWithVars(pom, pom);
       }
+
       String javaVersion = extractJavaVersionFromEffectivePom(pom);
       return String.format("""
           %s
@@ -784,11 +767,11 @@ public class mvn2gradle {
           %s
           }
           """,
-          valDefs,
+          depResult.variableBlock,
           javaVersion, javaVersion,
           pom.groupId,
           pom.version,
-          depBlock);
+          depResult.dependencyBlock);
     }
 
     private static String extractJavaVersionFromEffectivePom(PomModel pom) {
@@ -945,6 +928,8 @@ public class mvn2gradle {
           } else {
             versionExpr = ":unknown"; // Should never reach here now, but fallback
           }
+
+          logger.info("Adding dependency: {} {}:{}{}", conf, d.groupId, d.artifactId, versionExpr);
 
           deps.append(String.format("    %s(\"%s:%s%s\")\n",
               conf, d.groupId, d.artifactId, versionExpr));
