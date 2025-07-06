@@ -17,9 +17,17 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BiFunction;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.fusesource.jansi.AnsiConsole;
 import org.zeroturnaround.exec.InvalidExitValueException;
@@ -375,6 +383,9 @@ public class mvn2gradle {
     // maven-compiler-plugin - properties
     public String source;
     public String target;
+    // checkstyle plugin
+    public Boolean skip;
+    public String configLocation;
 
     @com.fasterxml.jackson.annotation.JsonAnySetter
     public java.util.Map<String, Object> any = new java.util.HashMap<>();
@@ -396,7 +407,7 @@ public class mvn2gradle {
     public String id;
     public String phase;
     public Goals goals;
-    public Object configuration;
+    public PluginConfiguration configuration;
     public Boolean inherited;
 
     private Execution() {
@@ -650,12 +661,32 @@ public class mvn2gradle {
 
   private static class GradleKtsGenerator {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(GradleKtsGenerator.class);
-    private static final java.util.Map<String, java.util.function.BiFunction<PluginExecutionContext, PomModel, String>> pluginConversionRegistry = new java.util.HashMap<>();
+    private static final Map<String, PluginConvertor> pluginConversionRegistry = new HashMap<>();
 
-    // Register API
-    public static void register(String mavenPluginCoord,
-        java.util.function.BiFunction<PluginExecutionContext, PomModel, String> handler) {
-      pluginConversionRegistry.put(mavenPluginCoord, handler);
+    // Helper record/class
+    private static class PluginConvertor {
+      private String mavenGroupAndArtifactId;
+      public final String gradlePluginId;
+      public final String gradlePluginVersion;
+      // final String pluginDeclaration; // e.g., id("org.javacc.javacc") version
+      // "4.0.1"
+      public final BiFunction<PluginExecutionContext, PomModel, String> handler;
+
+      PluginConvertor(String mavenKey, String gradlePluginId, String gradlePluginVersion,
+          BiFunction<PluginExecutionContext, PomModel, String> handler) {
+        this.mavenGroupAndArtifactId = mavenKey;
+        this.gradlePluginId = gradlePluginId;
+        this.gradlePluginVersion = gradlePluginVersion;
+        this.handler = handler;
+      }
+
+      public boolean isEnabled(PluginExecutionContext ctx, PomModel pom) {
+        return true;
+      }
+    }
+
+    public static void register(PluginConvertor pluginConversion) {
+      pluginConversionRegistry.put(pluginConversion.mavenGroupAndArtifactId, pluginConversion);
     }
 
     // Data structure for passing plugin execution info (add as static inner class)
@@ -672,29 +703,30 @@ public class mvn2gradle {
     }
 
     static {
-      register("org.codehaus.mojo:javacc-maven-plugin:javacc", (ctx, pom) -> """
-          plugins {
-            id "org.javacc.javacc" version "4.0.1"
-          }
-          compileJavacc {
-            arguments = [grammar_encoding: 'UTF-8', static: 'false']
-          }
-          """);
-//      tasks.named("generateSources") {
-//        dependsOn("javaccGenerate")
-//    }
-
-      register("org.apache.maven.plugins:maven-checkstyle-plugin:default", (ctx, pom) -> """
-          plugins {
-              checkstyle
-          }
-
-          checkstyle {
-              isIgnoreFailures = true // Equivalent to <skip>true</skip>
-          }
-          """);
-
-      register("org.apache.maven.plugins:maven-jar-plugin:test-jar", (ctx, pom) -> """
+      register(new PluginConvertor("org.codehaus.mojo:javacc-maven-plugin:javacc", "org.javacc.javacc", "4.0.1",
+          (ctx, pom) -> """
+              tasks {
+                  compileJavacc {
+                      inputDirectory = file("src/main/javacc")
+                      outputDirectory = file(layout.buildDirectory.dir("generated/javacc"))
+                      arguments = mapOf("grammar_encoding" to "UTF-8", "static" to "false")
+                  }
+              }
+              sourceSets["main"].java.srcDir("build/generated/javacc")"""));
+      register(new PluginConvertor("org.apache.maven.plugins:maven-checkstyle-plugin:default", "checkstyle", null,
+          (ctx, pom) -> ctx.configuration.skip ? "//checkstyle skip" : """
+              checkstyle {
+                  isIgnoreFailures = %s // Equivalent to <skip>true</skip>
+                  configFile = file("%s")
+              }
+              """.formatted(ctx.configuration.skip ? "true" : "false", ctx.configuration.configLocation)) {
+        @Override
+        public boolean isEnabled(PluginExecutionContext ctx, PomModel pom) {
+          return ctx.configuration.skip == null || !ctx.configuration.skip;
+        }
+      });
+      // ...and so on
+      register(new PluginConvertor("org.apache.maven.plugins:maven-jar-plugin:test-jar", null, null, (ctx, pom) -> """
           tasks.register<Jar>("testJar") {
               archiveClassifier.set("tests")
               from(sourceSets.test.get().output)
@@ -702,17 +734,17 @@ public class mvn2gradle {
           artifacts {
               archives(tasks.named("testJar"))
           }
-          """);
-      
-      register("org.codehaus.mojo:build-helper-maven-plugin:add-source", (ctx, pom) -> """
-          sourceSets {
-              main {
-                  java {
-                      srcDir("target/generated-sources/javacc")
+          """));
+      register(
+          new PluginConvertor("org.codehaus.mojo:build-helper-maven-plugin:add-source", null, null, (ctx, pom) -> """
+              sourceSets {
+                  main {
+                      java {
+                          srcDir("target/generated-sources/javacc")
+                      }
                   }
               }
-          }
-          """);
+              """));
     }
 
     public static Integer sync(Cli cli) throws Exception {
@@ -766,7 +798,6 @@ public class mvn2gradle {
       String gradleKts = generate(pom, cli.useEffectivePom, cli.inlineVersions, effectivePom);
 
       Files.writeString(baseDir.resolve("build.gradle.kts"), gradleKts);
-      applyPluginConversions(pom, baseDir.resolve("build.gradle.kts"));
 
       if (pom.modules != null && pom.modules.module != null) {
         for (String moduleName : pom.modules.module) {
@@ -778,38 +809,6 @@ public class mvn2gradle {
             log.warn("Module directory not found: {}", moduleDir);
           }
         }
-      }
-    }
-
-    private static void applyPluginConversions(PomModel pom, Path buildGradlePath) throws IOException {
-      if (pom.build == null || pom.build.plugins == null || pom.build.plugins.plugin == null)
-        return;
-      StringBuilder extra = new StringBuilder();
-
-      for (Plugin plugin : pom.build.plugins.plugin) {
-        String groupId = plugin.groupId;
-        String artifactId = plugin.artifactId;
-        // For each execution and goal (if any)
-        if (plugin.executions != null && plugin.executions.execution != null) {
-          for (Execution exec : plugin.executions.execution) {
-            if (exec.goals != null && exec.goals.goal != null) {
-              for (String goal : exec.goals.goal) {
-                String key = groupId + ":" + artifactId + ":" + goal;
-                var handler = pluginConversionRegistry.get(key);
-                if (handler != null) {
-                  extra.append(handler.apply(new PluginExecutionContext(plugin, goal, plugin.configuration), pom));
-                } else {
-                  log.warn("No plugin conversion registered for: {}", key);
-                }
-              }
-            }
-          }
-        }
-      }
-      if (extra.length() > 0) {
-        // Append to the end of build.gradle.kts
-        Files.write(buildGradlePath, ("\n" + extra).getBytes(), java.nio.file.StandardOpenOption.APPEND);
-        log.info("Appended plugin conversion DSL for {}", pom.artifactId);
       }
     }
 
@@ -898,7 +897,6 @@ public class mvn2gradle {
       } else {
         pom.dependencies.dependency.sort(
             java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope)).thenComparing(d -> d.artifactId));
-
         if (inlineVersions) {
           String depBlock = pom.dependencies.dependency.stream().map(dep -> {
             String group = resolveGroupIdForPom(pom);
@@ -916,14 +914,17 @@ public class mvn2gradle {
       }
       String group = resolveProperties(pom.groupId, pom);
       String version = resolveProperties(pom.version, pom);
-
       String javaVersion = extractJavaVersionFromEffectivePom(pom);
+
+      StringBuilder pluginConfigSnippets = new StringBuilder();
+      Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets);
+
+      StringBuilder pluginsBlock = buildGradlePluginsBlock(pluginsMap);
+
       return String.format("""
           %s
 
-          plugins {
-              java
-          }
+          %s
 
           java {
               sourceCompatibility = JavaVersion.toVersion("%s")
@@ -945,7 +946,76 @@ public class mvn2gradle {
           dependencies {
           %s
           }
-          """, depResult.variableBlock, javaVersion, javaVersion, group, version, depResult.dependencyBlock);
+          %s
+          """, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
+          depResult.dependencyBlock, pluginConfigSnippets);
+    }
+
+    private static Map<String, String> collectGradlePluginsAndConfigs(PomModel pom,
+        StringBuilder pluginConfigSnippets) {
+      Map<String, String> pluginsMap = new LinkedHashMap<>();
+      pluginsMap.put("java", null); // always
+
+      if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
+        for (Plugin plugin : pom.build.plugins.plugin) {
+          List<PluginExecutionContext> execs = getPluginExecutions(plugin);
+          for (PluginExecutionContext ctx : execs) {
+            String pluginKey = ctx.plugin.groupId + ":" + ctx.plugin.artifactId + ":" + ctx.goal;
+            PluginConvertor conv = pluginConversionRegistry.get(pluginKey);
+            if (conv != null && conv.gradlePluginId != null && !"null".equals(conv.gradlePluginId)
+                && conv.isEnabled(ctx, pom)) {
+              String version = conv.gradlePluginVersion;
+              if (!pluginsMap.containsKey(conv.gradlePluginId) || version != null) {
+                pluginsMap.put(conv.gradlePluginId, version);
+              }
+              String config = conv.handler.apply(ctx, pom);
+              if (config != null && !config.isBlank()) {
+                pluginConfigSnippets.append("\n").append(config.trim()).append("\n");
+              }
+            }
+          }
+        }
+      }
+      return pluginsMap;
+    }
+
+    // code selector: method buildGradlePluginsBlock
+    private static StringBuilder buildGradlePluginsBlock(Map<String, String> pluginsMap) {
+      StringBuilder pluginsBlock = new StringBuilder();
+      pluginsBlock.append("plugins {\n");
+      for (Map.Entry<String, String> entry : pluginsMap.entrySet()) {
+        String id = entry.getKey();
+        String version = entry.getValue();
+        if (version == null) {
+          pluginsBlock.append("    id(\"").append(id).append("\")\n");
+        } else {
+          pluginsBlock.append("    id(\"").append(id).append("\") version \"").append(version).append("\"\n");
+        }
+      }
+      pluginsBlock.append("}\n");
+      return pluginsBlock;
+    }
+
+    private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin) {
+      List<PluginExecutionContext> result = new ArrayList<>();
+      // If plugin.executions exist, extract goal(s) and configuration(s)
+      if (plugin.executions != null && plugin.executions.execution != null) {
+        for (Execution exec : plugin.executions.execution) {
+          if (exec.goals != null && exec.goals.goal != null) {
+            for (String goal : exec.goals.goal) {
+              PluginConfiguration config = exec.configuration != null ? exec.configuration : plugin.configuration;
+              result.add(new PluginExecutionContext(plugin, goal, config));
+            }
+          }
+        }
+      }
+      // If no executions, treat the plugin's direct <goal> as "default"
+      if ((plugin.executions == null || plugin.executions.execution == null || plugin.executions.execution.isEmpty())
+          && plugin.artifactId != null) {
+        // Register "default" goal for plugins without <executions>
+        result.add(new PluginExecutionContext(plugin, "default", plugin.configuration));
+      }
+      return result;
     }
 
     private static String extractJavaVersionFromEffectivePom(PomModel pom) {
@@ -1146,8 +1216,16 @@ public class mvn2gradle {
 
           String depCoordinate = String.format("%s:%s:%s%s%s", resolvedGroupId, resolvedArtifactId, versionPart,
               classifierPart, typePart);
-
-          deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
+          if (d.exclusions != null && d.exclusions.exclusion != null && !d.exclusions.exclusion.isEmpty()) {
+            deps.append(String.format("    %s(\"%s\") {\n", conf, depCoordinate));
+            for (Exclusion excl : d.exclusions.exclusion) {
+              deps.append(
+                  String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
+            }
+            deps.append("    }\n");
+          } else {
+            deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
+          }
         }
       }
       return new DependencyEmitResult(varDecls.toString(), deps.toString());
