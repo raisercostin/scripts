@@ -53,6 +53,8 @@ public class mvn2gradle {
 
     @Option(names = "--use-pom-inheritance", description = "Use recursive pom.xml parent inheritance", defaultValue = "true")
     public boolean usePomInheritance = true;
+    @Option(names = "--inline-versions", description = "Inline dependency versions instead of using val variables")
+    boolean inlineVersions = false;
 
     @Override
     public Integer call() throws Exception {
@@ -72,7 +74,7 @@ public class mvn2gradle {
         throw new IllegalArgumentException("Must specify --use-effective-pom or --use-pom-inheritance");
       }
       logger.info("Generating build.gradle.kts for {}", pom.artifactId);
-      String gradleKts = GradleKtsGenerator.generate(pom);
+      String gradleKts = GradleKtsGenerator.generate(pom, useEffectivePom, inlineVersions);
       Path gradlePath = projectDir.toPath().resolve("build.gradle.kts");
       Files.writeString(gradlePath, gradleKts);
       logger.info("Done: {}", gradlePath.toAbsolutePath());
@@ -375,10 +377,22 @@ public class mvn2gradle {
     public String artifactId;
     public String version;
     public Executions executions;
-    public Object configuration;
     public Dependencies dependencies;
+    public PluginConfiguration configuration;
 
     private Plugin() {
+    }
+  }
+
+  public static class PluginConfiguration {
+    // maven-compiler-plugin - properties
+    public String source;
+    public String target;
+
+    @com.fasterxml.jackson.annotation.JsonAnySetter
+    public java.util.Map<String, Object> any = new java.util.HashMap<>();
+
+    private PluginConfiguration() {
     }
   }
 
@@ -712,15 +726,53 @@ public class mvn2gradle {
       }
     }
 
-    public static String generate(PomModel pom) {
-      java.util.Set<String> usedProperties = collectUsedProperties(pom);
-      String propertyBlock = emitGradleProperties(pom, usedProperties);
-      DependencyEmitResult depResult = emitGradleDependenciesWithVars(pom, pom);
+    public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions) {
+      var deps = pom.dependencies != null ? pom.dependencies.dependency : null;
 
+      String valDefs = "";
+      String depBlock = "";
+
+      if (deps != null) {
+        if (inlineVersions) {
+          depBlock = deps.stream()
+              .map(dep -> String.format("    implementation(\"%s:%s:%s\")",
+                  dep.groupId,
+                  dep.artifactId,
+                  resolveVersion(dep, pom, useEffectivePom) != null ? resolveVersion(dep, pom, useEffectivePom)
+                      : "unknown"))
+              .collect(java.util.stream.Collectors.joining("\n"));
+        } else {
+          valDefs = deps.stream().map(dep -> {
+            String varName = "ver_" + dep.groupId.replace('.', '_').replace('-', '_')
+                + "_" + dep.artifactId.replace('.', '_').replace('-', '_');
+            String version = resolveVersion(dep, pom, useEffectivePom);
+            String versionVal;
+            if (version != null && !"unknown".equals(version)) {
+              versionVal = "\"" + version + "\"";
+            } else {
+              versionVal = "\"unknown\" // FIXME: version missing for " + dep.groupId + ":" + dep.artifactId;
+            }
+            return "val " + varName + " = " + versionVal;
+          }).collect(java.util.stream.Collectors.joining("\n"));
+
+          depBlock = deps.stream().map(dep -> {
+            String varName = "ver_" + dep.groupId.replace('.', '_').replace('-', '_')
+                + "_" + dep.artifactId.replace('.', '_').replace('-', '_');
+            return "    implementation(\"" + dep.groupId + ":" + dep.artifactId + ":$" + varName + "\")";
+          }).collect(java.util.stream.Collectors.joining("\n"));
+        }
+      }
+      String javaVersion = extractJavaVersionFromEffectivePom(pom);
       return String.format("""
-          %s%s
+          %s
+
           plugins {
               java
+          }
+
+          java {
+              sourceCompatibility = JavaVersion.toVersion("%s")
+              targetCompatibility = JavaVersion.toVersion("%s")
           }
 
           group = "%s"
@@ -732,9 +784,63 @@ public class mvn2gradle {
           }
 
           dependencies {
-          %s}
+          %s
+          }
           """,
-          propertyBlock, depResult.variableBlock, pom.groupId, pom.version, depResult.dependencyBlock);
+          valDefs,
+          javaVersion, javaVersion,
+          pom.groupId,
+          pom.version,
+          depBlock);
+    }
+
+    public static String extractJavaVersionFromEffectivePom(PomModel pom) {
+      if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
+        for (Plugin plugin : pom.build.plugins.plugin) {
+          if ("maven-compiler-plugin".equals(plugin.artifactId) && plugin.configuration != null) {
+            try {
+              String source = plugin.configuration.source;
+              String target = plugin.configuration.target;
+              if (source != null && !source.isBlank() && target != null && !target.isBlank()) {
+                if (source.equals(target)) {
+                  return source;
+                }
+                return source; // prefer source if different
+              } else if (source != null && !source.isBlank()) {
+                return source;
+              } else if (target != null && !target.isBlank()) {
+                return target;
+              }
+            } catch (Exception e) {
+              throw new RuntimeException("Failed to read compiler plugin configuration", e);
+            }
+          }
+        }
+      }
+
+      // fallback: check properties for common keys
+      if (pom.properties != null && pom.properties.any != null) {
+        for (String key : new String[] { "maven.compiler.source", "maven.compiler.target", "java.version" }) {
+          String val = pom.properties.any.get(key);
+          if (val != null && !val.isBlank()) {
+            return val;
+          }
+        }
+      }
+
+      return "1.8";
+    }
+
+    public static String resolveVersion(Dependency d, PomModel pom, boolean useEffectivePom) {
+      if (d.version != null && !d.version.isBlank()) {
+        return d.version;
+      }
+      if (useEffectivePom) {
+        // effective pom should have versions explicitly; if missing, return null
+        return null;
+      } else {
+        return extractVersion(d.groupId, d.artifactId, pom);
+      }
     }
 
     public static void generateEffectivePom(File projectDir)
