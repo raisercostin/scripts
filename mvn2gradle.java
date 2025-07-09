@@ -1,3 +1,4 @@
+
 //usr/bin/env jbang "$0" "$@" ; exit $?
 //DEPS info.picocli:picocli:4.7.7
 //DEPS org.slf4j:slf4j-api:2.0.9
@@ -5,20 +6,31 @@
 //DEPS org.fusesource.jansi:jansi:2.4.0
 //DEPS com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.17.1
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.1
-
-import picocli.CommandLine;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.fusesource.jansi.AnsiConsole;
-import com.fasterxml.jackson.dataformat.xml.XmlMapper;
+//DEPS com.fasterxml.jackson.core:jackson-annotations:2.17.1
+//DEPS org.slf4j:slf4j-api:2.0.12
+//DEPS ch.qos.logback:logback-classic:1.4.14
 
 import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.concurrent.Callable;
 
+import org.fusesource.jansi.AnsiConsole;
+
+import com.fasterxml.jackson.dataformat.xml.XmlMapper;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import picocli.CommandLine;
+import picocli.CommandLine.Option;
+
 public class mvn2gradle {
+  private static final Logger logger = LoggerFactory.getLogger(mvn2gradle.class);
+
   public static void main(String... args) {
     AnsiConsole.systemInstall();
     int exitCode = new CommandLine(new Cli()).execute(args);
@@ -28,13 +40,17 @@ public class mvn2gradle {
 
   @CommandLine.Command(name = "mvn2gradle", mixinStandardHelpOptions = true, description = "Convert Maven pom.xml in given directory to build.gradle.kts (single-module base)")
   public static class Cli implements Callable<Integer> {
-    private static final Logger LOG = LoggerFactory.getLogger(Cli.class);
-
     @CommandLine.Parameters(index = "0", description = "Directory containing pom.xml")
     private File projectDir;
 
     @CommandLine.Option(names = { "--ignore-unknown" }, description = "Ignore unknown XML fields")
     boolean ignoreUnknown = false;
+
+    @Option(names = "--use-effective-pom", description = "Use mvn help:effective-pom")
+    public boolean useEffectivePom = false;
+
+    @Option(names = "--use-pom-inheritance", description = "Use recursive pom.xml parent inheritance", defaultValue = "true")
+    public boolean usePomInheritance = true;
 
     @Override
     public Integer call() throws Exception {
@@ -43,24 +59,20 @@ public class mvn2gradle {
       Path gradlePath = projectDir.toPath().resolve("build.gradle.kts");
 
       if (!Files.exists(pomPath)) {
-        LOG.error("No pom.xml found at {}", pomPath);
+        logger.error("No pom.xml found at {}", pomPath);
         return 1;
       }
 
-      LOG.info("Parsing {}", pomPath);
-      String xml = Files.readString(pomPath);
-      XmlMapper xmlMapper = new XmlMapper();
-      xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
-          !ignoreUnknown);
+      logger.info("Parsing {}", pomPath);
 
-      PomModel pom = xmlMapper.readValue(xml, PomModel.class);
+      PomModel pom = GradleKtsGenerator.loadPom(projectDir, ignoreUnknown);
 
-      LOG.info("Generating build.gradle.kts for {}", pom.artifactId);
+      logger.info("Generating build.gradle.kts for {}", pom.artifactId);
       String gradleKts = GradleKtsGenerator.generate(pom);
 
       Files.writeString(gradlePath, gradleKts);
 
-      LOG.info("Done: {}", gradlePath.toAbsolutePath());
+      logger.info("Done: {}", gradlePath.toAbsolutePath());
       return 0;
     }
 
@@ -84,6 +96,7 @@ public class mvn2gradle {
     // --- Standard Maven POM fields ---
     public String modelVersion;
     public Parent parent;
+    public transient PomModel parentPom; // The actual loaded parent model (transient, not serialized)
     public String groupId;
     public String artifactId;
     public String version;
@@ -104,6 +117,9 @@ public class mvn2gradle {
     public Build build;
     public Modules modules;
     public Repositories repositories;
+    public PluginRepositories pluginRepositories;
+    public Reporting reporting;
+    public Profiles profiles;
 
     private PomModel() {
     }
@@ -272,6 +288,7 @@ public class mvn2gradle {
     public String finalName;
     public Plugins plugins;
     public PluginManagement pluginManagement;
+    public Extensions extensions;
 
     private Build() {
     }
@@ -363,15 +380,282 @@ public class mvn2gradle {
     }
   }
 
+  public static class PluginRepositories {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<PluginRepository> pluginRepository;
+
+    private PluginRepositories() {
+    }
+  }
+
+  public static class PluginRepository {
+    public String id;
+    public String name;
+    public String url;
+    public String layout;
+    public RepositoryPolicy releases;
+    public RepositoryPolicy snapshots;
+
+    private PluginRepository() {
+    }
+  }
+
+  public static class RepositoryPolicy {
+    public String enabled;
+    public String updatePolicy;
+    public String checksumPolicy;
+
+    private RepositoryPolicy() {
+    }
+  }
+
+  public static class Extensions {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<Extension> extension;
+
+    private Extensions() {
+    }
+  }
+
+  public static class Extension {
+    public String groupId;
+    public String artifactId;
+    public String version;
+
+    private Extension() {
+    }
+  }
+
+  public static class Reporting {
+    public Boolean excludeDefaults;
+    public String outputDirectory;
+    public ReportPlugins plugins;
+
+    private Reporting() {
+    }
+  }
+
+  public static class ReportPlugins {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<ReportPlugin> plugin;
+
+    private ReportPlugins() {
+    }
+  }
+
+  public static class ReportPlugin {
+    public String groupId;
+    public String artifactId;
+    public String version;
+    public ReportPluginExecutions executions;
+    public ReportPluginConfiguration configuration;
+    public ReportSets reportSets;
+
+    private ReportPlugin() {
+    }
+  }
+
+  public static class ReportPluginExecutions {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<ReportPluginExecution> execution;
+
+    private ReportPluginExecutions() {
+    }
+  }
+
+  public static class ReportPluginExecution {
+    public String id;
+    public String phase;
+    public String goals; // can be a list in some schemas
+    public ReportPluginConfiguration configuration;
+
+    private ReportPluginExecution() {
+    }
+  }
+
+  public static class ReportPluginConfiguration {
+    private java.util.Map<String, Object> any = new java.util.HashMap<>();
+
+    @JsonAnySetter
+    public void set(String name, Object value) {
+      any.put(name, value);
+    }
+
+    public java.util.Map<String, Object> getAny() {
+      return any;
+    }
+
+    private ReportPluginConfiguration() {
+    }
+  }
+
+  public static class ReportSets {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<ReportSet> reportSet;
+
+    private ReportSets() {
+    }
+  }
+
+  public static class ReportSet {
+    public String id;
+    public Reports reports;
+    public String inherited; // "true"/"false"
+
+    private ReportSet() {
+    }
+  }
+
+  public static class Reports {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<String> report;
+
+    private Reports() {
+    }
+  }
+
+  public static class Profiles {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<Profile> profile;
+
+    private Profiles() {
+    }
+  }
+
+  public static class Profile {
+    public String id;
+    public Activation activation;
+    public Properties properties;
+    public DependencyManagement dependencyManagement;
+    public Dependencies dependencies;
+    public Build build;
+    public Reporting reporting;
+    public DistributionManagement distributionManagement;
+    public Repositories repositories;
+    public PluginRepositories pluginRepositories;
+    public Modules modules;
+    public Scm scm;
+    public Organization organization;
+
+    // ... add other Maven profile fields as needed ...
+    private Profile() {
+    }
+  }
+
+  public static class Activation {
+    public ActivationProperty property;
+    public String activeByDefault;
+    public String jdk;
+    public ActivationOs os;
+    public ActivationFile file;
+    public ActivationCustom custom;
+
+    private Activation() {
+    }
+  }
+
+  public static class ActivationProperty {
+    public String name;
+    public String value;
+
+    private ActivationProperty() {
+    }
+  }
+
+  public static class ActivationOs {
+    public String name;
+    public String family;
+    public String arch;
+    public String version;
+
+    private ActivationOs() {
+    }
+  }
+
+  public static class ActivationFile {
+    public String exists;
+    public String missing;
+
+    private ActivationFile() {
+    }
+  }
+
+  public static class ActivationCustom {
+    // Could contain scripts, etc.
+    private ActivationCustom() {
+    }
+  }
+
   public static class GradleKtsGenerator {
+    public static PomModel loadPom(File projectDirOrPomFile, boolean ignoreUnknown) throws IOException {
+      if (projectDirOrPomFile.isDirectory()) {
+        Path pomPath = projectDirOrPomFile.toPath().resolve("pom.xml");
+        return loadPomFromFile(pomPath.toFile(), ignoreUnknown);
+      } else {
+        return loadPomFromFile(projectDirOrPomFile, ignoreUnknown);
+      }
+    }
+
+    private static PomModel loadPomFromFile(File pomFile, boolean ignoreUnknown) throws IOException {
+      logger.info("Loading POM from {}", pomFile.getAbsolutePath());
+      String xml = Files.readString(pomFile.toPath());
+      XmlMapper xmlMapper = new XmlMapper();
+      xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+          !ignoreUnknown);
+      PomModel pom = xmlMapper.readValue(xml, PomModel.class);
+
+      // Recursively load parent (full chain)
+      if (pom.parent != null) {
+        File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
+        if (parentPomFile != null && parentPomFile.exists()) {
+          pom.parentPom = loadPom(parentPomFile, ignoreUnknown); // This now works for both dirs and files
+        }
+      }
+      return pom;
+    }
+
+    private static File findParentPomFile(PomModel child, File projectDir) throws IOException {
+      // 1. Try <relativePath> or default to "../pom.xml" (local parent, not in .m2)
+      String relPath = (child.parent.relativePath == null || child.parent.relativePath.isBlank())
+          ? "../pom.xml"
+          : child.parent.relativePath;
+      File localParent = new File(projectDir, relPath).getCanonicalFile();
+      if (localParent.exists()) {
+        return localParent;
+      }
+
+      // 2. Try Maven local repository layout (correct way)
+      String groupPath = child.parent.groupId.replace('.', '/');
+      String artifactId = child.parent.artifactId;
+      String version = child.parent.version;
+      File m2 = new File(System.getProperty("user.home"), ".m2/repository");
+      File repoPom = new File(m2, String.format(
+          "%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
+      if (repoPom.exists()) {
+        return repoPom;
+      }
+
+      // 3. Not found
+      throw new FileNotFoundException(
+          "Parent POM not found: tried local [" + localParent + "] and Maven repo [" + repoPom + "]");
+    }
+
+    private static PomModel parsePom(File pomFile, boolean ignoreUnknown) {
+      try {
+        XmlMapper xmlMapper = new XmlMapper();
+        xmlMapper.configure(
+            com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+            !ignoreUnknown);
+        return xmlMapper.readValue(pomFile, PomModel.class);
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to parse POM file: " + pomFile.getAbsolutePath(), e);
+      }
+    }
+
     public static String generate(PomModel pom) {
       java.util.Set<String> usedProperties = collectUsedProperties(pom);
-      java.util.List<String> inheritedVersionVars = new java.util.ArrayList<>();
       String propertyBlock = emitGradleProperties(pom, usedProperties);
-      String dependenciesBlock = emitGradleDependencies(pom, usedProperties, inheritedVersionVars);
-
-      // Join inherited version variables
-      String inheritedVarsBlock = String.join("", inheritedVersionVars);
+      DependencyEmitResult depResult = emitGradleDependenciesWithVars(pom, pom);
 
       return String.format("""
           %s%s
@@ -390,34 +674,7 @@ public class mvn2gradle {
           dependencies {
           %s}
           """,
-          propertyBlock, inheritedVarsBlock, pom.groupId, pom.version, dependenciesBlock);
-    }
-
-    // Now dependencies function collects variables in inheritedVersionVars:
-    private static String emitGradleDependencies(PomModel pom, java.util.Set<String> usedProperties,
-        java.util.List<String> inheritedVersionVars) {
-      StringBuilder deps = new StringBuilder();
-
-      if (pom.dependencies != null && pom.dependencies.dependency != null) {
-        for (Dependency d : pom.dependencies.dependency) {
-          String versionExpr = "";
-          if (d.version != null && !d.version.isBlank()) {
-            versionExpr = ":" + replaceMavenPropsWithKotlinVars(d.version);
-          } else {
-            // missing version—likely inherited, generate variable for it
-            String varName = safeDepVarName(d.groupId, d.artifactId);
-            versionExpr = ":$" + varName;
-            inheritedVersionVars.add(
-                String.format(
-                    "val %s = extractVersion(\"%s:%s\") // FIXME: implement extraction for inherited version\n",
-                    varName, d.groupId, d.artifactId));
-          }
-          String conf = toGradleConf(d.scope);
-          deps.append(String.format("    %s(\"%s:%s%s\")\n",
-              conf, d.groupId, d.artifactId, versionExpr));
-        }
-      }
-      return deps.toString();
+          propertyBlock, depResult.variableBlock, pom.groupId, pom.version, depResult.dependencyBlock);
     }
 
     private static java.util.Set<String> collectUsedProperties(PomModel pom) {
@@ -449,27 +706,49 @@ public class mvn2gradle {
       return propDefs.toString();
     }
 
-    private static String extractVersion(String groupId, String artifactId, PomModel pom) {
-      // 1. Try dependencyManagement
-      if (pom.dependencyManagement != null &&
-          pom.dependencyManagement.dependencies != null &&
-          pom.dependencyManagement.dependencies.dependency != null) {
-        for (Dependency dep : pom.dependencyManagement.dependencies.dependency) {
-          if (groupId.equals(dep.groupId) && artifactId.equals(dep.artifactId) && dep.version != null) {
-            return dep.version;
-          }
-        }
+    private static class DependencyEmitResult {
+      final String variableBlock;
+      final String dependencyBlock;
+
+      DependencyEmitResult(String variableBlock, String dependencyBlock) {
+        this.variableBlock = variableBlock;
+        this.dependencyBlock = dependencyBlock;
       }
-      // 2. Optionally: Check parent POM, if available
-      // TODO: Implement recursive parent support, if needed
-      return null;
     }
 
-    private static String safeDepVarName(String groupId, String artifactId) {
-      return "inherited" +
-          Character.toUpperCase(groupId.charAt(0)) + groupId.substring(1).replaceAll("[^a-zA-Z0-9]", "") +
-          Character.toUpperCase(artifactId.charAt(0)) + artifactId.substring(1).replaceAll("[^a-zA-Z0-9]", "") +
-          "Version";
+    private static DependencyEmitResult emitGradleDependenciesWithVars(PomModel pom, PomModel fullPom) {
+      StringBuilder deps = new StringBuilder();
+      StringBuilder varDecls = new StringBuilder();
+
+      if (pom.dependencies != null && pom.dependencies.dependency != null) {
+        for (Dependency d : pom.dependencies.dependency) {
+          String version = d.version;
+          String versionExpr;
+          String conf = toGradleConf(d.scope);
+
+          if ((version == null || version.isBlank()) && d.groupId != null && d.artifactId != null) {
+            // Need to extract and emit variable
+            String varName = "ver_" + d.groupId.replaceAll("[^a-zA-Z0-9]", "_")
+                + "_" + d.artifactId.replaceAll("[^a-zA-Z0-9]", "_");
+            String extracted = extractVersion(d.groupId, d.artifactId, fullPom);
+            if (extracted == null || extracted.isBlank()) {
+              varDecls.append(String.format("val %s = \"unknown\" // FIXME: version missing for %s:%s\n", varName,
+                  d.groupId, d.artifactId));
+            } else {
+              varDecls.append(String.format("val %s = \"%s\"\n", varName, replaceMavenPropsWithKotlinVars(extracted)));
+            }
+            versionExpr = ":$" + varName;
+          } else if (version != null && !version.isBlank()) {
+            versionExpr = ":" + replaceMavenPropsWithKotlinVars(version);
+          } else {
+            versionExpr = ":unknown"; // Should never reach here now, but fallback
+          }
+
+          deps.append(String.format("    %s(\"%s:%s%s\")\n",
+              conf, d.groupId, d.artifactId, versionExpr));
+        }
+      }
+      return new DependencyEmitResult(varDecls.toString(), deps.toString());
     }
 
     private static String replaceMavenPropsWithKotlinVars(String value) {
@@ -481,6 +760,23 @@ public class mvn2gradle {
       }
       m.appendTail(sb);
       return sb.toString();
+    }
+
+    private static String extractVersion(String groupId, String artifactId, PomModel pom) {
+      PomModel current = pom;
+      while (current != null) {
+        if (current.dependencyManagement != null &&
+            current.dependencyManagement.dependencies != null &&
+            current.dependencyManagement.dependencies.dependency != null) {
+          for (Dependency dep : current.dependencyManagement.dependencies.dependency) {
+            if (groupId.equals(dep.groupId) && artifactId.equals(dep.artifactId) && dep.version != null) {
+              return dep.version;
+            }
+          }
+        }
+        current = current.parentPom; // walk up the parent chain
+      }
+      return null; // Only if not found anywhere
     }
 
     private static String toGradleConf(String scope) {
