@@ -9,6 +9,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-annotations:2.17.1
 //DEPS org.slf4j:slf4j-api:2.0.12
 //DEPS ch.qos.logback:logback-classic:1.4.14
+//DEPS org.zeroturnaround:zt-exec:1.12
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -16,20 +17,21 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeoutException;
+
+import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 
 import org.fusesource.jansi.AnsiConsole;
 
-import com.fasterxml.jackson.dataformat.xml.XmlMapper;
-import com.fasterxml.jackson.annotation.JsonAnySetter;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.zeroturnaround.exec.ProcessExecutor;
+import org.zeroturnaround.exec.InvalidExitValueException;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Option;
 
 public class mvn2gradle {
-  private static final Logger logger = LoggerFactory.getLogger(mvn2gradle.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(mvn2gradle.class);
 
   public static void main(String... args) {
     AnsiConsole.systemInstall();
@@ -55,23 +57,24 @@ public class mvn2gradle {
     @Override
     public Integer call() throws Exception {
       configureLogging();
-      Path pomPath = projectDir.toPath().resolve("pom.xml");
-      Path gradlePath = projectDir.toPath().resolve("build.gradle.kts");
-
-      if (!Files.exists(pomPath)) {
-        logger.error("No pom.xml found at {}", pomPath);
-        return 1;
+      PomModel pom;
+      if (useEffectivePom) {
+        Path effPomPath = projectDir.toPath().resolve("effective-pom.xml");
+        if (!Files.exists(effPomPath)) {
+          // Optionally auto-run mvn help:effective-pom here
+          logger.info("Generating effective-pom.xml");
+          GradleKtsGenerator.generateEffectivePom(projectDir);
+        }
+        pom = GradleKtsGenerator.loadEffectivePom(projectDir, ignoreUnknown);
+      } else if (usePomInheritance) {
+        pom = GradleKtsGenerator.loadPom(projectDir, ignoreUnknown); // your recursive parent logic
+      } else {
+        throw new IllegalArgumentException("Must specify --use-effective-pom or --use-pom-inheritance");
       }
-
-      logger.info("Parsing {}", pomPath);
-
-      PomModel pom = GradleKtsGenerator.loadPom(projectDir, ignoreUnknown);
-
       logger.info("Generating build.gradle.kts for {}", pom.artifactId);
       String gradleKts = GradleKtsGenerator.generate(pom);
-
+      Path gradlePath = projectDir.toPath().resolve("build.gradle.kts");
       Files.writeString(gradlePath, gradleKts);
-
       logger.info("Done: {}", gradlePath.toAbsolutePath());
       return 0;
     }
@@ -286,11 +289,68 @@ public class mvn2gradle {
 
   public static class Build {
     public String finalName;
+    public String sourceDirectory;
+    public String testSourceDirectory;
+    public String scriptSourceDirectory;
+    public String testScriptSourceDirectory;
+    public String outputDirectory;
+    public String testOutputDirectory;
+    public String directory;
+
+    public Resources resources;
+    public TestResources testResources;
+
     public Plugins plugins;
     public PluginManagement pluginManagement;
     public Extensions extensions;
 
     private Build() {
+    }
+  }
+
+  public static class Resources {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "resource")
+    public java.util.List<Resource> resource;
+
+    private Resources() {
+    }
+  }
+
+  public static class TestResources {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "testResource")
+    public java.util.List<Resource> testResource;
+
+    private TestResources() {
+    }
+  }
+
+  public static class Resource {
+    public String directory;
+    public String targetPath;
+    public Boolean filtering;
+    public Includes includes;
+    public Excludes excludes;
+
+    // ...other fields if you want, such as mergeId, etc.
+    private Resource() {
+    }
+  }
+
+  public static class Includes {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<String> include;
+
+    private Includes() {
+    }
+  }
+
+  public static class Excludes {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    public java.util.List<String> exclude;
+
+    private Excludes() {
     }
   }
 
@@ -675,6 +735,45 @@ public class mvn2gradle {
           %s}
           """,
           propertyBlock, depResult.variableBlock, pom.groupId, pom.version, depResult.dependencyBlock);
+    }
+
+    public static void generateEffectivePom(File projectDir)
+        throws IOException, InterruptedException, TimeoutException {
+      String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
+      int exit;
+      try {
+        exit = new ProcessExecutor()
+            .directory(projectDir)
+            .command(mavenCmd, "help:effective-pom", "-Doutput=effective-pom.xml")
+            .redirectOutput(System.out)
+            .redirectError(System.err)
+            .exitValues(0) // Only allow zero exit value
+            .execute()
+            .getExitValue();
+      } catch (InvalidExitValueException e) {
+        throw new IOException("Maven failed with exit code: " + e.getExitValue(), e);
+      }
+      if (exit != 0) {
+        throw new IOException("Maven failed to generate effective-pom.xml (exit " + exit + ")");
+      }
+    }
+
+    private static boolean isWindows() {
+      return System.getProperty("os.name").toLowerCase().contains("win");
+    }
+
+    public static PomModel loadEffectivePom(File projectDir, boolean ignoreUnknown) throws IOException {
+      Path effPomPath = projectDir.toPath().resolve("effective-pom.xml");
+      if (!Files.exists(effPomPath)) {
+        throw new FileNotFoundException("No effective-pom.xml found at " + effPomPath +
+            ". Generate one by running: mvn help:effective-pom -Doutput=effective-pom.xml");
+      }
+      String xml = Files.readString(effPomPath);
+      XmlMapper xmlMapper = new XmlMapper();
+      xmlMapper.configure(
+          com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+          !ignoreUnknown);
+      return xmlMapper.readValue(xml, PomModel.class);
     }
 
     private static java.util.Set<String> collectUsedProperties(PomModel pom) {
