@@ -952,7 +952,64 @@ public class mvn2gradle {
           }).collect(java.util.stream.Collectors.joining("\n"));
           depResult = new DependencyEmitResult("", depBlock);
         } else {
-          depResult = emitGradleDependenciesWithVars(pom, effectivePom);
+          StringBuilder deps = new StringBuilder();
+          StringBuilder varDecls = new StringBuilder();
+          
+          if (pom.dependencies != null && pom.dependencies.dependency != null) {
+            for (Dependency d1 : pom.dependencies.dependency) {
+              String resolvedGroupId = resolveGroupId(d1, pom);
+              String resolvedArtifactId = resolveProperties(d1.artifactId, pom);
+              String version = d1.version;
+          
+              String versionExpr;
+              String conf = toGradleConf(d1.scope);
+          
+              if ((version == null || version.isBlank()) && resolvedGroupId != null && resolvedArtifactId != null) {
+                // variable name construction as before...
+                String scopePart = (d1.scope == null || d1.scope.isBlank()) ? ""
+                    : "_" + d1.scope.replaceAll("[^a-zA-Z0-9]", "_");
+                String typePart = (d1.type == null || d1.type.isBlank()) ? "" : "_" + d1.type.replaceAll("[^a-zA-Z0-9]", "_");
+                String classifierPart = (d1.classifier == null || d1.classifier.isBlank()) ? ""
+                    : "_" + d1.classifier.replaceAll("[^a-zA-Z0-9]", "_");
+          
+                String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_"
+                    + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart + typePart + classifierPart;
+          
+                String extracted = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
+                if (extracted == null || extracted.isBlank()) {
+                  varDecls.append(String.format("val %s = \"unknown\" // FIXME: version missing for %s:%s\n", varName,
+                      resolvedGroupId, resolvedArtifactId));
+                } else {
+                  varDecls.append(String.format("val %s = \"%s\"\n", varName, replaceMavenPropsWithKotlinVars(extracted)));
+                }
+                versionExpr = ":$" + varName;
+              } else if (version != null && !version.isBlank()) {
+                versionExpr = ":" + replaceMavenPropsWithKotlinVars(version);
+              } else {
+                versionExpr = ":unknown"; // fallback
+              }
+          
+              log.info("Adding dependency: {} {}:{}{}", conf, resolvedGroupId, resolvedArtifactId, versionExpr);
+          
+              String versionPart = versionExpr.startsWith(":") ? versionExpr.substring(1) : versionExpr;
+              String classifierPart = (d1.classifier != null && !d1.classifier.isBlank()) ? ":" + d1.classifier : "";
+              String typePart = (d1.type != null && !d1.type.isBlank() && !"jar".equals(d1.type)) ? "@" + d1.type : "";
+          
+              String depCoordinate = String.format("%s:%s:%s%s%s", resolvedGroupId, resolvedArtifactId, versionPart,
+                  classifierPart, typePart);
+              if (d1.exclusions != null && d1.exclusions.exclusion != null && !d1.exclusions.exclusion.isEmpty()) {
+                deps.append(String.format("    %s(\"%s\") {\n", conf, depCoordinate));
+                for (Exclusion excl : d1.exclusions.exclusion) {
+                  deps.append(
+                      String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
+                }
+                deps.append("    }\n");
+              } else {
+                deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
+              }
+            }
+          }
+          depResult = new DependencyEmitResult(varDecls.toString(), deps.toString());
         }
       }
       return depResult;
@@ -1175,67 +1232,6 @@ public class mvn2gradle {
         this.variableBlock = variableBlock;
         this.dependencyBlock = dependencyBlock;
       }
-    }
-
-    private static DependencyEmitResult emitGradleDependenciesWithVars(PomModel pom, Projects effectivePom) {
-      StringBuilder deps = new StringBuilder();
-      StringBuilder varDecls = new StringBuilder();
-
-      if (pom.dependencies != null && pom.dependencies.dependency != null) {
-        for (Dependency d : pom.dependencies.dependency) {
-          String resolvedGroupId = resolveGroupId(d, pom);
-          String resolvedArtifactId = resolveProperties(d.artifactId, pom);
-          String version = d.version;
-
-          String versionExpr;
-          String conf = toGradleConf(d.scope);
-
-          if ((version == null || version.isBlank()) && resolvedGroupId != null && resolvedArtifactId != null) {
-            // variable name construction as before...
-            String scopePart = (d.scope == null || d.scope.isBlank()) ? ""
-                : "_" + d.scope.replaceAll("[^a-zA-Z0-9]", "_");
-            String typePart = (d.type == null || d.type.isBlank()) ? "" : "_" + d.type.replaceAll("[^a-zA-Z0-9]", "_");
-            String classifierPart = (d.classifier == null || d.classifier.isBlank()) ? ""
-                : "_" + d.classifier.replaceAll("[^a-zA-Z0-9]", "_");
-
-            String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_"
-                + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart + typePart + classifierPart;
-
-            String extracted = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
-            if (extracted == null || extracted.isBlank()) {
-              varDecls.append(String.format("val %s = \"unknown\" // FIXME: version missing for %s:%s\n", varName,
-                  resolvedGroupId, resolvedArtifactId));
-            } else {
-              varDecls.append(String.format("val %s = \"%s\"\n", varName, replaceMavenPropsWithKotlinVars(extracted)));
-            }
-            versionExpr = ":$" + varName;
-          } else if (version != null && !version.isBlank()) {
-            versionExpr = ":" + replaceMavenPropsWithKotlinVars(version);
-          } else {
-            versionExpr = ":unknown"; // fallback
-          }
-
-          log.info("Adding dependency: {} {}:{}{}", conf, resolvedGroupId, resolvedArtifactId, versionExpr);
-
-          String versionPart = versionExpr.startsWith(":") ? versionExpr.substring(1) : versionExpr;
-          String classifierPart = (d.classifier != null && !d.classifier.isBlank()) ? ":" + d.classifier : "";
-          String typePart = (d.type != null && !d.type.isBlank() && !"jar".equals(d.type)) ? "@" + d.type : "";
-
-          String depCoordinate = String.format("%s:%s:%s%s%s", resolvedGroupId, resolvedArtifactId, versionPart,
-              classifierPart, typePart);
-          if (d.exclusions != null && d.exclusions.exclusion != null && !d.exclusions.exclusion.isEmpty()) {
-            deps.append(String.format("    %s(\"%s\") {\n", conf, depCoordinate));
-            for (Exclusion excl : d.exclusions.exclusion) {
-              deps.append(
-                  String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
-            }
-            deps.append("    }\n");
-          } else {
-            deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
-          }
-        }
-      }
-      return new DependencyEmitResult(varDecls.toString(), deps.toString());
     }
 
     private static String resolveGroupId(Dependency dep, PomModel pom) {
