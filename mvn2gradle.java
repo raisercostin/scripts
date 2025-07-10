@@ -891,33 +891,14 @@ public class mvn2gradle {
 
     public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions,
         Projects effectivePom) {
-      DependencyEmitResult depResult;
-      if (pom.dependencies == null || pom.dependencies.dependency == null) {
-        depResult = new DependencyEmitResult("", "");
-      } else {
-        pom.dependencies.dependency.sort(
-            java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope)).thenComparing(d -> d.artifactId));
-        if (inlineVersions) {
-          String depBlock = pom.dependencies.dependency.stream().map(dep -> {
-            String group = resolveGroupIdForPom(pom);
-            // String group = resolveProperties(dep.groupId, pom);
-            String artifact = resolveProperties(dep.artifactId, pom);
-            String version = resolveVersion(dep, pom, useEffectivePom, effectivePom);
-            if (version == null)
-              version = "unknown";
-            return String.format("    implementation(\"%s:%s:%s\")", group, artifact, version);
-          }).collect(java.util.stream.Collectors.joining("\n"));
-          depResult = new DependencyEmitResult("", depBlock);
-        } else {
-          depResult = emitGradleDependenciesWithVars(pom, effectivePom);
-        }
-      }
+      StringBuilder pluginConfigSnippets = new StringBuilder();
+      Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets);
+
+      DependencyEmitResult depResult = emitDeps(pom, useEffectivePom, inlineVersions, effectivePom);
       String group = resolveProperties(pom.groupId, pom);
       String version = resolveProperties(pom.version, pom);
       String javaVersion = extractJavaVersionFromEffectivePom(pom);
 
-      StringBuilder pluginConfigSnippets = new StringBuilder();
-      Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets);
 
       StringBuilder pluginsBlock = buildGradlePluginsBlock(pluginsMap);
 
@@ -949,6 +930,32 @@ public class mvn2gradle {
           %s
           """, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
           depResult.dependencyBlock, pluginConfigSnippets);
+    }
+
+    private static DependencyEmitResult emitDeps(PomModel pom, boolean useEffectivePom, boolean inlineVersions,
+        Projects effectivePom) {
+      DependencyEmitResult depResult;
+      if (pom.dependencies == null || pom.dependencies.dependency == null) {
+        depResult = new DependencyEmitResult("", "");
+      } else {
+        pom.dependencies.dependency.sort(
+            java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope)).thenComparing(d -> d.artifactId));
+        if (inlineVersions) {
+          String depBlock = pom.dependencies.dependency.stream().map(dep -> {
+            String group = resolveGroupIdForPom(pom);
+            // String group = resolveProperties(dep.groupId, pom);
+            String artifact = resolveProperties(dep.artifactId, pom);
+            String version = resolveVersion(dep, pom, useEffectivePom, effectivePom);
+            if (version == null)
+              version = "unknown";
+            return String.format("    implementation(\"%s:%s:%s\")", group, artifact, version);
+          }).collect(java.util.stream.Collectors.joining("\n"));
+          depResult = new DependencyEmitResult("", depBlock);
+        } else {
+          depResult = emitGradleDependenciesWithVars(pom, effectivePom);
+        }
+      }
+      return depResult;
     }
 
     private static Map<String, String> collectGradlePluginsAndConfigs(PomModel pom,
