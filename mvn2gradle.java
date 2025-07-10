@@ -963,12 +963,21 @@ public class mvn2gradle {
         String resolvedArtifactId = resolveProperties(dep.artifactId, pom);
         String version = dep.version;
         String conf = toGradleConf(dep.scope);
+        boolean isTestJar = "test-jar".equals(dep.type) || "tests".equals(dep.classifier);
+        boolean isNotTestScope = dep.scope == null || !"test".equals(dep.scope);
+
+        if (isTestJar && isNotTestScope) {
+          log.warn(
+              "Dependency on {}:{} with classifier=test/type=test-jar is missing <scope>test</scope>-Gradle may not handle this as a test dependency.",
+              dep.groupId, dep.artifactId);
+        }
         if (moduleArtifacts.contains(resolvedArtifactId)) {
           // Handle test-jar module dependency
           if ("test".equals(conf) || "testImplementation".equals(conf)) {
-            if ("tests".equals(dep.classifier) && "test-jar".equals(dep.type)) {
-              deps.append(String.format("    testImplementation(project(path = \":%s\", configuration = \"testArtifacts\"))\n",
-                  resolvedArtifactId));
+            if (isTestJar) {
+              deps.append(
+                  String.format("    testImplementation(project(path = \":%s\", configuration = \"testArtifacts\"))\n",
+                      resolvedArtifactId));
               continue;
             }
           }
