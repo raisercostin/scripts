@@ -10,6 +10,7 @@
 //DEPS org.slf4j:slf4j-api:2.0.12
 //DEPS ch.qos.logback:logback-classic:1.4.14
 //DEPS org.zeroturnaround:zt-exec:1.12
+//DEPS one.util:streamex:0.8.2
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -37,6 +38,7 @@ import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 
+import one.util.streamex.StreamEx;
 import picocli.CommandLine;
 import picocli.CommandLine.Option;
 
@@ -65,6 +67,9 @@ public class mvn2gradle {
     public boolean usePomInheritance = true;
     @Option(names = "--inline-versions", description = "Inline dependency versions instead of using val variables")
     boolean inlineVersions = false;
+
+    @Option(names = "--maven-compatible", description = "Generate settings.gradle.kts compatible with Maven:\n - generate inside target/gradle")
+    boolean mavenCompatible = true;
 
     @Override
     public Integer call() throws Exception {
@@ -382,13 +387,17 @@ public class mvn2gradle {
     public String source;
     public String target;
     // checkstyle plugin
-    public Boolean skip;
+    public String skip;
     public String configLocation;
 
     @com.fasterxml.jackson.annotation.JsonAnySetter
     public java.util.Map<String, Object> any = new java.util.HashMap<>();
 
     private PluginConfiguration() {
+    }
+
+    public boolean skip() {
+      return skip != null && skip.equals("true") || skip.equals("skip");
     }
   }
 
@@ -712,15 +721,15 @@ public class mvn2gradle {
               }
               sourceSets["main"].java.srcDir("build/generated/javacc")"""));
       register(new PluginConvertor("org.apache.maven.plugins:maven-checkstyle-plugin:default", "checkstyle", null,
-          (ctx, pom) -> ctx.configuration.skip ? "//checkstyle skip" : """
+          (ctx, pom) -> ctx.configuration.skip() ? "//checkstyle skip" : """
               checkstyle {
                   isIgnoreFailures = %s // Equivalent to <skip>true</skip>
                   configFile = file("%s")
               }
-              """.formatted(ctx.configuration.skip ? "true" : "false", ctx.configuration.configLocation)) {
+              """.formatted(ctx.configuration.skip() ? "true" : "false", ctx.configuration.configLocation)) {
         @Override
         public boolean isEnabled(PluginExecutionContext ctx, PomModel pom) {
-          return ctx.configuration.skip == null || !ctx.configuration.skip;
+          return !ctx.configuration.skip();
         }
       });
       // ...and so on
@@ -762,7 +771,7 @@ public class mvn2gradle {
       PomModel rootPom = loadPom(cli.projectDir, cli.ignoreUnknown, effectivePom);
 
       // Generate settings.gradle.kts for root project and modules
-      String settingsGradle = generateSettingsGradleKts(rootPom);
+      String settingsGradle = generateSettingsGradleKts(rootPom, cli.mavenCompatible);
       Files.writeString(cli.projectDir.toPath().resolve("settings.gradle.kts"), settingsGradle);
       log.info("Generated settings.gradle.kts");
 
@@ -775,24 +784,19 @@ public class mvn2gradle {
       return 0;
     }
 
-    public static String generateSettingsGradleKts(PomModel pom) {
+    public static String generateSettingsGradleKts(PomModel pom, boolean mavenCompatible) {
+
       if (pom.modules == null || pom.modules.module == null || pom.modules.module.isEmpty()) {
-        // No modules, just return root project name declaration
-        return String.format("rootProject.name = \"%s\"\n", pom.artifactId);
+        return "rootProject.name = \"%s\"\n".formatted(pom.artifactId);
       }
-      StringBuilder sb = new StringBuilder();
-      sb.append(String.format("rootProject.name = \"%s\"\n\n", pom.artifactId));
-      sb.append("include(\n");
-      for (int i = 0; i < pom.modules.module.size(); i++) {
-        String module = pom.modules.module.get(i);
-        sb.append("    \"").append(module).append("\"");
-        if (i < pom.modules.module.size() - 1) {
-          sb.append(",");
-        }
-        sb.append("\n");
-      }
-      sb.append(")\n");
-      return sb.toString();
+      String includes = one.util.streamex.StreamEx.of(pom.modules.module).map(m -> "    \"" + m + "\"").joining(",\n");
+      return """
+          rootProject.name = "%s"
+
+          include(
+          %s
+          )
+          """.formatted(pom.artifactId, includes);
     }
 
     private static void generateForModulesRecursively(Path baseDir, PomModel pom, Cli cli, Projects effectivePom,
@@ -906,14 +910,23 @@ public class mvn2gradle {
       // When calling emitDeps (or generate), pass moduleArtifacts:
       DependencyEmitResult depResult = emitDeps(pom, useEffectivePom, inlineVersions, effectivePom, moduleArtifacts);
 
-      if (depResult.hasLombok)
-        pluginsMap.put("io.freefair.lombok", "8.6");
-
       String group = resolveProperties(pom.groupId, pom);
       String version = resolveProperties(pom.version, pom);
       String javaVersion = extractJavaVersionFromEffectivePom(pom);
+      if (depResult.hasLombok)
+        pluginsMap.put("io.freefair.lombok", "8.6");
+      String pluginsEntries = StreamEx.of(pluginsMap.entrySet())
+          .map(e -> e.getValue() == null ? "    id(\"" + e.getKey() + "\")"
+              : "    id(\"" + e.getKey() + "\") version \"" + e.getValue() + "\"")
+          .joining("\n");
 
-      StringBuilder pluginsBlock = buildGradlePluginsBlock(pluginsMap);
+      String pluginsBlock = """
+          plugins {
+              id("java")
+              id("eclipse")
+              %s
+          }
+          """.formatted(pluginsEntries);
 
       return String.format("""
           %s
@@ -926,7 +939,9 @@ public class mvn2gradle {
           }
 
           group = "%s"
+          
           version = "%s"
+          layout.buildDirectory.set(file("$projectDir/target/build"))
 
           repositories {
               mavenLocal()
@@ -936,6 +951,18 @@ public class mvn2gradle {
           tasks.withType<JavaCompile> {
               options.compilerArgs.add("-Xlint:unchecked")
               options.encoding = "UTF-8"
+              //eclipse
+              destinationDirectory.set(
+                  layout.buildDirectory.dir(
+                      "classes/java/" + if (name.contains("Test", ignoreCase = true)) "test" else "main"
+                  )
+              )
+          }
+
+          eclipse {
+              classpath {
+                  defaultOutputDir = layout.buildDirectory.dir("classes/java/main").get().asFile
+              }
           }
 
           dependencies {
@@ -944,6 +971,24 @@ public class mvn2gradle {
           %s
           """, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
           depResult.dependencyBlock, pluginConfigSnippets);
+          //      tasks.withType<Test> {
+          //        useJUnitPlatform()
+          //    }
+          //    tasks.withType<ProcessResources> {
+          //        filesMatching("**/*.properties") {
+          //            filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
+          //        }
+          //    }
+          //    tasks.withType<ProcessResources> {
+          //        filesMatching("**/*.xml") {
+          //            filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
+          //        }
+          //    }
+          //    tasks.withType<ProcessResources> {
+          //        filesMatching("**/*.txt") {
+          //            filter(org.apache.tools.ant.filters.ReplaceTokens, tokens: properties)
+          //        }
+          //    }
     }
 
     private static DependencyEmitResult emitDeps(PomModel pom, boolean useEffectivePom, boolean inlineVersions,
@@ -1081,8 +1126,6 @@ public class mvn2gradle {
     private static Map<String, String> collectGradlePluginsAndConfigs(PomModel pom,
         StringBuilder pluginConfigSnippets) {
       Map<String, String> pluginsMap = new LinkedHashMap<>();
-      pluginsMap.put("java", null); // always
-
       if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
         for (Plugin plugin : pom.build.plugins.plugin) {
           List<PluginExecutionContext> execs = getPluginExecutions(plugin);
@@ -1105,23 +1148,6 @@ public class mvn2gradle {
         }
       }
       return pluginsMap;
-    }
-
-    // code selector: method buildGradlePluginsBlock
-    private static StringBuilder buildGradlePluginsBlock(Map<String, String> pluginsMap) {
-      StringBuilder pluginsBlock = new StringBuilder();
-      pluginsBlock.append("plugins {\n");
-      for (Map.Entry<String, String> entry : pluginsMap.entrySet()) {
-        String id = entry.getKey();
-        String version = entry.getValue();
-        if (version == null) {
-          pluginsBlock.append("    id(\"").append(id).append("\")\n");
-        } else {
-          pluginsBlock.append("    id(\"").append(id).append("\") version \"").append(version).append("\"\n");
-        }
-      }
-      pluginsBlock.append("}\n");
-      return pluginsBlock;
     }
 
     private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin) {
