@@ -18,16 +18,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.fusesource.jansi.AnsiConsole;
 import org.zeroturnaround.exec.InvalidExitValueException;
@@ -731,20 +729,23 @@ public class mvn2gradle {
               archiveClassifier.set("tests")
               from(sourceSets.test.get().output)
           }
+          configurations {
+              create("testArtifacts")
+          }
           artifacts {
-              archives(tasks.named("testJar"))
+              add("testArtifacts", tasks.named("testJar"))
           }
           """));
-      register(
-          new PluginConvertor("org.codehaus.mojo:build-helper-maven-plugin:add-source", null, null, (ctx, pom) -> """
-              sourceSets {
-                  main {
-                      java {
-                          srcDir("target/generated-sources/javacc")
-                      }
-                  }
-              }
-              """));
+//      register(
+//          new PluginConvertor("org.codehaus.mojo:build-helper-maven-plugin:add-source", null, null, (ctx, pom) -> """
+//              sourceSets {
+//                  main {
+//                      java {
+//                          srcDir("target/generated-sources/javacc")
+//                      }
+//                  }
+//              }
+//              """));
     }
 
     public static Integer sync(Cli cli) throws Exception {
@@ -765,8 +766,11 @@ public class mvn2gradle {
       Files.writeString(cli.projectDir.toPath().resolve("settings.gradle.kts"), settingsGradle);
       log.info("Generated settings.gradle.kts");
 
+      // At top-level in sync
+      Set<String> moduleArtifacts = collectModuleArtifactIds(rootPom, cli.projectDir, cli.ignoreUnknown, effectivePom);
+
       // Generate build.gradle.kts recursively for root and modules
-      generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom);
+      generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, moduleArtifacts);
 
       return 0;
     }
@@ -791,20 +795,24 @@ public class mvn2gradle {
       return sb.toString();
     }
 
-    private static void generateForModulesRecursively(Path baseDir, PomModel pom, Cli cli, Projects effectivePom)
-        throws IOException {
+    private static void generateForModulesRecursively(Path baseDir, PomModel pom, Cli cli, Projects effectivePom,
+        Set<String> moduleArtifacts) {
       log.info("Generating build.gradle.kts for {}", pom.artifactId);
 
-      String gradleKts = generate(pom, cli.useEffectivePom, cli.inlineVersions, effectivePom);
+      String gradleKts = generate(pom, cli.useEffectivePom, cli.inlineVersions, effectivePom, moduleArtifacts);
 
-      Files.writeString(baseDir.resolve("build.gradle.kts"), gradleKts);
+      try {
+        Files.writeString(baseDir.resolve("build.gradle.kts"), gradleKts);
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to write build.gradle.kts for " + pom.artifactId, e);
+      }
 
       if (pom.modules != null && pom.modules.module != null) {
         for (String moduleName : pom.modules.module) {
           Path moduleDir = baseDir.resolve(moduleName);
           if (Files.exists(moduleDir)) {
             PomModel modulePom = GradleKtsGenerator.loadPom(moduleDir.toFile(), cli.ignoreUnknown, effectivePom);
-            generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom);
+            generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, moduleArtifacts);
           } else {
             log.warn("Module directory not found: {}", moduleDir);
           }
@@ -812,8 +820,7 @@ public class mvn2gradle {
       }
     }
 
-    public static PomModel loadPom(File projectDirOrPomFile, boolean ignoreUnknown, Projects effectivePom)
-        throws IOException {
+    public static PomModel loadPom(File projectDirOrPomFile, boolean ignoreUnknown, Projects effectivePom) {
       PomModel pom;
       if (projectDirOrPomFile.isDirectory()) {
         Path pomPath = projectDirOrPomFile.toPath().resolve("pom.xml");
@@ -836,8 +843,7 @@ public class mvn2gradle {
       return pom;
     }
 
-    private static PomModel loadPomFromFile(File pomFile, boolean ignoreUnknown, Projects effectivePom)
-        throws IOException {
+    private static PomModel loadPomFromFile(File pomFile, boolean ignoreUnknown, Projects effectivePom) {
       log.info("Loading POM from {}", pomFile.getAbsolutePath());
       PomModel pom = parsePom(pomFile, ignoreUnknown);
 
@@ -853,29 +859,33 @@ public class mvn2gradle {
       return pom;
     }
 
-    private static File findParentPomFile(PomModel child, File projectDir) throws IOException {
+    private static File findParentPomFile(PomModel child, File projectDir) {
       // 1. Try <relativePath> or default to "../pom.xml" (local parent, not in .m2)
       String relPath = (child.parent.relativePath == null || child.parent.relativePath.isBlank()) ? "../pom.xml"
           : child.parent.relativePath;
-      File localParent = new File(projectDir, relPath).getCanonicalFile();
-      if (localParent.exists()) {
-        return localParent;
-      }
+      try {
+        File localParent = new File(projectDir, relPath).getCanonicalFile();
+        if (localParent.exists()) {
+          return localParent;
+        }
 
-      // 2. Try Maven local repository layout (correct way)
-      String groupPath = child.parent.groupId.replace('.', '/');
-      String artifactId = child.parent.artifactId;
-      String version = child.parent.version;
-      File m2 = new File(System.getProperty("user.home"), ".m2/repository");
-      File repoPom = new File(m2,
-          String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
-      if (repoPom.exists()) {
-        return repoPom;
-      }
+        // 2. Try Maven local repository layout (correct way)
+        String groupPath = child.parent.groupId.replace('.', '/');
+        String artifactId = child.parent.artifactId;
+        String version = child.parent.version;
+        File m2 = new File(System.getProperty("user.home"), ".m2/repository");
+        File repoPom = new File(m2,
+            String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
+        if (repoPom.exists()) {
+          return repoPom;
+        }
 
-      // 3. Not found
-      throw new FileNotFoundException(
-          "Parent POM not found: tried local [" + localParent + "] and Maven repo [" + repoPom + "]");
+        // 3. Not found
+        throw new RuntimeException(
+            "Parent POM not found: tried local [" + localParent + "] and Maven repo [" + repoPom + "]");
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to resolve parent POM path for " + child.parent.artifactId, e);
+      }
     }
 
     private static PomModel parsePom(File pomFile, boolean ignoreUnknown) {
@@ -889,12 +899,13 @@ public class mvn2gradle {
       }
     }
 
-    public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions,
-        Projects effectivePom) {
+    public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions, Projects effectivePom,
+        Set<String> moduleArtifacts) {
       StringBuilder pluginConfigSnippets = new StringBuilder();
       Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets);
+      // When calling emitDeps (or generate), pass moduleArtifacts:
+      DependencyEmitResult depResult = emitDeps(pom, useEffectivePom, inlineVersions, effectivePom, moduleArtifacts);
 
-      DependencyEmitResult depResult = emitDeps(pom, useEffectivePom, inlineVersions, effectivePom);
       if (depResult.hasLombok)
         pluginsMap.put("io.freefair.lombok", "8.6");
 
@@ -935,7 +946,7 @@ public class mvn2gradle {
     }
 
     private static DependencyEmitResult emitDeps(PomModel pom, boolean useEffectivePom, boolean inlineVersions,
-        Projects effectivePom) {
+        Projects effectivePom, Set<String> moduleArtifacts) {
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
         return new DependencyEmitResult("", "", false);
       }
@@ -951,7 +962,19 @@ public class mvn2gradle {
         String resolvedArtifactId = resolveProperties(dep.artifactId, pom);
         String version = dep.version;
         String conf = toGradleConf(dep.scope);
-
+        if (moduleArtifacts.contains(resolvedArtifactId)) {
+          // Handle test-jar module dependency
+          if ("test".equals(conf) || "testImplementation".equals(conf)) {
+            if ("tests".equals(dep.classifier) && "test-jar".equals(dep.type)) {
+              deps.append(String.format("    testImplementation(project(path = \":%s\", configuration = \"testArtifacts\"))\n",
+                  resolvedArtifactId));
+              continue;
+            }
+          }
+          // Normal module dependency
+          deps.append(String.format("    %s(project(\":%s\"))\n", conf, resolvedArtifactId));
+          continue;
+        }
         // ---- Lombok special case ----
         if ("org.projectlombok".equals(resolvedGroupId) && "lombok".equals(resolvedArtifactId)) {
           hasLombok = true;
@@ -1023,6 +1046,28 @@ public class mvn2gradle {
       return new DependencyEmitResult(varDecls.toString(), deps.toString(), hasLombok);
     }
 
+    private static Set<String> collectModuleArtifactIds(PomModel rootPom, File baseDir, boolean ignoreUnknown,
+        Projects effectivePom) {
+      Set<String> modules = new HashSet<>();
+      collectModulesRecursively(rootPom, baseDir, ignoreUnknown, effectivePom, modules);
+      return modules;
+    }
+
+    private static void collectModulesRecursively(PomModel pom, File baseDir, boolean ignoreUnknown,
+        Projects effectivePom, Set<String> modules) {
+      if (pom == null || pom.modules == null || pom.modules.module == null)
+        return;
+      for (String moduleName : pom.modules.module) {
+        File moduleDir = new File(baseDir, moduleName);
+        PomModel childPom = null;
+        childPom = loadPom(moduleDir, ignoreUnknown, effectivePom);
+        if (childPom != null && childPom.artifactId != null) {
+          modules.add(childPom.artifactId);
+          collectModulesRecursively(childPom, moduleDir, ignoreUnknown, effectivePom, modules);
+        }
+      }
+    }
+
     private static Map<String, String> collectGradlePluginsAndConfigs(PomModel pom,
         StringBuilder pluginConfigSnippets) {
       Map<String, String> pluginsMap = new LinkedHashMap<>();
@@ -1033,13 +1078,14 @@ public class mvn2gradle {
           List<PluginExecutionContext> execs = getPluginExecutions(plugin);
           for (PluginExecutionContext ctx : execs) {
             String pluginKey = ctx.plugin.groupId + ":" + ctx.plugin.artifactId + ":" + ctx.goal;
+            log.info("Processing plugin execution: {}", pluginKey);
             PluginConvertor conv = pluginConversionRegistry.get(pluginKey);
-            if (conv != null && conv.gradlePluginId != null && !"null".equals(conv.gradlePluginId)
-                && conv.isEnabled(ctx, pom)) {
+            if (conv != null && conv.isEnabled(ctx, pom)) {
               String version = conv.gradlePluginVersion;
-              if (!pluginsMap.containsKey(conv.gradlePluginId) || version != null) {
-                pluginsMap.put(conv.gradlePluginId, version);
-              }
+              if (conv.gradlePluginId != null)
+                if (!pluginsMap.containsKey(conv.gradlePluginId) || version != null) {
+                  pluginsMap.put(conv.gradlePluginId, version);
+                }
               String config = conv.handler.apply(ctx, pom);
               if (config != null && !config.isBlank()) {
                 pluginConfigSnippets.append("\n").append(config.trim()).append("\n");
