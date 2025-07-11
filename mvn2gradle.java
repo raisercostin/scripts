@@ -979,7 +979,14 @@ public class mvn2gradle {
           }
 
           tasks.withType<JavaCompile> {
-              options.compilerArgs.add("-Xlint:unchecked")
+              //-Xlint:unchecked can be configured with -P-GCompiler-Xlint:unchecked -P-GCompiler-nowarn
+              project.properties.keys
+                  .filter { it.toString().startsWith("-GCompiler") }
+                  .forEach { key ->
+                      val arg = key.toString().removePrefix("-GCompiler")
+                      logger.info("Adding compiler arg: $arg")
+                      options.compilerArgs.add(arg)
+                  }
               options.encoding = "UTF-8"
               destinationDirectory.set(
                   layout.buildDirectory.dir(
@@ -1278,13 +1285,13 @@ public class mvn2gradle {
 
     private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin, PomModel pom) {
       List<PluginExecutionContext> result = new ArrayList<>();
-      Set<String> seenExecutionIds = new HashSet<>();
-      collectPluginExecutionsRecursive(plugin, pom, result, seenExecutionIds);
+      Set<String> seenExecKeys = new HashSet<>();
+      collectPluginExecutionsRecursive(plugin, pom, result, seenExecKeys);
       return result;
     }
 
     private static void collectPluginExecutionsRecursive(Plugin plugin, PomModel pom,
-        List<PluginExecutionContext> result, Set<String> seenExecutionIds) {
+        List<PluginExecutionContext> result, Set<String> seenExecKeys) {
       if (pom == null || pom.build == null || pom.build.plugins == null || pom.build.plugins.plugin == null)
         return;
       for (Plugin p : pom.build.plugins.plugin) {
@@ -1293,26 +1300,26 @@ public class mvn2gradle {
             for (Execution exec : p.executions.execution) {
               if (exec.inherited != null && Boolean.FALSE.equals(exec.inherited))
                 continue;
-              // Deduplicate by id (child wins)
-              if (exec.id != null && !seenExecutionIds.add(exec.id))
-                continue;
               if (exec.goals != null && exec.goals.goal != null) {
                 for (String goal : exec.goals.goal) {
+                  // Compose a unique key for this execution
+                  String execId = exec.id != null ? exec.id : "";
+                  String execKey = execId + ":" + goal;
+                  if (!seenExecKeys.add(execKey))
+                    continue; // Already included from child, skip parent
                   PluginConfiguration config = exec.configuration != null ? exec.configuration : p.configuration;
                   result.add(new PluginExecutionContext(p, goal, config));
                 }
               }
             }
           }
-          // Only add default execution if no executions and not already handled by child
           if ((p.executions == null || p.executions.execution == null || p.executions.execution.isEmpty())
-              && seenExecutionIds.isEmpty()) {
+              && seenExecKeys.isEmpty()) {
             result.add(new PluginExecutionContext(p, "default", p.configuration));
           }
         }
       }
-      // Now recurse to parent
-      collectPluginExecutionsRecursive(plugin, pom.parentPom, result, seenExecutionIds);
+      collectPluginExecutionsRecursive(plugin, pom.parentPom, result, seenExecKeys);
     }
 
     private static Map<String, String> collectGradlePluginsAndConfigs(PomModel pom,
