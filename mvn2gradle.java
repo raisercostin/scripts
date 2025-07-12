@@ -13,7 +13,6 @@
 //DEPS one.util:streamex:0.8.2
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,6 +36,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
+import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper;
 
 import one.util.streamex.StreamEx;
 import picocli.CommandLine;
@@ -74,6 +74,12 @@ public class mvn2gradle {
 
     @Option(names = "--ignore-unknown-versions", description = "Ignore unknown dependencies versions (useful in debug)", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
     boolean ignoreUnknownVersions = false;
+
+    @Option(names = "--ignore-unknown-java-version", description = "Ignore unknown Java version in pom.xml (useful in debug)", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
+    public boolean ignoreUnknownJavaVersion = true;
+
+    @Option(names = "--force-generate-effective-pom", description = "Force regeneration of effective-pom.xml even if it exists", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
+    public boolean forceGenerateEffectivePom = true;
 
     @Override
     public Integer call() throws Exception {
@@ -299,7 +305,7 @@ public class mvn2gradle {
     public String outputDirectory;
     public String testOutputDirectory;
     public String directory;
-
+    public String defaultGoal;
     public Resources resources;
     public TestResources testResources;
 
@@ -730,7 +736,7 @@ public class mvn2gradle {
               sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/javacc"))
               """));
       register(new PluginConvertor("org.apache.maven.plugins:maven-checkstyle-plugin:default", "checkstyle", null,
-          (ctx, pom) -> ctx.configuration.skip() ? "//checkstyle skip" : """
+          (ctx, pom) -> ctx.configuration == null || ctx.configuration.skip() ? "//checkstyle skip" : """
               checkstyle {
                   isIgnoreFailures = %s // Equivalent to <skip>true</skip>
                   configFile = file("%s")
@@ -738,7 +744,7 @@ public class mvn2gradle {
               """.formatted(ctx.configuration.skip() ? "true" : "false", ctx.configuration.configLocation)) {
         @Override
         public boolean isEnabled(PluginExecutionContext ctx, PomModel pom) {
-          return !ctx.configuration.skip();
+          return ctx.configuration == null || !ctx.configuration.skip();
         }
       });
       // ...and so on
@@ -769,12 +775,12 @@ public class mvn2gradle {
     public static Integer sync(Cli cli) throws Exception {
       Projects effectivePom = null;
       if (cli.useEffectivePom) {
-        Path effPomPath = cli.projectDir.toPath().resolve("effective-pom.xml");
-        if (!Files.exists(effPomPath)) {
+        Path effPomPath = cli.projectDir.toPath().resolve("target/effective-pom.xml");
+        if (!Files.exists(effPomPath) || cli.forceGenerateEffectivePom) {
           log.info("Generating effective-pom.xml");
-          GradleKtsGenerator.generateEffectivePom(cli.projectDir);
+          GradleKtsGenerator.generateEffectivePom(cli.projectDir, effPomPath);
         }
-        effectivePom = loadEffectivePom(cli.projectDir, cli.ignoreUnknown);
+        effectivePom = loadEffectivePom(cli.ignoreUnknown, effPomPath);
       }
 
       PomModel rootPom = loadPom(cli.projectDir, cli.ignoreUnknown, effectivePom);
@@ -801,12 +807,57 @@ public class mvn2gradle {
       List<String> includes = collectAllModulePaths(rootPom, "", rootDir, ignoreUnknown, effectivePom);
 
       String includesStr = StreamEx.of(includes).map(m -> "include(\"" + m + "\")").joining("\n");
+      String mirrorsRepositoriesBlock = generateGradleRepositoriesFromMirrors(
+          readMavenSettings(new File(System.getProperty("user.home"), ".m2/settings.xml")));
 
       return """
           rootProject.name = "%s"
-
+          dependencyResolutionManagement {
+              repositories {
+                  mavenLocal()
+                  %s
+                  mavenCentral()
+              }
+          }
           %s
-          """.formatted(rootName, includesStr);
+          """.formatted(rootName, mirrorsRepositoriesBlock, includesStr);
+    }
+
+    public static class MvnSettings {
+      public Mirrors mirrors;
+
+      public static class Mirrors {
+        @JacksonXmlElementWrapper(useWrapping = false)
+        public List<Mirror> mirror;
+      }
+
+      public static class Mirror {
+        public String id;
+        public String mirrorOf;
+        public String url;
+      }
+    }
+
+    public static MvnSettings readMavenSettings(File settingsXml) {
+      try {
+        XmlMapper xmlMapper = new XmlMapper();
+        xmlMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        return xmlMapper.readValue(settingsXml, MvnSettings.class);
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to read Maven settings.xml: " + settingsXml.getAbsolutePath(), e);
+      }
+    }
+
+    public static String generateGradleRepositoriesFromMirrors(MvnSettings settings) {
+      if (settings == null || settings.mirrors == null || settings.mirrors.mirror == null)
+        return "";
+
+      return StreamEx.of(settings.mirrors.mirror).map(m -> """
+          maven {
+              name = "%s"
+              url = uri("%s")
+          }
+          """.formatted(m.id, m.url)).joining("\n");
     }
 
     private static List<String> collectAllModulePaths(PomModel pom, String parentPath, File baseDir,
@@ -973,7 +1024,7 @@ public class mvn2gradle {
       // 4. Standard project attributes
       String group = resolveProperties(pom.groupId, pom);
       String version = resolveProperties(pom.version, pom);
-      String javaVersion = extractJavaVersionFromEffectivePom(pom);
+      String javaVersion = extractJavaVersionFromEffectivePom(pom, cli);
 
       if (depResult.hasLombok)
         pluginsMap.put("io.freefair.lombok", "8.6");
@@ -984,7 +1035,13 @@ public class mvn2gradle {
           %s
           %s
 
-          %s
+          plugins {
+              id("java")
+              id("eclipse")
+              id("com.vanniktech.dependency.graph.generator") version "0.8.0"
+              id ("project-report")
+              %s
+          }
 
           java {
               sourceCompatibility = JavaVersion.toVersion("%s")
@@ -1138,20 +1195,12 @@ public class mvn2gradle {
       return chain;
     }
 
-    // --- Helper: build plugins block (Kotlin/Gradle KTS, not Groovy, not
-    // deprecated)
     private static String buildPluginsBlockKts(Map<String, String> pluginsMap) {
       String pluginsEntries = StreamEx.of(pluginsMap.entrySet())
           .map(e -> e.getValue() == null ? "    id(\"" + e.getKey() + "\")"
               : "    id(\"" + e.getKey() + "\") version \"" + e.getValue() + "\"")
           .joining("\n");
-      return """
-          plugins {
-              id("java")
-              id("eclipse")
-              %s
-          }
-          """.formatted(pluginsEntries);
+      return pluginsEntries;
     }
 
     // tasks.withType<Test> {
@@ -1241,8 +1290,8 @@ public class mvn2gradle {
             log.warn("Dependency {}:{} has unknown version, skipping", resolvedGroupId, resolvedArtifactId);
             continue;
           }
-          throw new RuntimeException(
-              "Failed to resolve version for dependency: " + resolvedGroupId + ":" + resolvedArtifactId);
+          throw new RuntimeException("Failed to resolve version for dependency: %s:%s on %s".formatted(resolvedGroupId,
+              resolvedArtifactId, pom.artifactId));
         }
 
         String versionExpr;
@@ -1396,7 +1445,9 @@ public class mvn2gradle {
       collectGradlePluginsAndConfigsRecursive(pom.parentPom, pluginConfigSnippets, pluginsMap, visited);
     }
 
-    private static String extractJavaVersionFromEffectivePom(PomModel pom) {
+    private static String extractJavaVersionFromEffectivePom(PomModel pom, Cli cli) {
+      String rawVersion = null;
+
       if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
         for (Plugin plugin : pom.build.plugins.plugin) {
           if ("maven-compiler-plugin".equals(plugin.artifactId) && plugin.configuration != null) {
@@ -1404,14 +1455,14 @@ public class mvn2gradle {
               String source = plugin.configuration.source;
               String target = plugin.configuration.target;
               if (source != null && !source.isBlank() && target != null && !target.isBlank()) {
-                if (source.equals(target)) {
-                  return source;
-                }
-                return source; // prefer source if different
+                rawVersion = source.equals(target) ? source : source; // prefer source if different
+                break;
               } else if (source != null && !source.isBlank()) {
-                return source;
+                rawVersion = source;
+                break;
               } else if (target != null && !target.isBlank()) {
-                return target;
+                rawVersion = target;
+                break;
               }
             } catch (Exception e) {
               throw new RuntimeException("Failed to read compiler plugin configuration", e);
@@ -1420,21 +1471,37 @@ public class mvn2gradle {
         }
       }
 
-      // fallback: check properties for common keys
-      if (pom.properties != null && pom.properties.any != null) {
+      if (rawVersion == null && pom.properties != null && pom.properties.any != null) {
         for (String key : new String[] { "maven.compiler.source", "maven.compiler.target", "java.version" }) {
           String val = pom.properties.any.get(key);
           if (val != null && !val.isBlank()) {
-            return val;
+            rawVersion = val;
+            break;
           }
         }
       }
 
-      if (pom.parentPom != null) {
-        return extractJavaVersionFromEffectivePom(pom.parentPom);
+      if (rawVersion == null && pom.parentPom != null) {
+        return extractJavaVersionFromEffectivePom(pom.parentPom, cli);
       }
-      log.warn("No Java version found in POM, defaulting to 1.8");
-      return "1.8";
+
+      if (rawVersion == null) {
+        if (cli.ignoreUnknownJavaVersion) {
+          log.warn("No Java version found in POM " + (pom.artifactId != null ? pom.artifactId : ""));
+          return "1.8";
+        } else
+          throw new RuntimeException(
+              "Java version property not found in POM " + (pom.artifactId != null ? pom.artifactId : ""));
+      }
+
+      String resolvedVersion = resolveProperties(rawVersion, pom);
+
+      if (resolvedVersion == null || resolvedVersion.isBlank() || resolvedVersion.contains("${")) {
+        throw new RuntimeException(
+            "Failed to resolve Java version property fully in POM " + (pom.artifactId != null ? pom.artifactId : ""));
+      }
+
+      return resolvedVersion;
     }
 
     public static String resolveVersion(Dependency d, PomModel pom, boolean useEffectivePom, Projects effectivePom) {
@@ -1458,20 +1525,20 @@ public class mvn2gradle {
       }
     }
 
-    private static void generateEffectivePom(File projectDir)
+    private static void generateEffectivePom(File projectDir, Path effPomPath)
         throws IOException, InterruptedException, TimeoutException {
       String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
       int exit;
       try {
         exit = new ProcessExecutor().directory(projectDir)
-            .command(mavenCmd, "help:effective-pom", "-Doutput=effective-pom.xml").redirectOutput(System.out)
+            .command(mavenCmd, "help:effective-pom", "-Doutput=" + effPomPath).redirectOutput(System.out)
             .redirectError(System.err).exitValues(0) // Only allow zero exit value
             .execute().getExitValue();
       } catch (InvalidExitValueException e) {
         throw new IOException("Maven failed with exit code: " + e.getExitValue(), e);
       }
       if (exit != 0) {
-        throw new IOException("Maven failed to generate effective-pom.xml (exit " + exit + ")");
+        throw new IOException("Maven failed to generate " + effPomPath + " (exit " + exit + ")");
       }
     }
 
@@ -1479,11 +1546,9 @@ public class mvn2gradle {
       return System.getProperty("os.name").toLowerCase().contains("win");
     }
 
-    public static Projects loadEffectivePom(File projectDir, boolean ignoreUnknown) throws IOException {
-      Path effPomPath = projectDir.toPath().resolve("effective-pom.xml");
+    public static Projects loadEffectivePom(boolean ignoreUnknown, Path effPomPath) throws IOException {
       if (!Files.exists(effPomPath)) {
-        throw new FileNotFoundException("No effective-pom.xml found at " + effPomPath
-            + ". Generate one by running: mvn help:effective-pom -Doutput=effective-pom.xml");
+        throw new RuntimeException("File not found at " + effPomPath);
       }
 
       JacksonXmlModule module = new JacksonXmlModule();
