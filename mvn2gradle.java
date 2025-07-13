@@ -65,11 +65,15 @@ public class mvn2gradle {
 
     @Option(names = "--use-pom-inheritance", description = "Use recursive pom.xml parent inheritance", defaultValue = "true")
     public boolean usePomInheritance = true;
+
     @Option(names = "--inline-versions", description = "Inline dependency versions instead of using val variables")
     boolean inlineVersions = false;
 
     @Option(names = "--maven-compatible", description = "Generate settings.gradle.kts compatible with Maven:\n - generate inside target/gradle")
     boolean mavenCompatible = true;
+
+    @Option(names = "--ignore-unknown-versions", description = "Ignore unknown dependencies versions (useful in debug)", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
+    boolean ignoreUnknownVersions = false;
 
     @Override
     public Integer call() throws Exception {
@@ -782,10 +786,11 @@ public class mvn2gradle {
       log.info("Generated settings.gradle.kts");
 
       // At top-level in sync
-      Set<String> moduleArtifacts = collectModuleArtifactIds(rootPom, cli.projectDir, cli.ignoreUnknown, effectivePom);
+      Map<String, String> artifactIdToGradlePath = collectModuleArtifactIdToGradlePath(rootPom, cli.projectDir,
+          cli.ignoreUnknown, effectivePom);
 
       // Generate build.gradle.kts recursively for root and modules
-      generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, moduleArtifacts, true);
+      generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, artifactIdToGradlePath, true);
 
       return 0;
     }
@@ -822,10 +827,10 @@ public class mvn2gradle {
     }
 
     private static void generateForModulesRecursively(Path baseDir, PomModel pom, Cli cli, Projects effectivePom,
-        Set<String> moduleArtifacts, boolean isRoot) {
+        Map<String, String> artifactIdToGradlePath, boolean isRoot) {
       log.info("Generating build.gradle.kts for {}", pom.artifactId);
 
-      String gradleKts = generate(pom, cli.useEffectivePom, cli.inlineVersions, effectivePom, moduleArtifacts);
+      String gradleKts = generate(pom, effectivePom, artifactIdToGradlePath, cli);
 
       try {
         Files.writeString(baseDir.resolve("build.gradle.kts"), gradleKts);
@@ -838,7 +843,7 @@ public class mvn2gradle {
           Path moduleDir = baseDir.resolve(moduleName);
           if (Files.exists(moduleDir)) {
             PomModel modulePom = GradleKtsGenerator.loadPom(moduleDir.toFile(), cli.ignoreUnknown, effectivePom);
-            generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, moduleArtifacts, false);
+            generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, artifactIdToGradlePath, false);
           } else {
             log.warn("Module directory not found: {}", moduleDir);
           }
@@ -951,8 +956,8 @@ public class mvn2gradle {
       }
     }
 
-    public static String generate(PomModel pom, boolean useEffectivePom, boolean inlineVersions, Projects effectivePom,
-        Set<String> moduleArtifacts) {
+    public static String generate(PomModel pom, Projects effectivePom, Map<String, String> artifactIdToGradlePath,
+        Cli cli) {
 
       // 1. Emit Maven property variables for all referenced properties in dependency
       // versions
@@ -963,7 +968,7 @@ public class mvn2gradle {
       Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets);
 
       // 3. Emit dependencies and any version variables
-      DependencyEmitResult depResult = emitDeps(pom, useEffectivePom, inlineVersions, effectivePom, moduleArtifacts);
+      DependencyEmitResult depResult = emitDeps(pom, effectivePom, artifactIdToGradlePath, cli);
 
       // 4. Standard project attributes
       String group = resolveProperties(pom.groupId, pom);
@@ -1168,8 +1173,8 @@ public class mvn2gradle {
     // }
     // }
 
-    private static DependencyEmitResult emitDeps(PomModel pom, boolean useEffectivePom, boolean inlineVersions,
-        Projects effectivePom, Set<String> moduleArtifacts) {
+    private static DependencyEmitResult emitDeps(PomModel pom, Projects effectivePom,
+        Map<String, String> artifactIdToGradlePath, Cli cli) {
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
         return new DependencyEmitResult("", "", false);
       }
@@ -1193,18 +1198,18 @@ public class mvn2gradle {
               "Dependency on {}:{} with classifier=test/type=test-jar is missing <scope>test</scope>-Gradle may not handle this as a test dependency.",
               dep.groupId, dep.artifactId);
         }
-        if (moduleArtifacts.contains(resolvedArtifactId)) {
+        if (artifactIdToGradlePath.containsKey(resolvedArtifactId)) {
+          String gradlePath = artifactIdToGradlePath.get(resolvedArtifactId);
           // Handle test-jar module dependency
           if ("test".equals(conf) || "testImplementation".equals(conf)) {
             if (isTestJar) {
-              deps.append(
-                  String.format("    testImplementation(project(path = \":%s\", configuration = \"testArtifacts\"))\n",
-                      resolvedArtifactId));
+              deps.append(String.format(
+                  "    testImplementation(project(path = \":%s\", configuration = \"testArtifacts\"))\n", gradlePath));
               continue;
             }
           }
           // Normal module dependency
-          deps.append(String.format("    %s(project(\":%s\"))\n", conf, resolvedArtifactId));
+          deps.append(String.format("    %s(project(\":%s\"))\n", conf, gradlePath));
           continue;
         }
         // ---- Lombok special case ----
@@ -1224,37 +1229,30 @@ public class mvn2gradle {
         }
         // -----------------------------
 
-        String versionExpr;
-        if (inlineVersions) {
-          String resolvedVersion = resolveVersion(dep, pom, useEffectivePom, effectivePom);
-          if (resolvedVersion == null)
-            resolvedVersion = "unknown";
-          versionExpr = replaceMavenPropsWithKotlinVars(resolvedVersion);
-        } else {
-          if ((version == null || version.isBlank()) && resolvedGroupId != null && resolvedArtifactId != null) {
-            String scopePart = (dep.scope == null || dep.scope.isBlank()) ? ""
-                : "_" + dep.scope.replaceAll("[^a-zA-Z0-9]", "_");
-            String typePart = (dep.type == null || dep.type.isBlank()) ? ""
-                : "_" + dep.type.replaceAll("[^a-zA-Z0-9]", "_");
-            String classifierPart = (dep.classifier == null || dep.classifier.isBlank()) ? ""
-                : "_" + dep.classifier.replaceAll("[^a-zA-Z0-9]", "_");
-            String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_"
-                + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart + typePart + classifierPart;
-            String extracted = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
-            if (extracted == null || extracted.isBlank()) {
-              varDecls.append(String.format("val %s = \"unknown\" // FIXME: version missing for %s:%s\n", varName,
-                  resolvedGroupId, resolvedArtifactId));
-            } else {
-              varDecls.append(String.format("val %s = \"%s\"\n", varName, replaceMavenPropsWithKotlinVars(extracted)));
-            }
-            versionExpr = "$" + varName;
-          } else if (version != null && !version.isBlank()) {
-            versionExpr = replaceMavenPropsWithKotlinVars(version);
-          } else {
-            versionExpr = "unknown"; // fallback
+        // 1. Detect version, ignoring inline concept
+        String resolvedVersion = resolveVersion(dep, pom, cli.useEffectivePom, effectivePom);
+        String extractedVersion = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
+        String finalVersion = replaceMavenPropsWithKotlinVars(
+            resolvedVersion != null && !resolvedVersion.isBlank() ? resolvedVersion
+                : (extractedVersion != null && !extractedVersion.isBlank() ? extractedVersion : "unknown"));
+
+        if (finalVersion.equals("unknown") || (finalVersion.startsWith("${") && finalVersion.endsWith("}"))) {
+          if (cli.ignoreUnknownVersions) {
+            log.warn("Dependency {}:{} has unknown version, skipping", resolvedGroupId, resolvedArtifactId);
+            continue;
           }
+          throw new RuntimeException(
+              "Failed to resolve version for dependency: " + resolvedGroupId + ":" + resolvedArtifactId);
         }
 
+        String versionExpr;
+        if (cli.inlineVersions) {
+          versionExpr = finalVersion;
+        } else {
+          String varName = createVersionPropertyName(dep, resolvedGroupId, resolvedArtifactId);
+          varDecls.append(String.format("val %s = \"%s\"\n", varName, finalVersion));
+          versionExpr = "$" + varName;
+        }
         log.info("Adding dependency: {} {}:{}:{}", conf, resolvedGroupId, resolvedArtifactId, versionExpr);
 
         String depCoordinate = String.format("%s:%s:%s", resolvedGroupId, resolvedArtifactId, versionExpr);
@@ -1278,26 +1276,39 @@ public class mvn2gradle {
       return new DependencyEmitResult(varDecls.toString(), deps.toString(), hasLombok);
     }
 
-    private static Set<String> collectModuleArtifactIds(PomModel rootPom, File baseDir, boolean ignoreUnknown,
-        Projects effectivePom) {
-      Set<String> modules = new HashSet<>();
-      collectModulesRecursively(rootPom, baseDir, ignoreUnknown, effectivePom, modules);
-      return modules;
+    private static String createVersionPropertyName(Dependency dep, String resolvedGroupId, String resolvedArtifactId) {
+      String scopePart = (dep.scope == null || dep.scope.isBlank()) ? ""
+          : "_" + dep.scope.replaceAll("[^a-zA-Z0-9]", "_");
+      String typePart = (dep.type == null || dep.type.isBlank()) ? "" : "_" + dep.type.replaceAll("[^a-zA-Z0-9]", "_");
+      String classifierPart = (dep.classifier == null || dep.classifier.isBlank()) ? ""
+          : "_" + dep.classifier.replaceAll("[^a-zA-Z0-9]", "_");
+      String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_"
+          + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart + typePart + classifierPart;
+      return varName;
     }
 
-    private static void collectModulesRecursively(PomModel pom, File baseDir, boolean ignoreUnknown,
-        Projects effectivePom, Set<String> modules) {
+    private static void collectModulesRecursivelyWithPaths(PomModel pom, File baseDir, boolean ignoreUnknown,
+        Projects effectivePom, String parentGradlePath, Map<String, String> artifactIdToGradlePath) {
       if (pom == null || pom.modules == null || pom.modules.module == null)
         return;
+
       for (String moduleName : pom.modules.module) {
         File moduleDir = new File(baseDir, moduleName);
-        PomModel childPom = null;
-        childPom = loadPom(moduleDir, ignoreUnknown, effectivePom);
+        PomModel childPom = GradleKtsGenerator.loadPom(moduleDir, ignoreUnknown, effectivePom);
         if (childPom != null && childPom.artifactId != null) {
-          modules.add(childPom.artifactId);
-          collectModulesRecursively(childPom, moduleDir, ignoreUnknown, effectivePom, modules);
+          String fullPath = parentGradlePath.isEmpty() ? moduleName : parentGradlePath + ":" + moduleName;
+          artifactIdToGradlePath.put(childPom.artifactId, fullPath);
+          collectModulesRecursivelyWithPaths(childPom, moduleDir, ignoreUnknown, effectivePom, fullPath,
+              artifactIdToGradlePath);
         }
       }
+    }
+
+    private static Map<String, String> collectModuleArtifactIdToGradlePath(PomModel rootPom, File rootDir,
+        boolean ignoreUnknown, Projects effectivePom) {
+      Map<String, String> artifactIdToGradlePath = new HashMap<>();
+      collectModulesRecursivelyWithPaths(rootPom, rootDir, ignoreUnknown, effectivePom, "", artifactIdToGradlePath);
+      return artifactIdToGradlePath;
     }
 
     private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin, PomModel pom) {
