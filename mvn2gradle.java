@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
@@ -88,11 +89,11 @@ public class mvn2gradle {
   }
 
   public static class Projects {
-    public List<PomModel> project = new ArrayList<>();
+    public List<Project> project = new ArrayList<>();
   }
 
   @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlRootElement(localName = "project")
-  private static class PomModel {
+  private static class Project {
     // --- Root attributes (namespace, schema) ---
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(isAttribute = true, localName = "xmlns")
     public String xmlns;
@@ -106,7 +107,21 @@ public class mvn2gradle {
     // --- Standard Maven POM fields ---
     public String modelVersion;
     public Parent parent;
-    public transient PomModel parentPom; // The actual loaded parent model (transient, not serialized)
+    /**
+     * The parent described above. Could exist locally in a parent or sibling dir or
+     * not at all. A sibling is not standard in maven but could be useful when
+     * transitioning to gradle from a multi-repo.
+     */
+    public transient Project parentPom;
+    /***/
+    public transient Project rootPom;
+    /**
+     * If the parent dir is a maven project. This could be different than the
+     * inheritance parent.
+     */
+    public transient Project parentDirPom;
+    public File pomFile;
+
     public String groupId;
     public String artifactId;
     public String version;
@@ -137,11 +152,18 @@ public class mvn2gradle {
 
     public Projects effectivePom;
 
-    private PomModel() {
+    private Project() {
+    }
+
+    @Override
+    public String toString() {
+      return "Project[groupId='%s', artifactId='%s', version='%s']".formatted(groupId, artifactId, version);
+    }
+
+    public String id() {
+      return "%s:%s:%s".formatted(groupId, artifactId, version != null ? version : "SNAPSHOT");
     }
   }
-
-  // ----- Supporting classes for Maven POM -----
 
   private static class Parent {
     public String groupId;
@@ -150,6 +172,16 @@ public class mvn2gradle {
     public String relativePath;
 
     private Parent() {
+    }
+
+    @Override
+    public String toString() {
+      return "Parent[groupId='%s', artifactId='%s', version='%s', relativePath='%s']".formatted(groupId, artifactId,
+          version, relativePath);
+    }
+
+    public String id() {
+      return "%s:%s:%s".formatted(groupId, artifactId, version != null ? version : "SNAPSHOT");
     }
   }
 
@@ -756,17 +788,17 @@ public class mvn2gradle {
       public final String gradlePluginVersion;
       // final String pluginDeclaration; // e.g., id("org.javacc.javacc") version
       // "4.0.1"
-      public final BiFunction<PluginExecutionContext, PomModel, String> handler;
+      public final BiFunction<PluginExecutionContext, Project, String> handler;
 
       PluginConvertor(String mavenKey, String gradlePluginId, String gradlePluginVersion,
-          BiFunction<PluginExecutionContext, PomModel, String> handler) {
+          BiFunction<PluginExecutionContext, Project, String> handler) {
         this.mavenGroupAndArtifactId = mavenKey;
         this.gradlePluginId = gradlePluginId;
         this.gradlePluginVersion = gradlePluginVersion;
         this.handler = handler;
       }
 
-      public boolean isEnabled(PluginExecutionContext ctx, PomModel pom) {
+      public boolean isEnabled(PluginExecutionContext ctx, Project pom) {
         return true;
       }
     }
@@ -808,7 +840,7 @@ public class mvn2gradle {
               }
               """.formatted(ctx.configuration.skip() ? "true" : "false", ctx.configuration.configLocation)) {
         @Override
-        public boolean isEnabled(PluginExecutionContext ctx, PomModel pom) {
+        public boolean isEnabled(PluginExecutionContext ctx, Project pom) {
           return ctx.configuration == null || !ctx.configuration.skip();
         }
       });
@@ -843,12 +875,16 @@ public class mvn2gradle {
         Path effPomPath = cli.projectDir.toPath().resolve("target/effective-pom.xml");
         if (!Files.exists(effPomPath) || cli.forceGenerateEffectivePom) {
           log.info("Generating effective-pom.xml");
-          GradleKtsGenerator.generateEffectivePom(cli.projectDir, effPomPath);
+          generateEffectivePom(cli.projectDir, effPomPath);
         }
         effectivePom = loadEffectivePom(cli.ignoreUnknown, effPomPath);
       }
 
-      PomModel rootPom = loadPom(cli.projectDir, cli.ignoreUnknown, effectivePom);
+      Project rootPom = loadPom(null, null, cli.projectDir, cli.ignoreUnknown, effectivePom);
+
+      // At top-level in sync
+      Map<String, String> artifactIdToGradlePath = collectModuleArtifactIdToGradlePath(rootPom, cli.projectDir,
+          cli.ignoreUnknown, effectivePom);
 
       // Generate settings.gradle.kts for root project and modules
       String settingsGradle = generateSettingsGradleKts(rootPom, cli.projectDir, cli.ignoreUnknown,
@@ -856,17 +892,13 @@ public class mvn2gradle {
       Files.writeString(cli.projectDir.toPath().resolve("settings.gradle.kts"), settingsGradle);
       log.info("Generated settings.gradle.kts");
 
-      // At top-level in sync
-      Map<String, String> artifactIdToGradlePath = collectModuleArtifactIdToGradlePath(rootPom, cli.projectDir,
-          cli.ignoreUnknown, effectivePom);
-
       // Generate build.gradle.kts recursively for root and modules
       generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, artifactIdToGradlePath, true);
 
       return 0;
     }
 
-    public static String generateSettingsGradleKts(PomModel rootPom, File rootDir, boolean ignoreUnknown,
+    public static String generateSettingsGradleKts(Project rootPom, File rootDir, boolean ignoreUnknown,
         Projects effectivePom) {
       String rootName = rootPom.artifactId != null ? rootPom.artifactId : "rootProject";
       List<String> includes = collectAllModulePaths(rootPom, "", rootDir, ignoreUnknown, effectivePom);
@@ -925,7 +957,8 @@ public class mvn2gradle {
           """.formatted(m.id, m.url)).joining("\n");
     }
 
-    private static List<String> collectAllModulePaths(PomModel pom, String parentPath, File baseDir,
+    // TODO refactor to use pom structure
+    private static List<String> collectAllModulePaths(Project pom, String parentPath, File baseDir,
         boolean ignoreUnknown, Projects effectivePom) {
       if (pom.modules == null || pom.modules.module == null || pom.modules.module.isEmpty()) {
         return List.of();
@@ -934,7 +967,7 @@ public class mvn2gradle {
       return StreamEx.of(pom.modules.module).flatMap(moduleName -> {
         String fullPath = parentPath.isEmpty() ? moduleName : parentPath + ":" + moduleName;
         File moduleDir = baseDir.toPath().resolve(moduleName).toFile();
-        PomModel childPom = GradleKtsGenerator.loadPom(moduleDir, ignoreUnknown, effectivePom);
+        Project childPom = loadPom(null, null, moduleDir, ignoreUnknown, effectivePom);
         List<String> nested = childPom != null
             ? collectAllModulePaths(childPom, fullPath, moduleDir, ignoreUnknown, effectivePom)
             : List.of();
@@ -942,7 +975,8 @@ public class mvn2gradle {
       }).toList();
     }
 
-    private static void generateForModulesRecursively(Path baseDir, PomModel pom, Cli cli, Projects effectivePom,
+    // TODO refactor to use pom structure
+    private static void generateForModulesRecursively(Path baseDir, Project pom, Cli cli, Projects effectivePom,
         Map<String, String> artifactIdToGradlePath, boolean isRoot) {
       log.info("Generating build.gradle.kts for {}", pom.artifactId);
 
@@ -958,7 +992,7 @@ public class mvn2gradle {
         for (String moduleName : pom.modules.module) {
           Path moduleDir = baseDir.resolve(moduleName);
           if (Files.exists(moduleDir)) {
-            PomModel modulePom = GradleKtsGenerator.loadPom(moduleDir.toFile(), cli.ignoreUnknown, effectivePom);
+            Project modulePom = loadPom(null, null, moduleDir.toFile(), cli.ignoreUnknown, effectivePom);
             generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, artifactIdToGradlePath, false);
           } else {
             log.warn("Module directory not found: {}", moduleDir);
@@ -993,26 +1027,31 @@ public class mvn2gradle {
       }
     }
 
-    private static final Map<String, PomModel> pomCache = new HashMap<>();
+    private static final Map<String, Project> pomCache = new HashMap<>();
 
-    public static PomModel loadPom(File projectDirOrPomFile, boolean ignoreUnknown, Projects effectivePom) {
+    public static Project loadPom(Project root, Project parentDirPom, File projectDirOrPomFile, boolean ignoreUnknown,
+        Projects effectivePom) {
       try {
         File pomFile = projectDirOrPomFile.isDirectory() ? projectDirOrPomFile.toPath().resolve("pom.xml").toFile()
             : projectDirOrPomFile;
-        
+
         String key = pomFile.getCanonicalPath();
         if (pomCache.containsKey(key)) {
           return pomCache.get(key);
         }
-        PomModel pom = loadPomFromFile(pomFile, ignoreUnknown, effectivePom);
+        if (!pomFile.exists()) {
+          log.warn("POM file not found: {}", pomFile.getAbsolutePath());
+          return null;
+        }
+
+        log.info("Loading POM from {}", pomFile.getAbsolutePath());
+        Project pom = parsePom(pomFile, ignoreUnknown);
         pomCache.put(key, pom);
 
-        // Load parentPom recursively, same cache logic
+        pom.rootPom = root;
+        pom.parentDirPom = parentDirPom;
         if (pom.parent != null) {
-          File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
-          if (parentPomFile != null && parentPomFile.exists()) {
-            pom.parentPom = loadPom(parentPomFile, ignoreUnknown, effectivePom);
-          }
+          pom.parentPom = findParentPomFile(pom, ignoreUnknown);
         }
         return pom;
       } catch (IOException e) {
@@ -1020,62 +1059,111 @@ public class mvn2gradle {
       }
     }
 
-    private static PomModel loadPomFromFile(File pomFile, boolean ignoreUnknown, Projects effectivePom) {
-      log.info("Loading POM from {}", pomFile.getAbsolutePath());
-      PomModel pom = parsePom(pomFile, ignoreUnknown);
-
-      // Recursively load parent (full chain)
-      if (pom.parent != null) {
-        File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
-        if (parentPomFile != null && parentPomFile.exists()) {
-          // TODO review if parent POM should be loaded with effectivePom
-          log.info("Loading parent POM from {}", parentPomFile.getAbsolutePath());
-          pom.parentPom = loadPom(parentPomFile, ignoreUnknown, effectivePom);
-        }
+    private static void checkIsSame(Project pom) {
+      Parent parent = pom.parent;
+      Project localParent = pom.parentPom;
+      if (parent == null && localParent == null) {
+        return;
       }
-      return pom;
+      if (parent == null || localParent == null) {
+        throw new RuntimeException("Parent POM mismatch: one is null while the other is not. Parent: " + parent
+            + ", ParentPom: " + localParent);
+      }
+      if (!parent.groupId.equals(localParent.groupId) || !parent.artifactId.equals(localParent.artifactId)) {
+        throw new RuntimeException(
+            "In %s parent POM mismatch: %s vs %s".formatted(pom.id(), parent.id(), localParent.id()));
+      }
+      if (!parent.version.equals(localParent.version)) {
+        log.warn("Parent POM version mismatch: {} vs {}", parent.version, localParent.version);
+      }
+//      if (parent.artifactId == null || parentPom.artifactId == null) {
+//        return true; // artifactId can be null in some cases, e.g., parent POMs without artifactId
+//      }
+      if (!parent.artifactId.equals(localParent.artifactId)) {
+        throw new RuntimeException(
+            "Parent POM artifactId mismatch: " + parent.artifactId + " vs " + localParent.artifactId);
+      }
     }
 
-    private static File findParentPomFile(PomModel child, File projectDir) {
-      String relPath = (child.parent.relativePath == null || child.parent.relativePath.isBlank()) ? "../pom.xml"
-          : child.parent.relativePath;
+    private static Project findParentPomFile(Project pom, boolean ignoreUnknown) {
+      var parent = findParentPomFileNoCheck(pom, ignoreUnknown);
+      if (parent == pom) {
+        // TODO remove this - needed for debug
+        parent = findParentPomFileNoCheck(pom, ignoreUnknown);
+        throw new RuntimeException("Parent POM is self-referential: " + pom.id());
+      }
+      if (pom.parentPom != null) {
+        if (pom.groupId == null) {
+          pom.groupId = pom.parentPom.groupId;
+        }
+      }
+      checkIsSame(parent);
+      return parent;
+    }
+
+    private static Project findParentPomFileNoCheck(Project pom, boolean ignoreUnknown) {
+      File projectDir = pom.pomFile.getParentFile();
+      String relPath = (pom.parent.relativePath == null || pom.parent.relativePath.isBlank()) ? "../pom.xml"
+          : pom.parent.relativePath;
+      relPath = relPath.endsWith("/pom.xml") ? relPath : relPath + "/pom.xml";
+//      File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
+//      if (parentPomFile != null && parentPomFile.exists()) {
+//        pom.parentPom = loadPom(root, null, parentPomFile, ignoreUnknown, effectivePom);
+//        if (pom.parentPom != null) {
+//          if (pom.groupId == null) {
+//            pom.groupId = pom.parentPom.groupId;
+//          }
+//        }
+//        checkIsSame(pom);
+//      }
 
       try {
-        File candidate = new File(projectDir, relPath).getCanonicalFile();
-        if (candidate.exists()) {
-          return candidate;
+        String candidateKey = new File(projectDir, relPath).getCanonicalPath();
+        if (pomCache.containsKey(candidateKey)) {
+          return pomCache.get(candidateKey);
         }
 
-        // fallback to Maven repo lookup
-        String groupPath = child.parent.groupId.replace('.', '/');
-        String artifactId = child.parent.artifactId;
-        String version = child.parent.version;
+        Project parentPom = loadPom(pom.rootPom, pom.parentDirPom, projectDir, ignoreUnknown, pom.rootPom.effectivePom);
+        if (parentPom != null)
+          return parentPom;
+        // If the parent POM is not found in the expected relative path, we fallback to
+        // Maven repo lookup
+        String groupPath = pom.parent.groupId.replace('.', '/');
+        String artifactId = pom.parent.artifactId;
+        String version = pom.parent.version;
         File m2 = new File(System.getProperty("user.home"), ".m2/repository");
         File repoPom = new File(m2,
             String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
-        if (repoPom.exists()) {
-          return repoPom;
-        }
-
+        Project parentPomFromRepo = loadPom(pom.rootPom, null, repoPom, ignoreUnknown, pom.rootPom.effectivePom);
+        if (parentPomFromRepo != null)
+          return parentPomFromRepo;
         throw new RuntimeException(
-            "Parent POM not found: tried local [" + candidate + "] and Maven repo [" + repoPom + "]");
+            "Parent POM not found: tried local [" + candidateKey + "] and Maven repo [" + repoPom + "]");
       } catch (IOException e) {
-        throw new RuntimeException("Failed to resolve parent POM path for " + child.parent.artifactId, e);
+        throw new RuntimeException("Failed to resolve parent POM path for " + pom.parent.artifactId, e);
       }
     }
 
-    private static PomModel parsePom(File pomFile, boolean ignoreUnknown) {
+    private static Project parsePom(File pomFile, boolean ignoreUnknown) {
       try {
         XmlMapper xmlMapper = new XmlMapper();
         xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
             !ignoreUnknown);
-        return xmlMapper.readValue(pomFile, PomModel.class);
+        Project res = xmlMapper.readValue(pomFile, Project.class);
+        res.pomFile = pomFile;
+        if(res.groupId == null && res.parent!=null && res.parent.groupId != null) {
+          res.groupId = res.parent.groupId;
+        }
+        if (res.version == null && res.parent != null && res.parent.version != null) {
+          res.version = res.parent.version;
+        }
+        return res;
       } catch (IOException e) {
         throw new RuntimeException("Failed to parse POM file: " + pomFile.getAbsolutePath(), e);
       }
     }
 
-    public static String generate(PomModel pom, Projects effectivePom, Map<String, String> artifactIdToGradlePath,
+    public static String generate(Project pom, Projects effectivePom, Map<String, String> artifactIdToGradlePath,
         Cli cli) {
 
       // 1. Emit Maven property variables for all referenced properties in dependency
@@ -1176,7 +1264,7 @@ public class mvn2gradle {
       return key.replaceAll("[^a-zA-Z0-9_]", "_");
     }
 
-    private static String emitReferencedMavenPropertiesKts(PomModel pom) {
+    private static String emitReferencedMavenPropertiesKts(Project pom) {
       // --- Control inclusion of property usages ---
       final boolean includeDependencies = true;
       final boolean includeDependencyManagement = false;
@@ -1253,9 +1341,9 @@ public class mvn2gradle {
     }
 
     // --- Helper: return all POMs from this one up the parent chain, root first
-    private static java.util.List<PomModel> getAllPomsRecursive(PomModel pom) {
-      java.util.LinkedList<PomModel> chain = new java.util.LinkedList<>();
-      PomModel current = pom;
+    private static java.util.List<Project> getAllPomsRecursive(Project pom) {
+      java.util.LinkedList<Project> chain = new java.util.LinkedList<>();
+      Project current = pom;
       while (current != null) {
         chain.addFirst(current);
         current = current.parentPom;
@@ -1290,7 +1378,7 @@ public class mvn2gradle {
     // }
     // }
 
-    private static DependencyEmitResult emitDeps(PomModel pom, Projects effectivePom,
+    private static DependencyEmitResult emitDeps(Project pom, Projects effectivePom,
         Map<String, String> artifactIdToGradlePath, Cli cli) {
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
         return new DependencyEmitResult("", "", false);
@@ -1404,38 +1492,40 @@ public class mvn2gradle {
       return varName;
     }
 
-    private static void collectModulesRecursivelyWithPaths(PomModel pom, File baseDir, boolean ignoreUnknown,
-        Projects effectivePom, String parentGradlePath, Map<String, String> artifactIdToGradlePath) {
+    private static Map<String, String> collectModuleArtifactIdToGradlePath(Project rootPom, File rootDir,
+        boolean ignoreUnknown, Projects effectivePom) {
+      Map<String, String> artifactIdToGradlePath = new HashMap<>();
+      collectModulesRecursivelyWithPaths(rootPom, rootPom, rootDir, ignoreUnknown, effectivePom, "",
+          artifactIdToGradlePath);
+      return artifactIdToGradlePath;
+    }
+
+    private static void collectModulesRecursivelyWithPaths(Project root, Project pom, File baseDir,
+        boolean ignoreUnknown, Projects effectivePom, String parentGradlePath,
+        Map<String, String> artifactIdToGradlePath) {
       if (pom == null || pom.modules == null || pom.modules.module == null)
         return;
 
       for (String moduleName : pom.modules.module) {
         File moduleDir = new File(baseDir, moduleName);
-        PomModel childPom = GradleKtsGenerator.loadPom(moduleDir, ignoreUnknown, effectivePom);
+        Project childPom = loadPom(root, pom, moduleDir, ignoreUnknown, effectivePom);
         if (childPom != null && childPom.artifactId != null) {
           String fullPath = parentGradlePath.isEmpty() ? moduleName : parentGradlePath + ":" + moduleName;
           artifactIdToGradlePath.put(childPom.artifactId, fullPath);
-          collectModulesRecursivelyWithPaths(childPom, moduleDir, ignoreUnknown, effectivePom, fullPath,
+          collectModulesRecursivelyWithPaths(root, childPom, moduleDir, ignoreUnknown, effectivePom, fullPath,
               artifactIdToGradlePath);
         }
       }
     }
 
-    private static Map<String, String> collectModuleArtifactIdToGradlePath(PomModel rootPom, File rootDir,
-        boolean ignoreUnknown, Projects effectivePom) {
-      Map<String, String> artifactIdToGradlePath = new HashMap<>();
-      collectModulesRecursivelyWithPaths(rootPom, rootDir, ignoreUnknown, effectivePom, "", artifactIdToGradlePath);
-      return artifactIdToGradlePath;
-    }
-
-    private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin, PomModel pom) {
+    private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin, Project pom) {
       List<PluginExecutionContext> result = new ArrayList<>();
       Set<String> seenExecKeys = new HashSet<>();
       collectPluginExecutionsRecursive(plugin, pom, result, seenExecKeys);
       return result;
     }
 
-    private static void collectPluginExecutionsRecursive(Plugin plugin, PomModel pom,
+    private static void collectPluginExecutionsRecursive(Plugin plugin, Project pom,
         List<PluginExecutionContext> result, Set<String> seenExecKeys) {
       if (pom == null || pom.build == null || pom.build.plugins == null || pom.build.plugins.plugin == null)
         return;
@@ -1464,11 +1554,10 @@ public class mvn2gradle {
           }
         }
       }
-      collectPluginExecutionsRecursive(plugin, pom.parentPom, result, seenExecKeys);
+      collectPluginExecutionsRecursive(plugin, pom.parentDirPom, result, seenExecKeys);
     }
 
-    private static Map<String, String> collectGradlePluginsAndConfigs(PomModel pom,
-        StringBuilder pluginConfigSnippets) {
+    private static Map<String, String> collectGradlePluginsAndConfigs(Project pom, StringBuilder pluginConfigSnippets) {
       Map<String, String> pluginsMap = new LinkedHashMap<>();
       Set<String> visited = new HashSet<>(); // to avoid duplicates when traversing parents
 
@@ -1477,7 +1566,7 @@ public class mvn2gradle {
       return pluginsMap;
     }
 
-    private static void collectGradlePluginsAndConfigsRecursive(PomModel pom, StringBuilder pluginConfigSnippets,
+    private static void collectGradlePluginsAndConfigsRecursive(Project pom, StringBuilder pluginConfigSnippets,
         Map<String, String> pluginsMap, Set<String> visited) {
 
       if (pom == null)
@@ -1510,10 +1599,10 @@ public class mvn2gradle {
       }
 
       // Always recurse to parent, even if current has no plugins
-      collectGradlePluginsAndConfigsRecursive(pom.parentPom, pluginConfigSnippets, pluginsMap, visited);
+      collectGradlePluginsAndConfigsRecursive(pom.parentDirPom, pluginConfigSnippets, pluginsMap, visited);
     }
 
-    private static String extractJavaVersionFromEffectivePom(PomModel pom, Cli cli) {
+    private static String extractJavaVersionFromEffectivePom(Project pom, Cli cli) {
       String rawVersion = null;
 
       if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
@@ -1572,13 +1661,13 @@ public class mvn2gradle {
       return resolvedVersion;
     }
 
-    public static String resolveVersion(Dependency d, PomModel pom, boolean useEffectivePom, Projects effectivePom) {
+    public static String resolveVersion(Dependency d, Project pom, boolean useEffectivePom, Projects effectivePom) {
       if (d.version != null && !d.version.isBlank()) {
         return d.version;
       }
       if (useEffectivePom && effectivePom != null) {
         // Search effectivePom projects for matching dependency version
-        for (PomModel epPom : effectivePom.project) {
+        for (Project epPom : effectivePom.project) {
           if (d.groupId.equals(epPom.groupId) && epPom.dependencies != null && epPom.dependencies.dependency != null) {
             for (Dependency ed : epPom.dependencies.dependency) {
               if (d.artifactId.equals(ed.artifactId) && ed.version != null) {
@@ -1633,7 +1722,7 @@ public class mvn2gradle {
       } catch (UnrecognizedPropertyException e) {
         // If failed because no 'project' wrapper, parse single PomModel then wrap it
         if (e.getMessage().contains("Unrecognized field \"project\"") && e.getMessage().contains("PomModel")) {
-          PomModel singlePom = xmlMapper.readValue(xml, PomModel.class);
+          Project singlePom = xmlMapper.readValue(xml, Project.class);
           Projects projects = new Projects();
           projects.project.add(singlePom);
           return projects;
@@ -1642,7 +1731,7 @@ public class mvn2gradle {
       }
     }
 
-    private static String emitGradleProperties(PomModel pom, java.util.Set<String> usedProperties) {
+    private static String emitGradleProperties(Project pom, java.util.Set<String> usedProperties) {
       StringBuilder propDefs = new StringBuilder();
       if (pom.properties != null && pom.properties.any != null) {
         for (String key : usedProperties) {
@@ -1668,11 +1757,11 @@ public class mvn2gradle {
       }
     }
 
-    private static String resolveGroupId(Dependency dep, PomModel pom) {
+    private static String resolveGroupId(Dependency dep, Project pom) {
       if (dep != null && dep.groupId != null && !dep.groupId.isBlank()) {
         return resolveProperties(dep.groupId, pom);
       }
-      PomModel current = pom;
+      Project current = pom;
       while (current != null) {
         if (current.groupId != null && !current.groupId.isBlank()) {
           return resolveProperties(current.groupId, current);
@@ -1682,7 +1771,7 @@ public class mvn2gradle {
       return null;
     }
 
-    private static String resolveGroupIdForPom(PomModel pom) {
+    private static String resolveGroupIdForPom(Project pom) {
       return resolveGroupId(null, pom);
     }
 
@@ -1690,7 +1779,7 @@ public class mvn2gradle {
       if (projects == null || projects.project == null) {
         return null;
       }
-      for (PomModel pom : projects.project) {
+      for (Project pom : projects.project) {
         String version = extractVersion(groupId, artifactId, pom);
         if (version != null && !version.isBlank()) {
           return version;
@@ -1710,8 +1799,8 @@ public class mvn2gradle {
       return sb.toString();
     }
 
-    private static String extractVersion(String groupId, String artifactId, PomModel pom) {
-      PomModel current = pom;
+    private static String extractVersion(String groupId, String artifactId, Project pom) {
+      Project current = pom;
       while (current != null) {
         if (current.dependencyManagement != null && current.dependencyManagement.dependencies != null
             && current.dependencyManagement.dependencies.dependency != null) {
@@ -1726,7 +1815,7 @@ public class mvn2gradle {
       return null;
     }
 
-    private static String resolveProperties(String value, PomModel pom) {
+    private static String resolveProperties(String value, Project pom) {
       if (value == null)
         return null;
 
@@ -1744,7 +1833,7 @@ public class mvn2gradle {
           replacement = pom.version != null ? pom.version : "";
         } else {
           // Lookup in properties recursively
-          PomModel current = pom;
+          Project current = pom;
           while (current != null && replacement == null) {
             if (current.properties != null && current.properties.any != null) {
               replacement = current.properties.any.get(key);
