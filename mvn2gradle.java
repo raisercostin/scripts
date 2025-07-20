@@ -117,6 +117,10 @@ public class mvn2gradle {
     public String inceptionYear;
     public Licenses licenses;
     public Developers developers;
+    public Contributors contributors;
+    public MailingLists mailingLists;
+    public Prerequisites prerequisites;
+    public CiManagement ciManagement;
     public Scm scm;
     public IssueManagement issueManagement;
     public DistributionManagement distributionManagement;
@@ -188,6 +192,65 @@ public class mvn2gradle {
     public String timezone;
 
     private Developer() {
+    }
+  }
+
+  private static class Contributors {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "contributor")
+    public List<Contributor> contributor;
+
+    private Contributors() {
+    }
+  }
+
+  private static class Contributor {
+    public String name;
+    public String email;
+    public String url;
+    public String organization;
+    public String organizationUrl;
+    public String roles;
+    public String timezone;
+
+    private Contributor() {
+    }
+  }
+
+  private static class MailingLists {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "mailingList")
+    public List<MailingList> mailingList;
+
+    private MailingLists() {
+    }
+  }
+
+  private static class MailingList {
+    public String name;
+    public String subscribe;
+    public String unsubscribe;
+    public String post;
+    public String archive;
+    public String otherArchives;
+    public String otherArchivesSubscription;
+
+    private MailingList() {
+    }
+  }
+
+  private static class Prerequisites {
+    public String maven;
+
+    private Prerequisites() {
+    }
+  }
+
+  private static class CiManagement {
+    public String system;
+    public String url;
+
+    private CiManagement() {
     }
   }
 
@@ -595,6 +658,8 @@ public class mvn2gradle {
     public String id;
     public Reports reports;
     public String inherited; // "true"/"false"
+    @com.fasterxml.jackson.annotation.JsonAnySetter
+    public java.util.Map<String, Object> configuration = new java.util.HashMap<>();
 
     private ReportSet() {
     }
@@ -928,27 +993,31 @@ public class mvn2gradle {
       }
     }
 
+    private static final Map<String, PomModel> pomCache = new HashMap<>();
+
     public static PomModel loadPom(File projectDirOrPomFile, boolean ignoreUnknown, Projects effectivePom) {
-      PomModel pom;
-      if (projectDirOrPomFile.isDirectory()) {
-        Path pomPath = projectDirOrPomFile.toPath().resolve("pom.xml");
-        pom = loadPomFromFile(pomPath.toFile(), ignoreUnknown, effectivePom);
-      } else {
-        pom = loadPomFromFile(projectDirOrPomFile, ignoreUnknown, effectivePom);
-      }
-
-      // Attach effectivePom reference for fallback usage
-      pom.effectivePom = effectivePom;
-
-      // Recursively load parents as before (unchanged)
-      if (pom.parent != null) {
-        File parentPomFile = findParentPomFile(pom,
-            projectDirOrPomFile.isDirectory() ? projectDirOrPomFile : projectDirOrPomFile.getParentFile());
-        if (parentPomFile != null && parentPomFile.exists()) {
-          pom.parentPom = loadPom(parentPomFile, ignoreUnknown, effectivePom);
+      try {
+        File pomFile = projectDirOrPomFile.isDirectory() ? projectDirOrPomFile.toPath().resolve("pom.xml").toFile()
+            : projectDirOrPomFile;
+        
+        String key = pomFile.getCanonicalPath();
+        if (pomCache.containsKey(key)) {
+          return pomCache.get(key);
         }
+        PomModel pom = loadPomFromFile(pomFile, ignoreUnknown, effectivePom);
+        pomCache.put(key, pom);
+
+        // Load parentPom recursively, same cache logic
+        if (pom.parent != null) {
+          File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
+          if (parentPomFile != null && parentPomFile.exists()) {
+            pom.parentPom = loadPom(parentPomFile, ignoreUnknown, effectivePom);
+          }
+        }
+        return pom;
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to load POM from " + projectDirOrPomFile, e);
       }
-      return pom;
     }
 
     private static PomModel loadPomFromFile(File pomFile, boolean ignoreUnknown, Projects effectivePom) {
@@ -968,16 +1037,16 @@ public class mvn2gradle {
     }
 
     private static File findParentPomFile(PomModel child, File projectDir) {
-      // 1. Try <relativePath> or default to "../pom.xml" (local parent, not in .m2)
       String relPath = (child.parent.relativePath == null || child.parent.relativePath.isBlank()) ? "../pom.xml"
           : child.parent.relativePath;
+
       try {
-        File localParent = new File(projectDir, relPath).getCanonicalFile();
-        if (localParent.exists()) {
-          return localParent;
+        File candidate = new File(projectDir, relPath).getCanonicalFile();
+        if (candidate.exists()) {
+          return candidate;
         }
 
-        // 2. Try Maven local repository layout (correct way)
+        // fallback to Maven repo lookup
         String groupPath = child.parent.groupId.replace('.', '/');
         String artifactId = child.parent.artifactId;
         String version = child.parent.version;
@@ -988,9 +1057,8 @@ public class mvn2gradle {
           return repoPom;
         }
 
-        // 3. Not found
         throw new RuntimeException(
-            "Parent POM not found: tried local [" + localParent + "] and Maven repo [" + repoPom + "]");
+            "Parent POM not found: tried local [" + candidate + "] and Maven repo [" + repoPom + "]");
       } catch (IOException e) {
         throw new RuntimeException("Failed to resolve parent POM path for " + child.parent.artifactId, e);
       }
@@ -1497,8 +1565,8 @@ public class mvn2gradle {
       String resolvedVersion = resolveProperties(rawVersion, pom);
 
       if (resolvedVersion == null || resolvedVersion.isBlank() || resolvedVersion.contains("${")) {
-        throw new RuntimeException(
-            "Failed to resolve Java version property fully in POM " + (pom.artifactId != null ? pom.artifactId : ""));
+        throw new RuntimeException("Failed to resolve Java version property fully in POM %s: [%s] => [%s]"
+            .formatted(pom.artifactId != null ? pom.artifactId : "", rawVersion, resolvedVersion));
       }
 
       return resolvedVersion;
@@ -1564,7 +1632,7 @@ public class mvn2gradle {
         return xmlMapper.readValue(xml, Projects.class);
       } catch (UnrecognizedPropertyException e) {
         // If failed because no 'project' wrapper, parse single PomModel then wrap it
-        if (e.getMessage().contains("Unrecognized field") && e.getMessage().contains("project")) {
+        if (e.getMessage().contains("Unrecognized field \"project\"") && e.getMessage().contains("PomModel")) {
           PomModel singlePom = xmlMapper.readValue(xml, PomModel.class);
           Projects projects = new Projects();
           projects.project.add(singlePom);
