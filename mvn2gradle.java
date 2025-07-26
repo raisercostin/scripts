@@ -33,6 +33,7 @@ import org.zeroturnaround.exec.InvalidExitValueException;
 import org.zeroturnaround.exec.ProcessExecutor;
 
 import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule;
@@ -62,7 +63,7 @@ public class mvn2gradle {
     boolean ignoreUnknown = false;
 
     @Option(names = "--use-effective-pom", description = "Use mvn help:effective-pom")
-    public boolean useEffectivePom = false;
+    public boolean useEffectivePom = true;
 
     @Option(names = "--use-pom-inheritance", description = "Use recursive pom.xml parent inheritance", defaultValue = "true")
     public boolean usePomInheritance = true;
@@ -106,7 +107,8 @@ public class mvn2gradle {
 
     // --- Standard Maven POM fields ---
     public String modelVersion;
-    public Parent parent;
+    @JsonProperty("parent")
+    public Gav parentGav;
     /**
      * The parent described above. Could exist locally in a parent or sibling dir or
      * not at all. A sibling is not standard in maven but could be useful when
@@ -165,13 +167,13 @@ public class mvn2gradle {
     }
   }
 
-  private static class Parent {
+  private static class Gav {
     public String groupId;
     public String artifactId;
     public String version;
     public String relativePath;
 
-    private Parent() {
+    private Gav() {
     }
 
     @Override
@@ -1050,8 +1052,44 @@ public class mvn2gradle {
 
         pom.rootPom = root;
         pom.parentDirPom = parentDirPom;
-        if (pom.parent != null) {
-          pom.parentPom = findParentPomFile(pom, ignoreUnknown);
+        if (pom.parentGav != null) {
+          var parent = findParentPomFileNoCheck(pom, ignoreUnknown);
+          if (parent == pom) {
+            throw new RuntimeException("Parent POM is self-referential: " + pom.id());
+          }
+          if (pom.parentPom != null) {
+            if (pom.groupId == null) {
+              pom.groupId = pom.parentPom.groupId;
+            }
+          }
+          pom.parentPom = parent;
+          Gav parentGav = pom.parentGav;
+          if (parentGav != null || parent != null) {
+            if (parentGav == null || parent == null) {
+              throw new RuntimeException("Parent POM mismatch: one is null while the other is not. Parent: " + parentGav
+                  + ", ParentPom: " + parent);
+            }
+            if (!parentGav.groupId.equals(parent.groupId) || !parentGav.artifactId.equals(parent.artifactId)) {
+              // TODO remove this - needed for debug
+              parent = findParentPomFileNoCheck(pom, ignoreUnknown);
+              throw new RuntimeException("""
+                  In pom %s mismatch:
+                  parentGav %s
+                  parent    %s"
+                  """.formatted(pom.id(), parentGav.id(), parent.id()));
+            }
+            if (!parentGav.version.equals(parent.version)) {
+              log.warn("Parent POM version mismatch: {} vs {}", parentGav.version, parent.version);
+            }
+            // if (parent.artifactId == null || parentPom.artifactId == null) {
+            // return true; // artifactId can be null in some cases, e.g., parent POMs
+            // without artifactId
+            // }
+            if (!parentGav.artifactId.equals(parent.artifactId)) {
+              throw new RuntimeException(
+                  "Parent POM artifactId mismatch: " + parentGav.artifactId + " vs " + parent.artifactId);
+            }
+          }
         }
         return pom;
       } catch (IOException e) {
@@ -1059,52 +1097,10 @@ public class mvn2gradle {
       }
     }
 
-    private static void checkIsSame(Project pom) {
-      Parent parent = pom.parent;
-      Project localParent = pom.parentPom;
-      if (parent == null && localParent == null) {
-        return;
-      }
-      if (parent == null || localParent == null) {
-        throw new RuntimeException("Parent POM mismatch: one is null while the other is not. Parent: " + parent
-            + ", ParentPom: " + localParent);
-      }
-      if (!parent.groupId.equals(localParent.groupId) || !parent.artifactId.equals(localParent.artifactId)) {
-        throw new RuntimeException(
-            "In %s parent POM mismatch: %s vs %s".formatted(pom.id(), parent.id(), localParent.id()));
-      }
-      if (!parent.version.equals(localParent.version)) {
-        log.warn("Parent POM version mismatch: {} vs {}", parent.version, localParent.version);
-      }
-//      if (parent.artifactId == null || parentPom.artifactId == null) {
-//        return true; // artifactId can be null in some cases, e.g., parent POMs without artifactId
-//      }
-      if (!parent.artifactId.equals(localParent.artifactId)) {
-        throw new RuntimeException(
-            "Parent POM artifactId mismatch: " + parent.artifactId + " vs " + localParent.artifactId);
-      }
-    }
-
-    private static Project findParentPomFile(Project pom, boolean ignoreUnknown) {
-      var parent = findParentPomFileNoCheck(pom, ignoreUnknown);
-      if (parent == pom) {
-        // TODO remove this - needed for debug
-        parent = findParentPomFileNoCheck(pom, ignoreUnknown);
-        throw new RuntimeException("Parent POM is self-referential: " + pom.id());
-      }
-      if (pom.parentPom != null) {
-        if (pom.groupId == null) {
-          pom.groupId = pom.parentPom.groupId;
-        }
-      }
-      checkIsSame(parent);
-      return parent;
-    }
-
     private static Project findParentPomFileNoCheck(Project pom, boolean ignoreUnknown) {
       File projectDir = pom.pomFile.getParentFile();
-      String relPath = (pom.parent.relativePath == null || pom.parent.relativePath.isBlank()) ? "../pom.xml"
-          : pom.parent.relativePath;
+      String relPath = (pom.parentGav.relativePath == null || pom.parentGav.relativePath.isBlank()) ? "../pom.xml"
+          : pom.parentGav.relativePath;
       relPath = relPath.endsWith("/pom.xml") ? relPath : relPath + "/pom.xml";
 //      File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
 //      if (parentPomFile != null && parentPomFile.exists()) {
@@ -1119,18 +1115,24 @@ public class mvn2gradle {
 
       try {
         String candidateKey = new File(projectDir, relPath).getCanonicalPath();
-        if (pomCache.containsKey(candidateKey)) {
-          return pomCache.get(candidateKey);
+        Project parentPom = pomCache.get(candidateKey);
+        if (parentPom != null) {
+          if (parentPom.id().equals(pom.parentGav.id())) {
+            return parentPom;
+          }
         }
 
-        Project parentPom = loadPom(pom.rootPom, pom.parentDirPom, projectDir, ignoreUnknown, pom.rootPom.effectivePom);
-        if (parentPom != null)
-          return parentPom;
+        parentPom = loadPom(pom.rootPom, pom.parentDirPom, projectDir, ignoreUnknown, pom.rootPom.effectivePom);
+        if (parentPom != null) {
+          if (parentPom.id().equals(pom.parentGav.id())) {
+            return parentPom;
+          }
+        }
         // If the parent POM is not found in the expected relative path, we fallback to
         // Maven repo lookup
-        String groupPath = pom.parent.groupId.replace('.', '/');
-        String artifactId = pom.parent.artifactId;
-        String version = pom.parent.version;
+        String groupPath = pom.parentGav.groupId.replace('.', '/');
+        String artifactId = pom.parentGav.artifactId;
+        String version = pom.parentGav.version;
         File m2 = new File(System.getProperty("user.home"), ".m2/repository");
         File repoPom = new File(m2,
             String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
@@ -1140,7 +1142,7 @@ public class mvn2gradle {
         throw new RuntimeException(
             "Parent POM not found: tried local [" + candidateKey + "] and Maven repo [" + repoPom + "]");
       } catch (IOException e) {
-        throw new RuntimeException("Failed to resolve parent POM path for " + pom.parent.artifactId, e);
+        throw new RuntimeException("Failed to resolve parent POM path for " + pom.parentGav.artifactId, e);
       }
     }
 
@@ -1151,11 +1153,11 @@ public class mvn2gradle {
             !ignoreUnknown);
         Project res = xmlMapper.readValue(pomFile, Project.class);
         res.pomFile = pomFile;
-        if(res.groupId == null && res.parent!=null && res.parent.groupId != null) {
-          res.groupId = res.parent.groupId;
+        if (res.groupId == null && res.parentGav != null && res.parentGav.groupId != null) {
+          res.groupId = res.parentGav.groupId;
         }
-        if (res.version == null && res.parent != null && res.parent.version != null) {
-          res.version = res.parent.version;
+        if (res.version == null && res.parentGav != null && res.parentGav.version != null) {
+          res.version = res.parentGav.version;
         }
         return res;
       } catch (IOException e) {
