@@ -1337,6 +1337,15 @@ public class mvn2gradle {
         String value = finalProps.get(key);
         if (value == null)
           return null;
+        if(value.startsWith("$")) {
+          log.warn(
+              "Referenced property '%s' in POM %s has a value that starts with '$': '%s'. "
+                  + "This is not supported in Gradle Kotlin DSL.".formatted(key, pom.id(), value));
+          // If the value is a property reference, we can skip it
+          throw new RuntimeException(
+              "Referenced property '%s' in POM %s has a value that is another property reference: '%s'. "
+                  + "This is not supported in Gradle Kotlin DSL.".formatted(key, pom.id(), value));
+        }
         String safeKey = toKotlinVar(key);
         return "val %s = \"%s\"".formatted(safeKey, value);
       }).nonNull().joining("\n");
@@ -1443,7 +1452,7 @@ public class mvn2gradle {
             resolvedVersion != null && !resolvedVersion.isBlank() ? resolvedVersion
                 : (extractedVersion != null && !extractedVersion.isBlank() ? extractedVersion : "unknown"));
 
-        if (finalVersion.equals("unknown") || (finalVersion.startsWith("${") && finalVersion.endsWith("}"))) {
+        if (finalVersion.equals("unknown") || finalVersion.startsWith("$") || (finalVersion.startsWith("${") && finalVersion.endsWith("}"))) {
           if (cli.ignoreUnknownVersions) {
             log.warn("Dependency {}:{} has unknown version, skipping", resolvedGroupId, resolvedArtifactId);
             continue;
