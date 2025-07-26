@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 
 import org.fusesource.jansi.AnsiConsole;
@@ -89,8 +90,11 @@ public class mvn2gradle {
     }
   }
 
+  public static class EffectivePom extends Project {
+  }
+
   public static class Projects {
-    public List<Project> project = new ArrayList<>();
+    public List<EffectivePom> project = new ArrayList<>();
   }
 
   public static class ProjectContext {
@@ -102,6 +106,8 @@ public class mvn2gradle {
       this.cli = cli;
       this.root = root;
       this.effectivePom = effectivePom;
+      log.info("Store context in each effective pom");
+      effectivePom.project.forEach(p -> p.context = this);
     }
 
     public ProjectContext withRoot(Project newRoot) {
@@ -131,8 +137,8 @@ public class mvn2gradle {
      * transitioning to gradle from a multi-repo.
      */
     public transient Project parentPom;
-    /***/
     public transient ProjectContext context;
+    public transient AtomicReference<Project> effectivePom;
     /**
      * If the parent dir is a maven project. This could be different than the
      * inheritance parent.
@@ -168,8 +174,6 @@ public class mvn2gradle {
     public Reporting reporting;
     public Profiles profiles;
 
-    public Projects effectivePom;
-
     private Project() {
     }
 
@@ -185,6 +189,35 @@ public class mvn2gradle {
     public String idAndPath() {
       return "%s:%s:%s@[%s]".formatted(groupId, artifactId, version != null ? version : "SNAPSHOT",
           pomFile.getAbsolutePath());
+    }
+
+    public Project effectivePom() {
+      if (effectivePom != null)
+        // could also be null
+        return effectivePom.get();
+      if (context == null) {
+        throw new RuntimeException("oh");
+      }
+      if (context.cli.useEffectivePom && context.effectivePom != null)
+        effectivePom = new AtomicReference<>(findEffectivePomFor(this, context.effectivePom));
+      return effectivePom.get();
+    }
+
+    public static EffectivePom findEffectivePomFor(Project pom, Projects effectivePom) {
+      if (effectivePom == null || effectivePom.project == null) {
+        return null;
+      }
+      for (EffectivePom epPom : effectivePom.project) {
+        if (pom.groupId != null && pom.groupId.equals(epPom.groupId) && pom.artifactId != null
+            && pom.artifactId.equals(epPom.artifactId)) {
+          return epPom;
+        }
+      }
+      return null;
+    }
+
+    public String ga() {
+      return "%s:%s".formatted(groupId,artifactId);
     }
   }
 
@@ -529,7 +562,7 @@ public class mvn2gradle {
     }
 
     public boolean skip() {
-      return skip != null && skip.equals("true") || skip.equals("skip");
+      return skip != null && (skip.equals("true") || skip.equals("skip"));
     }
   }
 
@@ -905,6 +938,7 @@ public class mvn2gradle {
       }
 
       ProjectContext context = new ProjectContext(cli, null, effectivePom);
+
       Project rootPom = loadPom(null, null, context.cli.projectDir, context);
 
       // At top-level in sync
@@ -1542,7 +1576,7 @@ public class mvn2gradle {
         Project childPom = loadPom(root, pom, moduleDir, root.context);
         if (childPom != null && childPom.artifactId != null) {
           String fullPath = parentGradlePath.isEmpty() ? moduleName : parentGradlePath + ":" + moduleName;
-          artifactIdToGradlePath.put(childPom.artifactId, fullPath);
+          artifactIdToGradlePath.put(childPom.ga(), fullPath);
           collectModulesRecursivelyWithPaths(root, childPom, moduleDir, fullPath, artifactIdToGradlePath);
         }
       }
@@ -1564,11 +1598,9 @@ public class mvn2gradle {
 
       // Use effectivePom if configured
       Cli cli = pom.context.cli;
-      if (cli.useEffectivePom && pom.effectivePom != null) {
-        Project epPom = findEffectivePomFor(pom, pom.effectivePom);
-        if (epPom != null) {
-          collectPluginsFromPom(epPom, pluginConfigSnippets, pluginsMap, visited);
-        }
+      Project epPom = pom.effectivePom();
+      if (epPom != null) {
+        collectPluginsFromPom(epPom, pluginConfigSnippets, pluginsMap, visited);
       } else {
         collectPluginsFromPom(pom, pluginConfigSnippets, pluginsMap, visited);
 
@@ -1608,20 +1640,14 @@ public class mvn2gradle {
     }
 
     private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin, Project pom) {
-      Projects effectivePom = pom.context.cli.useEffectivePom ? pom.context.effectivePom : null;
-      if (effectivePom != null) {
-        Project epPom = findEffectivePomFor(pom, effectivePom);
-        if (epPom != null) {
-          return collectPluginExecutionsFromEffectivePom(plugin, epPom);
-        }
-        // fallback: empty or warn
-        return Collections.emptyList();
-      } else {
-        List<PluginExecutionContext> result = new ArrayList<>();
-        Set<String> seenExecKeys = new HashSet<>();
-        collectPluginExecutionsRecursive(plugin, pom, result, seenExecKeys);
-        return result;
+      Project epPom = pom.effectivePom();
+      if (epPom != null) {
+        return collectPluginExecutionsFromEffectivePom(plugin, epPom);
       }
+      List<PluginExecutionContext> result = new ArrayList<>();
+      Set<String> seenExecKeys = new HashSet<>();
+      collectPluginExecutionsRecursive(plugin, pom, result, seenExecKeys);
+      return result;
     }
 
     private static List<PluginExecutionContext> collectPluginExecutionsFromEffectivePom(Plugin plugin, Project epPom) {
@@ -1743,8 +1769,8 @@ public class mvn2gradle {
       if (d.version != null && !d.version.isBlank() && !d.version.contains("$")) {
         return d.version;
       }
-      if (useEffectivePom && effectivePom != null) {
-        Project epPom = findEffectivePomFor(pom, effectivePom);
+      Project epPom = pom.effectivePom();
+      if (epPom != null) {
         // String version = resolveProperties(d.version, epPom);
         if (epPom.dependencies != null && epPom.dependencies.dependency != null) {
           for (Dependency ed : epPom.dependencies.dependency) {
@@ -1757,19 +1783,6 @@ public class mvn2gradle {
       } else {
         return extractVersion(d.groupId, d.artifactId, pom);
       }
-    }
-
-    private static Project findEffectivePomFor(Project pom, Projects effectivePom) {
-      if (effectivePom == null || effectivePom.project == null) {
-        return null;
-      }
-      for (Project epPom : effectivePom.project) {
-        if (pom.groupId != null && pom.groupId.equals(epPom.groupId) && pom.artifactId != null
-            && pom.artifactId.equals(epPom.artifactId)) {
-          return epPom;
-        }
-      }
-      return null;
     }
 
     private static void generateEffectivePom(File projectDir, Path effPomPath)
@@ -1812,7 +1825,7 @@ public class mvn2gradle {
       } catch (UnrecognizedPropertyException e) {
         // If failed because no 'project' wrapper, parse single PomModel then wrap it
         if (e.getMessage().contains("Unrecognized field \"project\"") && e.getMessage().contains("PomModel")) {
-          Project singlePom = xmlMapper.readValue(xml, Project.class);
+          EffectivePom singlePom = xmlMapper.readValue(xml, EffectivePom.class);
           Projects projects = new Projects();
           projects.project.add(singlePom);
           return projects;
