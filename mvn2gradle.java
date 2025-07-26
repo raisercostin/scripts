@@ -165,6 +165,11 @@ public class mvn2gradle {
     public String id() {
       return "%s:%s:%s".formatted(groupId, artifactId, version != null ? version : "SNAPSHOT");
     }
+
+    public String idAndPath() {
+      return "%s:%s:%s@[%s]".formatted(groupId, artifactId, version != null ? version : "SNAPSHOT",
+          pomFile.getAbsolutePath());
+    }
   }
 
   private static class Gav {
@@ -872,6 +877,7 @@ public class mvn2gradle {
     }
 
     public static Integer sync(Cli cli) throws Exception {
+      log.info("Sync ...");
       Projects effectivePom = null;
       if (cli.useEffectivePom) {
         Path effPomPath = cli.projectDir.toPath().resolve("target/effective-pom.xml");
@@ -897,6 +903,7 @@ public class mvn2gradle {
       // Generate build.gradle.kts recursively for root and modules
       generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, artifactIdToGradlePath, true);
 
+      log.info("Sync done.");
       return 0;
     }
 
@@ -1337,10 +1344,9 @@ public class mvn2gradle {
         String value = finalProps.get(key);
         if (value == null)
           return null;
-        if(value.startsWith("$")) {
-          log.warn(
-              "Referenced property '%s' in POM %s has a value that starts with '$': '%s'. "
-                  + "This is not supported in Gradle Kotlin DSL.".formatted(key, pom.id(), value));
+        if (value.startsWith("$")) {
+          log.warn("Referenced property '%s' in POM %s has a value that starts with '$': '%s'. "
+              + "This is not supported in Gradle Kotlin DSL.".formatted(key, pom.id(), value));
           // If the value is a property reference, we can skip it
           throw new RuntimeException(
               "Referenced property '%s' in POM %s has a value that is another property reference: '%s'. "
@@ -1445,20 +1451,22 @@ public class mvn2gradle {
         }
         // -----------------------------
 
-        // 1. Detect version, ignoring inline concept
+        // 1. Detect version
         String resolvedVersion = resolveVersion(dep, pom, cli.useEffectivePom, effectivePom);
         String extractedVersion = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
         String finalVersion = replaceMavenPropsWithKotlinVars(
             resolvedVersion != null && !resolvedVersion.isBlank() ? resolvedVersion
                 : (extractedVersion != null && !extractedVersion.isBlank() ? extractedVersion : "unknown"));
 
-        if (finalVersion.equals("unknown") || finalVersion.startsWith("$") || (finalVersion.startsWith("${") && finalVersion.endsWith("}"))) {
+        if (finalVersion.equals("unknown") || finalVersion.startsWith("$")
+            || (finalVersion.startsWith("${") && finalVersion.endsWith("}"))) {
           if (cli.ignoreUnknownVersions) {
             log.warn("Dependency {}:{} has unknown version, skipping", resolvedGroupId, resolvedArtifactId);
             continue;
           }
-          throw new RuntimeException("Failed to resolve version for dependency: %s:%s on %s".formatted(resolvedGroupId,
-              resolvedArtifactId, pom.artifactId));
+          String resolvedVersion2 = resolveVersion(dep, pom, cli.useEffectivePom, effectivePom);
+          throw new RuntimeException("Failed to resolve version for dependency: %s:%s:%s on %s"
+              .formatted(resolvedGroupId, resolvedArtifactId, finalVersion, pom.idAndPath()));
         }
 
         String versionExpr;
@@ -1673,17 +1681,16 @@ public class mvn2gradle {
     }
 
     public static String resolveVersion(Dependency d, Project pom, boolean useEffectivePom, Projects effectivePom) {
-      if (d.version != null && !d.version.isBlank()) {
+      if (d.version != null && !d.version.isBlank() && !d.version.contains("$")) {
         return d.version;
       }
       if (useEffectivePom && effectivePom != null) {
-        // Search effectivePom projects for matching dependency version
-        for (Project epPom : effectivePom.project) {
-          if (d.groupId.equals(epPom.groupId) && epPom.dependencies != null && epPom.dependencies.dependency != null) {
-            for (Dependency ed : epPom.dependencies.dependency) {
-              if (d.artifactId.equals(ed.artifactId) && ed.version != null) {
-                return ed.version;
-              }
+        Project epPom = findEffectivePomFor(pom, effectivePom);
+        //String version = resolveProperties(d.version, epPom);
+        if (epPom.dependencies != null && epPom.dependencies.dependency != null) {
+          for (Dependency ed : epPom.dependencies.dependency) {
+            if (d.groupId.equals(ed.groupId) && d.artifactId.equals(ed.artifactId) && ed.version != null) {
+              return ed.version;
             }
           }
         }
@@ -1691,6 +1698,19 @@ public class mvn2gradle {
       } else {
         return extractVersion(d.groupId, d.artifactId, pom);
       }
+    }
+
+    private static Project findEffectivePomFor(Project pom, Projects effectivePom) {
+      if (effectivePom == null || effectivePom.project == null) {
+        return null;
+      }
+      for (Project epPom : effectivePom.project) {
+        if (pom.groupId != null && pom.groupId.equals(epPom.groupId) && pom.artifactId != null
+            && pom.artifactId.equals(epPom.artifactId)) {
+          return epPom;
+        }
+      }
+      return null;
     }
 
     private static void generateEffectivePom(File projectDir, Path effPomPath)
