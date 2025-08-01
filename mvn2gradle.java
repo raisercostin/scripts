@@ -217,7 +217,7 @@ public class mvn2gradle {
     }
 
     public String ga() {
-      return "%s:%s".formatted(groupId,artifactId);
+      return "%s:%s".formatted(groupId, artifactId);
     }
   }
 
@@ -889,12 +889,21 @@ public class mvn2gradle {
               sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/javacc"))
               """));
       register(new PluginConvertor("org.apache.maven.plugins:maven-checkstyle-plugin:default", "checkstyle", null,
-          (ctx, pom) -> ctx.configuration == null || ctx.configuration.skip() ? "//checkstyle skip" : """
-              checkstyle {
-                  isIgnoreFailures = %s // Equivalent to <skip>true</skip>
-                  configFile = file("%s")
-              }
-              """.formatted(ctx.configuration.skip() ? "true" : "false", ctx.configuration.configLocation)) {
+          (ctx, pom) -> {
+            if (ctx.configuration == null || ctx.configuration.skip()) {
+              return "//checkstyle skip";
+            }
+            java.nio.file.Path configPath = java.nio.file.Paths.get(ctx.configuration.configLocation);
+            if (!java.nio.file.Files.exists(configPath)) {
+              return "//checkstyle config file not found: " + ctx.configuration.configLocation;
+            }
+            return """
+                checkstyle {
+                    isIgnoreFailures = %s // Equivalent to <skip>true</skip>
+                    configFile = file("%s")
+                }
+                """.formatted(ctx.configuration.skip() ? "true" : "false", ctx.configuration.configLocation);
+          }) {
         @Override
         public boolean isEnabled(PluginExecutionContext ctx, Project pom) {
           return ctx.configuration == null || !ctx.configuration.skip();
@@ -1312,6 +1321,19 @@ public class mvn2gradle {
           dependencies {
           %s
           }
+          
+          //Force declared dependencies to be used. Gradle would use the maximum version and that is not compatible with maven 
+          val forcedDeps = configurations
+            .flatMap { it.dependencies }
+            .filter { it.version != null }
+            .map { "${it.group}:${it.name}:${it.version}" }
+            .distinct()
+          configurations.all {
+            resolutionStrategy {
+              force(forcedDeps)
+            }
+          }
+
           %s
           """, gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
           depResult.dependencyBlock, pluginConfigSnippets);
