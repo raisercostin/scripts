@@ -17,12 +17,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
@@ -1181,7 +1181,7 @@ public class mvn2gradle {
 
       // 2. Collect Gradle plugins and config snippets as before
       StringBuilder pluginConfigSnippets = new StringBuilder();
-      Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets);
+      Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets, cli);
 
       // 3. Emit dependencies and any version variables
       DependencyEmitResult depResult = emitDeps(pom, effectivePom, artifactIdToGradlePath, cli);
@@ -1537,10 +1537,86 @@ public class mvn2gradle {
       }
     }
 
-    private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin, Project pom) {
+    private static Map<String, String> collectGradlePluginsAndConfigs(Project pom, StringBuilder pluginConfigSnippets,
+        mvn2gradle.Cli cli) {
+      Map<String, String> pluginsMap = new LinkedHashMap<>();
+      Set<String> visited = new HashSet<>(); // to avoid duplicates when traversing parents
+      collectGradlePluginsAndConfigsRecursive(pom, pluginConfigSnippets, pluginsMap, visited, cli);
+      return pluginsMap;
+    }
+
+    private static void collectGradlePluginsAndConfigsRecursive(Project pom, StringBuilder pluginConfigSnippets,
+        Map<String, String> pluginsMap, Set<String> visited, Cli cli) {
+
+      if (pom == null)
+        return;
+
+      // Use effectivePom if configured
+      if (cli.useEffectivePom && pom.effectivePom != null) {
+        Project epPom = findEffectivePomFor(pom, pom.effectivePom);
+        if (epPom != null) {
+          collectPluginsFromPom(epPom, pluginConfigSnippets, pluginsMap, visited, cli);
+        }
+      } else {
+        collectPluginsFromPom(pom, pluginConfigSnippets, pluginsMap, visited, cli);
+
+        // recurse to parent raw pom
+        collectGradlePluginsAndConfigsRecursive(pom.parentDirPom, pluginConfigSnippets, pluginsMap, visited, cli);
+      }
+    }
+
+    private static void collectPluginsFromPom(Project pom, StringBuilder pluginConfigSnippets,
+        Map<String, String> pluginsMap, Set<String> visited, Cli cli) {
+      if (pom.build == null || pom.build.plugins == null || pom.build.plugins.plugin == null)
+        return;
+
+      for (Plugin plugin : pom.build.plugins.plugin) {
+        String pluginUniqueKey = plugin.getEffectiveGroupId() + ":" + plugin.artifactId;
+        if (!visited.add(pluginUniqueKey))
+          continue;
+
+        List<PluginExecutionContext> execs = getPluginExecutions(plugin, pom, cli.useEffectivePom, pom.effectivePom);
+        for (PluginExecutionContext ctx : execs) {
+          String pluginKey = ctx.plugin.getEffectiveGroupId() + ":" + ctx.plugin.artifactId + ":" + ctx.goal;
+          log.info("Processing plugin execution: {}", pluginKey);
+          PluginConvertor conv = pluginConversionRegistry.get(pluginKey);
+          if (conv != null && conv.isEnabled(ctx, pom)) {
+            String version = conv.gradlePluginVersion;
+            if (conv.gradlePluginId != null)
+              if (!pluginsMap.containsKey(conv.gradlePluginId) || version != null) {
+                pluginsMap.put(conv.gradlePluginId, version);
+              }
+            String config = conv.handler.apply(ctx, pom);
+            if (config != null && !config.isBlank()) {
+              pluginConfigSnippets.append("\n").append(config.trim()).append("\n");
+            }
+          }
+        }
+      }
+    }
+
+    private static List<PluginExecutionContext> collectPluginExecutionsFromEffectivePom(Plugin plugin, Project epPom) {
       List<PluginExecutionContext> result = new ArrayList<>();
-      Set<String> seenExecKeys = new HashSet<>();
-      collectPluginExecutionsRecursive(plugin, pom, result, seenExecKeys);
+      if (epPom == null || epPom.build == null || epPom.build.plugins == null || epPom.build.plugins.plugin == null) {
+        return result;
+      }
+      for (Plugin p : epPom.build.plugins.plugin) {
+        if (plugin.getEffectiveGroupId().equals(p.getEffectiveGroupId()) && plugin.artifactId.equals(p.artifactId)) {
+          if (p.executions != null && p.executions.execution != null) {
+            for (Execution exec : p.executions.execution) {
+              if (exec.goals != null && exec.goals.goal != null) {
+                for (String goal : exec.goals.goal) {
+                  PluginConfiguration config = exec.configuration != null ? exec.configuration : p.configuration;
+                  result.add(new PluginExecutionContext(p, goal, config));
+                }
+              }
+            }
+          }
+          if ((p.executions == null || p.executions.execution == null || p.executions.execution.isEmpty())) {
+            result.add(new PluginExecutionContext(p, "default", p.configuration));
+          }
+        }
+      }
       return result;
     }
 
@@ -1556,11 +1632,10 @@ public class mvn2gradle {
                 continue;
               if (exec.goals != null && exec.goals.goal != null) {
                 for (String goal : exec.goals.goal) {
-                  // Compose a unique key for this execution
                   String execId = exec.id != null ? exec.id : "";
                   String execKey = execId + ":" + goal;
                   if (!seenExecKeys.add(execKey))
-                    continue; // Already included from child, skip parent
+                    continue;
                   PluginConfiguration config = exec.configuration != null ? exec.configuration : p.configuration;
                   result.add(new PluginExecutionContext(p, goal, config));
                 }
@@ -1573,52 +1648,24 @@ public class mvn2gradle {
           }
         }
       }
-      collectPluginExecutionsRecursive(plugin, pom.parentDirPom, result, seenExecKeys);
+      collectPluginExecutionsRecursive(plugin, pom.parentPom, result, seenExecKeys);
     }
 
-    private static Map<String, String> collectGradlePluginsAndConfigs(Project pom, StringBuilder pluginConfigSnippets) {
-      Map<String, String> pluginsMap = new LinkedHashMap<>();
-      Set<String> visited = new HashSet<>(); // to avoid duplicates when traversing parents
-
-      collectGradlePluginsAndConfigsRecursive(pom, pluginConfigSnippets, pluginsMap, visited);
-
-      return pluginsMap;
-    }
-
-    private static void collectGradlePluginsAndConfigsRecursive(Project pom, StringBuilder pluginConfigSnippets,
-        Map<String, String> pluginsMap, Set<String> visited) {
-
-      if (pom == null)
-        return;
-
-      if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
-        for (Plugin plugin : pom.build.plugins.plugin) {
-          String pluginUniqueKey = plugin.getEffectiveGroupId() + ":" + plugin.artifactId;
-          if (!visited.add(pluginUniqueKey))
-            continue; // already seen in child, so skip
-          // --- Call executions for the plugin, on this POM only! ---
-          List<PluginExecutionContext> execs = getPluginExecutions(plugin, pom);
-          for (PluginExecutionContext ctx : execs) {
-            String pluginKey = ctx.plugin.getEffectiveGroupId() + ":" + ctx.plugin.artifactId + ":" + ctx.goal;
-            log.info("Processing plugin execution: {}", pluginKey);
-            PluginConvertor conv = pluginConversionRegistry.get(pluginKey);
-            if (conv != null && conv.isEnabled(ctx, pom)) {
-              String version = conv.gradlePluginVersion;
-              if (conv.gradlePluginId != null)
-                if (!pluginsMap.containsKey(conv.gradlePluginId) || version != null) {
-                  pluginsMap.put(conv.gradlePluginId, version);
-                }
-              String config = conv.handler.apply(ctx, pom);
-              if (config != null && !config.isBlank()) {
-                pluginConfigSnippets.append("\n").append(config.trim()).append("\n");
-              }
-            }
-          }
+    private static List<PluginExecutionContext> getPluginExecutions(Plugin plugin, Project pom, boolean useEffectivePom,
+        Projects effectivePom) {
+      if (useEffectivePom && effectivePom != null) {
+        Project epPom = findEffectivePomFor(pom, effectivePom);
+        if (epPom != null) {
+          return collectPluginExecutionsFromEffectivePom(plugin, epPom);
         }
+        // fallback: empty or warn
+        return Collections.emptyList();
+      } else {
+        List<PluginExecutionContext> result = new ArrayList<>();
+        Set<String> seenExecKeys = new HashSet<>();
+        collectPluginExecutionsRecursive(plugin, pom, result, seenExecKeys);
+        return result;
       }
-
-      // Always recurse to parent, even if current has no plugins
-      collectGradlePluginsAndConfigsRecursive(pom.parentDirPom, pluginConfigSnippets, pluginsMap, visited);
     }
 
     private static String extractJavaVersionFromEffectivePom(Project pom, Cli cli) {
@@ -1686,7 +1733,7 @@ public class mvn2gradle {
       }
       if (useEffectivePom && effectivePom != null) {
         Project epPom = findEffectivePomFor(pom, effectivePom);
-        //String version = resolveProperties(d.version, epPom);
+        // String version = resolveProperties(d.version, epPom);
         if (epPom.dependencies != null && epPom.dependencies.dependency != null) {
           for (Dependency ed : epPom.dependencies.dependency) {
             if (d.groupId.equals(ed.groupId) && d.artifactId.equals(ed.artifactId) && ed.version != null) {
