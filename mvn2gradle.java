@@ -67,6 +67,8 @@ public class mvn2gradle {
         - new: inheritance of plugin configs from parent
         - new: use testJars dependencies directly at compile - no jar build necessary
         - new: use submodules dependencies independent of location (as long as they are locally)
+        - new: annotation processor are handled as well: immutable, mapstruct, etc.
+        - new: antlr4 support 
 
       ## TODO
 
