@@ -17,13 +17,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
@@ -966,6 +964,58 @@ public class mvn2gradle {
 //                  }
 //              }
 //              """));
+      register(new PluginConvertor("org.antlr:antlr4-maven-plugin:antlr4", null, null, (ctx, pom) -> {
+        String version = ctx.plugin.version != null ? ctx.plugin.version : "unknown";
+        return """
+            //antlr4 tooling
+            val grammarRoot = file("src/main/antlr4")
+            val outputDir = file("target/generated-sources/antlr4")
+
+            tasks.register("generateGrammarSource") {
+                group = "antlr"
+                description = "Generate ANTLR sources - one invocation per .g4 file with correct working dir"
+            
+                doLast {
+                    val files = grammarRoot.walkTopDown()
+                        .filter { it.isFile && it.extension == "g4" }
+                        .toList()
+            
+                    files.forEach { g4file ->
+                        val relativePath = g4file.parentFile.relativeTo(grammarRoot).invariantSeparatorsPath
+                        val packageName = if (relativePath.isEmpty()) "" else relativePath.replace('/', '.')
+            
+                        javaexec {
+                            workingDir = grammarRoot
+                            classpath = configurations.annotationProcessor.get()
+                            mainClass.set("org.antlr.v4.Tool")
+            
+                            val argsList = mutableListOf("-visitor", "-listener", "-o", outputDir.absolutePath)
+                            if (packageName.isNotEmpty()) {
+                                argsList.addAll(listOf("-package", packageName))
+                            }
+                            // Provide grammar path relative to grammarRoot because workingDir is grammarRoot
+                            argsList.add(g4file.relativeTo(grammarRoot).path)
+            
+                            args = argsList
+            
+                            println("Running ANTLR on ${g4file.relativeTo(file(".")).path} with package: $packageName")
+                        }
+                    }
+                }
+            }
+
+            tasks.named("compileJava") {
+                dependsOn("generateGrammarSource")
+            }
+
+            sourceSets["main"].java.srcDir(outputDir)
+
+            dependencies {
+                implementation("org.antlr:antlr4-runtime:%s")
+                annotationProcessor("org.antlr:antlr4:%s")
+            }
+            """.formatted(version, version);
+      }));
     }
 
     public static Integer sync(Cli cli) throws Exception {
@@ -1566,6 +1616,10 @@ public class mvn2gradle {
           // Optionally ensure plugin registration (not shown here)
           continue;
         }
+        if (handleAnnotationProcessorDependency(dep, resolvedGroupId, resolvedArtifactId, version, pom, effectivePom,
+            deps)) {
+          continue;
+        }
         // -----------------------------
 
         // 1. Detect version
@@ -1615,6 +1669,42 @@ public class mvn2gradle {
       }
 
       return new DependencyEmitResult(varDecls.toString(), deps.toString(), hasLombok);
+    }
+
+    private static boolean handleAnnotationProcessorDependency(Dependency dep, String resolvedGroupId,
+        String resolvedArtifactId, String version, Project pom, Projects effectivePom, StringBuilder deps) {
+
+      // Example known processors map or set
+      Map<String, String> annotationProcessors = Map.ofEntries(Map.entry("org.projectlombok:lombok", "lombok"), //
+          Map.entry("org.mapstruct:mapstruct", "mapstruct"), //
+          Map.entry("org.immutables:value", "value"), //
+          Map.entry("com.google.auto.service:auto-service", "auto-service"), //
+          Map.entry("com.google.auto.value:auto-value", "auto-value"), //
+          Map.entry("com.google.auto.value:auto-value-annotations", "auto-value-annotations"), //
+          Map.entry("com.google.dagger:dagger-compiler", "dagger-compiler"), //
+          Map.entry("com.google.dagger:dagger-producers", "dagger-producers"), //
+          Map.entry("com.google.dagger:dagger-android-processor", "dagger-android-processor"), //
+          Map.entry("com.google.dagger:dagger-android-support", "dagger-android-support") //
+      );
+
+      String ga = resolvedGroupId + ":" + resolvedArtifactId;
+      if (!annotationProcessors.containsKey(ga)) {
+        return false;
+      }
+
+      String depVersion = (version == null || version.isBlank())
+          ? extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom)
+          : version;
+
+      if (depVersion == null || depVersion.isBlank())
+        depVersion = "unknown";
+
+      deps.append("    compileOnly(\"" + ga + ":" + depVersion + "\")\n");
+      deps.append("    annotationProcessor(\"" + ga + ":" + depVersion + "\")\n");
+      deps.append("    testCompileOnly(\"" + ga + ":" + depVersion + "\")\n");
+      deps.append("    testAnnotationProcessor(\"" + ga + ":" + depVersion + "\")\n");
+
+      return true;
     }
 
     private static String createVersionPropertyName(Dependency dep, String resolvedGroupId, String resolvedArtifactId) {
