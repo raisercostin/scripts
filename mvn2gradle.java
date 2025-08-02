@@ -23,6 +23,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
@@ -55,7 +56,29 @@ public class mvn2gradle {
     System.exit(exitCode);
   }
 
-  @CommandLine.Command(name = "mvn2gradle", mixinStandardHelpOptions = true, description = "Convert Maven pom.xml in given directory to build.gradle.kts (single-module base)")
+  @CommandLine.Command(name = "mvn2gradle", mixinStandardHelpOptions = true, description = """
+      Convert a maven multi-module base to equivalent gradle build.
+
+      ## Features
+
+      ## History
+
+      - 2025-02-08
+        - new: lombok compatibility
+        - new: inheritance of dependencies from parent
+        - new: inheritance of plugin configs from parent
+        - new: use testJars dependencies directly at compile - no jar build necessary
+        - new: use submodules dependencies independent of location (as long as they are locally)
+
+      ## TODO
+
+      - self-check that generates same artifacts as mvn - same content and size but faster
+      - cache runs of gradle build. do not ovewrite if is identical
+      - add a front build that behinds generates gradle build files and runs gradle build
+      - add a build to eclipse standard projects (not dependent on gradle or maven or other natures) but properly configures dependencies
+        between submodules and generates eclipse project files
+
+      """)
   private static class Cli implements Callable<Integer> {
     @CommandLine.Parameters(index = "0", description = "Directory containing pom.xml")
     private File projectDir;
@@ -218,6 +241,11 @@ public class mvn2gradle {
 
     public String ga() {
       return "%s:%s".formatted(groupId, artifactId);
+    }
+
+    public Project effectivePomOrThis() {
+      var effectivePom = effectivePom();
+      return effectivePom != null ? effectivePom : this;
     }
   }
 
@@ -415,10 +443,16 @@ public class mvn2gradle {
     public String scope;
     public String type;
     public String classifier;
-    public Exclusions exclusions;
     public String optional;
+    public Exclusions exclusions;
 
     private Dependency() {
+    }
+
+    @Override
+    public String toString() {
+      return "%s:%s:%s:%s:%s%s:%s:%s']".formatted(groupId, artifactId, version, scope, type, classifier, optional,
+          exclusions);
     }
   }
 
@@ -1253,89 +1287,91 @@ public class mvn2gradle {
 
       String pluginsBlock = buildPluginsBlockKts(pluginsMap);
 
-      return String.format("""
-          %s
-          %s
-
-          plugins {
-              id("java")
-              id("eclipse")
-              id("com.vanniktech.dependency.graph.generator") version "0.8.0"
-              id ("project-report")
+      return String.format(
+          """
               %s
-          }
+              %s
 
-          java {
-              sourceCompatibility = JavaVersion.toVersion("%s")
-              targetCompatibility = JavaVersion.toVersion("%s")
-          }
+              plugins {
+                  id("java")
+                  id("eclipse")
+                  id("com.vanniktech.dependency.graph.generator") version "0.8.0"
+                  id ("project-report")
+              %s
+              }
 
-          group = "%s"
-          version = "%s"
-          layout.buildDirectory.set(file("$projectDir/target/gradle"))
+              java {
+                  sourceCompatibility = JavaVersion.toVersion("%s")
+                  targetCompatibility = JavaVersion.toVersion("%s")
+              }
 
-          repositories {
-              mavenLocal()
-              mavenCentral()
-          }
+              group = "%s"
+              version = "%s"
+              layout.buildDirectory.set(file("$projectDir/target/gradle"))
 
-          tasks.withType<JavaCompile> {
-              //-Xlint:unchecked can be configured with -P-GCompiler-Xlint:unchecked -P-GCompiler-nowarn
-              project.properties.keys
-                  .filter { it.toString().startsWith("-GCompiler") }
-                  .forEach { key ->
-                      val arg = key.toString().removePrefix("-GCompiler")
-                      logger.info("Adding compiler arg: $arg")
-                      options.compilerArgs.add(arg)
-                  }
-              options.encoding = "UTF-8"
-              destinationDirectory.set(
-                  layout.buildDirectory.dir(
-                      "classes/java/" + if (name.contains("Test", ignoreCase = true)) "test" else "main"
-                  )
-              )
-          }
-          eclipse {
-              classpath {
-                  defaultOutputDir = layout.buildDirectory.dir("eclipse/classes/java/main").get().asFile
-                  file {
-                      whenMerged {
-                          val entries = (this as org.gradle.plugins.ide.eclipse.model.Classpath).entries
-                          entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.ProjectDependency>()
-                              .forEach { it.entryAttributes["without_test_code"] = "false" }
-                          entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.SourceFolder>()
-                              .filter { it.path.startsWith("/") }
-                              .forEach { it.entryAttributes["without_test_code"] = "false" }
+              repositories {
+                  mavenLocal()
+                  mavenCentral()
+              }
+
+              tasks.withType<JavaCompile> {
+                  //-Xlint:unchecked can be configured with -P-GCompiler-Xlint:unchecked -P-GCompiler-nowarn
+                  project.properties.keys
+                      .filter { it.toString().startsWith("-GCompiler") }
+                      .forEach { key ->
+                          val arg = key.toString().removePrefix("-GCompiler")
+                          logger.info("Adding compiler arg: $arg")
+                          options.compilerArgs.add(arg)
                       }
-                      withXml {
-                        val node = asNode()
-                        node.appendNode("classpathentry", mapOf(
-                            "kind" to "src",
-                            "path" to "target/gradle/generated/javacc"
-                        ))
-                     }
+                  options.encoding = "UTF-8"
+                  destinationDirectory.set(
+                      layout.buildDirectory.dir(
+                          "classes/java/" + if (name.contains("Test", ignoreCase = true)) "test" else "main"
+                      )
+                  )
+              }
+              eclipse {
+                  classpath {
+                      defaultOutputDir = layout.buildDirectory.dir("eclipse/classes/java/main").get().asFile
+                      file {
+                          whenMerged {
+                              val entries = (this as org.gradle.plugins.ide.eclipse.model.Classpath).entries
+                              entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.ProjectDependency>()
+                                  .forEach { it.entryAttributes["without_test_code"] = "false" }
+                              entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.SourceFolder>()
+                                  .filter { it.path.startsWith("/") }
+                                  .forEach { it.entryAttributes["without_test_code"] = "false" }
+                          }
+                          withXml {
+                            val node = asNode()
+                            node.appendNode("classpathentry", mapOf(
+                                "kind" to "src",
+                                "path" to "target/gradle/generated/javacc"
+                            ))
+                         }
+                      }
                   }
               }
-          }
 
-          dependencies {
-          %s
-          }
-          
-          //Force declared dependencies to be used. Gradle would use the maximum version and that is not compatible with maven 
-          val forcedDeps = configurations
-            .flatMap { it.dependencies }
-            .filter { it.version != null }
-            .map { "${it.group}:${it.name}:${it.version}" }
-            .distinct()
-          configurations.all {
-            resolutionStrategy {
-              force(forcedDeps)
-            }
-          }
+              dependencies {
+              %s
+              }
 
-          %s
-          """, gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
+              //Force declared dependencies to be used. Gradle would use the maximum version and that is not compatible with maven
+              val forcedDeps = configurations
+                .flatMap { it.dependencies }
+                .filter { it.version != null }
+                .map { "${it.group}:${it.name}:${it.version}" }
+                .distinct()
+              configurations.all {
+                resolutionStrategy {
+                  force(forcedDeps)
+                }
+              }
+
+              %s
+              """,
+          gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
           depResult.dependencyBlock, pluginConfigSnippets);
     }
 
@@ -1467,6 +1503,8 @@ public class mvn2gradle {
 
     private static DependencyEmitResult emitDeps(Project pom, Projects effectivePom,
         Map<String, String> artifactIdToGradlePath, Cli cli) {
+      pom = pom.effectivePomOrThis();
+
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
         return new DependencyEmitResult("", "", false);
       }
@@ -1505,7 +1543,16 @@ public class mvn2gradle {
           continue;
         }
         // ---- Lombok special case ----
-        if ("org.projectlombok".equals(resolvedGroupId) && "lombok".equals(resolvedArtifactId)) {
+        // org.projectlombok:lombok:jar:1.18.22:provided
+        // org.projectlombok:lombok-maven-plugin:jar:1.18.6.0:provided
+        if ("org.projectlombok".equals(resolvedGroupId)) {
+          if (!"lombok".equals(resolvedArtifactId)) {
+            log.warn("Strange lombok dependency {} in {}. Should have lombok artifactId. Check it manually.", dep,
+                pom.idAndPath());
+            if ("lombok-maven-plugin".equals(resolvedArtifactId)) {
+              version = "1.18.22";
+            }
+          }
           hasLombok = true;
           String lombokVersion = (version == null || version.isBlank())
               ? extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom)
