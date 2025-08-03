@@ -1569,7 +1569,8 @@ public class mvn2gradle {
               %s
               """,
           gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
-          repositories(""), depResult.dependencyBlock, pluginConfigSnippets, excludesBlock);
+          "",//do not render local repositories - are configured in settings repositories("")
+          depResult.dependencyBlock, pluginConfigSnippets, excludesBlock);
     }
 
     public static String generateExcludesBlock(List<String> excludes) {
