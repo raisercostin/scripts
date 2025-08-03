@@ -8,17 +8,13 @@
 //SOURCES com/namekis/utils/RichLogback.java
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Callable;
-import java.util.concurrent.TimeoutException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.zeroturnaround.exec.InvalidExitValueException;
-import org.zeroturnaround.exec.ProcessExecutor;
 
 import com.namekis.utils.RichLogback;
 
@@ -33,9 +29,7 @@ public class mgit {
   static final Logger log = LoggerFactory.getLogger(mgit.class);
 
   public static void main(String... args) {
-    // AnsiConsole.systemInstall();
     int exitCode = new CommandLine(new MgitRoot()).execute(args);
-    // AnsiConsole.systemUninstall();
     System.exit(exitCode);
   }
 
@@ -62,7 +56,6 @@ public class mgit {
 
     public List<File> findRepos() {
       log.debug("findRepos(): repos option = '{}', exclude = '{}'", repos, exclude);
-
       List<File> explicit;
       if (repos != null && !repos.isBlank()) {
         explicit = StreamEx.of(repos.split(",")).map(String::trim).map(File::new).toList();
@@ -81,10 +74,8 @@ public class mgit {
   }
 
   public abstract static class MGitWritableCommon extends MGitCommon {
-
     @Option(names = "--dry-run", description = "Show what would be done, but don't make changes.")
     public boolean dryRun;
-
   }
 
   @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = """
@@ -115,7 +106,6 @@ public class mgit {
         log.warn("No repos found.");
         return 1;
       }
-      log.info("Scanning repos: {}", repoDirs);
       int changed = 0;
       for (File repo : repoDirs) {
         if (hasChanges(repo)) {
@@ -132,8 +122,7 @@ public class mgit {
 
     boolean hasChanges(File repo) {
       try {
-        String out = new ProcessExecutor().command("git", "status", "--porcelain").directory(repo).readOutput(true)
-            .exitValueNormal().execute().outputUTF8().trim();
+        String out = runGitCommand("changes", repo, "status", "--porcelain");
         return !out.isEmpty();
       } catch (Exception e) {
         log.error("Failed git status in {}: {}", repo, e.toString());
@@ -143,8 +132,7 @@ public class mgit {
 
     void checkoutBranch(File repo, String branch) {
       try {
-        new ProcessExecutor().command("git", "checkout", "-b", branch).directory(repo).readOutput(true)
-            .exitValueNormal().execute();
+        runGitCommand("checkout", repo, "checkout", "-b", branch);
         System.out.printf("\u001B[32m[%s] checked out '%s'\u001B[0m%n", repo.getName(), branch);
       } catch (Exception e) {
         log.error("Failed to checkout branch in {}: {}", repo, e.toString());
@@ -173,7 +161,6 @@ public class mgit {
         log.warn("No repos found.");
         return 1;
       }
-      log.info("Scanning repos: {}", repoDirs);
       StatusCounts counts = new StatusCounts();
       for (File repo : repoDirs) {
         StatusState state = getRepoState(repo);
@@ -243,19 +230,18 @@ public class mgit {
       int behind;
       boolean onlyLocal = false;
       String dirtyFiles = "";
+      int defaultAhead;
+      int defaultBehind;
     }
 
     static StatusState getRepoState(File repo) {
       StatusState state = new StatusState();
-      // Uncommitted changes
       state.dirtyFiles = getPorcelainStatus(repo);
       state.dirty = !state.dirtyFiles.isEmpty();
 
       // Ahead/behind vs upstream
       try {
-        String trackingOutput = new ProcessExecutor()
-            .command("git", "rev-list", "--left-right", "--count", "HEAD...@{u}").directory(repo).readOutput(true)
-            .exitValueNormal().execute().outputUTF8().trim();
+        String trackingOutput = runGitCommand("repoState", repo, "rev-list", "--left-right", "--count", "HEAD...@{u}");
         String[] parts = trackingOutput.split("\\s+");
         if (parts.length == 2) {
           state.ahead = Integer.parseInt(parts[0]);
@@ -273,6 +259,22 @@ public class mgit {
 
       // Ahead/behind vs default branch (main/master)
       String defaultBranch = getDefaultBranch(repo);
+   // Compare HEAD vs origin/defaultBranch even if you're on main or not
+   try {
+     String cmp = runGitCommand("",repo, "rev-list", "--left-right", "--count", "HEAD...origin/" + defaultBranch);
+     String[] parts = cmp.split("\\s+");
+     if (parts.length == 2) {
+       state.defaultAhead = Integer.parseInt(parts[0]);
+       state.defaultBehind = Integer.parseInt(parts[1]);
+       if (state.defaultBehind > 0) {
+         // e.g. "Your branch is behind origin/main by n commits"
+         state.dirtyFiles = state.dirtyFiles + (state.dirtyFiles.isEmpty() ? "" : "\n")
+           + String.format("  Relative to origin/%s: behind %d", defaultBranch, state.defaultBehind);
+       }
+     }
+   } catch (Exception e) {
+     log.debug("Could not compare to origin/{}: {}", defaultBranch, e.toString());
+   }
       String currentBranch = getCurrentBranch(repo);
       if (defaultBranch != null && currentBranch != null && !defaultBranch.equals(currentBranch)) {
         String cmp = getAheadBehind(repo, currentBranch, defaultBranch);
@@ -286,32 +288,18 @@ public class mgit {
 
     static String getDefaultBranch(File repo) {
       try {
-        String out = new ProcessExecutor().command("git", "symbolic-ref", "refs/remotes/origin/HEAD").directory(repo)
-            .readOutput(true).exitValueNormal().execute().outputUTF8().trim();
-        // Parse: refs/remotes/origin/main
-        int idx = out.lastIndexOf('/');
-        return (idx >= 0) ? out.substring(idx + 1) : out;
+        String out = runGitCommand("default", repo, "symbolic-ref", "refs/remotes/origin/HEAD");
+        final String prefix = "refs/remotes/origin/";
+        return out.startsWith(prefix) ? out.substring(prefix.length()) : out;
       } catch (Exception e) {
-        // fallback
         return "main";
-      }
-    }
-
-    static String getCurrentBranch(File repo) {
-      try {
-        String branch = new ProcessExecutor().command("git", "symbolic-ref", "--short", "HEAD").directory(repo)
-            .readOutput(true).exitValueNormal().execute().outputUTF8().trim();
-        return branch.isEmpty() ? null : branch;
-      } catch (InvalidExitValueException | IOException | InterruptedException | TimeoutException e) {
-        throw new RuntimeException(e);
       }
     }
 
     static String getAheadBehind(File repo, String branch, String baseBranch) {
       try {
-        String out = new ProcessExecutor()
-            .command("git", "rev-list", "--left-right", "--count", branch + "..." + baseBranch).directory(repo)
-            .readOutput(true).exitValueNormal().execute().outputUTF8().trim();
+        String out = runGitCommand("aheadBehind", repo, "rev-list", "--left-right", "--count",
+            branch + "..." + baseBranch);
         String[] parts = out.split("\\s+");
         if (parts.length == 2) {
           int ahead = Integer.parseInt(parts[0]);
@@ -324,27 +312,18 @@ public class mgit {
           return String.join(", ", status);
         }
         return "";
-      } catch (InvalidExitValueException | IOException | InterruptedException | TimeoutException e) {
+      } catch (Exception e) {
         throw new RuntimeException(e);
       }
     }
 
-    // Helper: Short hash
     static String getShortHash(File repo) {
-      try {
-        return new ProcessExecutor().command("git", "rev-parse", "--short=8", "HEAD").directory(repo).readOutput(true)
-            .exitValueNormal().execute().outputUTF8().trim();
-      } catch (Exception ex) {
-        log.error("Error getting short hash in {}: {}", repo, ex.getMessage(), ex);
-        throw new RuntimeException("Short hash unavailable");
-      }
+      return runGitCommand("shortHash", repo, "rev-parse", "--short=8", "HEAD");
     }
 
-    // Helper: Branch or detached
     static String getBranchOrDetached(File repo, String shortHash) {
       try {
-        String branch = new ProcessExecutor().command("git", "symbolic-ref", "--short", "HEAD").directory(repo)
-            .readOutput(true).exitValueNormal().execute().outputUTF8().trim();
+        String branch = runGitCommand("branch", repo, "symbolic-ref", "--short", "HEAD");
         if (!branch.isEmpty())
           return branch;
         log.error("symbolic-ref returned empty string for {}", repo);
@@ -359,13 +338,9 @@ public class mgit {
       }
     }
 
-    // Helper: Tracking info (ahead/behind)
     static String getTracking(File repo) {
       try {
-        String trackingOutput = new ProcessExecutor()
-            .command("git", "rev-list", "--left-right", "--count", "HEAD...@{u}").directory(repo).readOutput(true)
-            .exitValueNormal().execute().outputUTF8().trim();
-
+        String trackingOutput = runGitCommand("tracking", repo, "rev-list", "--left-right", "--count", "HEAD...@{u}");
         String[] parts = trackingOutput.split("\\s+");
         if (parts.length == 2) {
           int ahead = Integer.parseInt(parts[0]);
@@ -387,7 +362,6 @@ public class mgit {
         String msg = ex.getMessage();
         if (msg != null && (msg.contains("no upstream configured for branch") || msg.contains("no upstream branch")
             || msg.contains("fatal: no upstream"))) {
-          // No upstream set, tracking remains empty.
           return "";
         }
         log.error("Error getting tracking info in {}: {}", repo, msg, ex);
@@ -395,15 +369,8 @@ public class mgit {
       }
     }
 
-    // Helper: Porcelain status
     static String getPorcelainStatus(File repo) {
-      try {
-        return new ProcessExecutor().command("git", "status", "--porcelain").directory(repo).readOutput(true)
-            .exitValueNormal().execute().outputUTF8().trim();
-      } catch (Exception ex) {
-        log.error("Error getting porcelain status in {}: {}", repo, ex.getMessage(), ex);
-        throw new RuntimeException("Porcelain status unavailable");
-      }
+      return runGitCommand("porcelainStatus", repo, "status", "--porcelain");
     }
 
     static void printStatusSummary(StatusCounts counts, boolean showLegend) {
@@ -444,7 +411,6 @@ public class mgit {
         log.warn("No repos found.");
         return 1;
       }
-      log.info("Scanning repos: {}", repoDirs);
       int committed = 0, skipped = 0, errors = 0;
       for (File repo : repoDirs) {
         if (isDetached(repo)) {
@@ -472,8 +438,7 @@ public class mgit {
 
     boolean hasChanges(File repo) {
       try {
-        String out = new ProcessExecutor().command("git", "status", "--porcelain").directory(repo).readOutput(true)
-            .exitValueNormal().execute().outputUTF8().trim();
+        String out = runGitCommand("changes", repo, "status", "--porcelain");
         return !out.isEmpty();
       } catch (Exception e) {
         log.error("Failed git status in {}: {}", repo, e.toString());
@@ -483,8 +448,7 @@ public class mgit {
 
     boolean isDetached(File repo) {
       try {
-        String out = new ProcessExecutor().command("git", "symbolic-ref", "--short", "-q", "HEAD").directory(repo)
-            .readOutput(true).exitValueAny().execute().outputUTF8().trim();
+        String out = runGitCommand("detached", repo, "symbolic-ref", "--short", "-q", "HEAD");
         return out.isEmpty();
       } catch (Exception e) {
         log.warn("Failed to check HEAD for {}: {}", repo, e.toString());
@@ -494,10 +458,9 @@ public class mgit {
 
     int gitCommit(File repo, String msg) {
       try {
-        new ProcessExecutor().command("git", "add", "-A").directory(repo).exitValueNormal().execute();
-
-        return new ProcessExecutor().command("git", "commit", "-am", msg).directory(repo).exitValueAny().execute()
-            .getExitValue();
+        runGitCommand("add", repo, "add", "-A");
+        runGitCommand("commit", repo, "commit", "-am", msg);
+        return 0;
       } catch (Exception e) {
         log.error("Commit failed for {}: {}", repo, e.toString());
         return 1;
@@ -518,8 +481,6 @@ public class mgit {
         log.warn("No repos found.");
         return 1;
       }
-      log.info("Scanning repos: {}", repoDirs);
-
       int pushed = 0, skipped = 0, errors = 0;
 
       for (File repo : repoDirs) {
@@ -536,19 +497,13 @@ public class mgit {
         }
         boolean hasUpstream = hasUpstream(repo, branch);
 
-        List<String> cmd = hasUpstream ? List.of("git", "push") : List.of("git", "push", "-u", "origin", branch);
+        List<String> cmd = hasUpstream ? List.of("push") : List.of("push", "-u", "origin", branch);
 
         try {
-          int exit = new ProcessExecutor().command(cmd).directory(repo).redirectOutput(System.out)
-              .redirectError(System.err).execute().getExitValue();
-          if (exit == 0) {
-            System.out.printf("\u001B[32m[%s] pushed (%s)%s\u001B[0m%n", repo.getName(), branch,
-                hasUpstream ? "" : " [set-upstream]");
-            pushed++;
-          } else {
-            log.error("Push failed in '{}'.", repo.getName());
-            errors++;
-          }
+          runGitCommand("push", repo, cmd.toArray(new String[0]));
+          System.out.printf("\u001B[32m[%s] pushed (%s)%s\u001B[0m%n", repo.getName(), branch,
+              hasUpstream ? "" : " [set-upstream]");
+          pushed++;
         } catch (Exception ex) {
           log.error("Push failed in '{}': {}", repo.getName(), ex.getMessage());
           errors++;
@@ -558,21 +513,10 @@ public class mgit {
       return errors > 0 ? 1 : 0;
     }
 
-    String getCurrentBranch(File repo) {
-      try {
-        String out = new ProcessExecutor().command("git", "symbolic-ref", "--short", "-q", "HEAD").directory(repo)
-            .readOutput(true).exitValueAny().execute().outputUTF8().trim();
-        return out.isEmpty() ? null : out;
-      } catch (Exception e) {
-        log.warn("Failed to check HEAD for {}: {}", repo, e.toString());
-        return null;
-      }
-    }
-
     boolean isNothingToPush(File repo) {
       try {
-        // Check if branch is ahead or dirty; if not, skip
-        String trackingOutput = runGitCommand(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}");
+        String trackingOutput = runGitCommand("isNothingToPush", repo, "rev-list", "--left-right", "--count",
+            "HEAD...@{u}");
         String[] parts = trackingOutput.split("\\s+");
         if (parts.length == 2) {
           int ahead = Integer.parseInt(parts[0]);
@@ -587,8 +531,7 @@ public class mgit {
 
     boolean hasUpstream(File repo, String branch) {
       try {
-        String upstream = new ProcessExecutor().command("git", "rev-parse", "--abbrev-ref", branch + "@{u}")
-            .directory(repo).readOutput(true).exitValueAny().execute().outputUTF8().trim();
+        String upstream = runGitCommand("hasUpstream", repo, "rev-parse", "--abbrev-ref", branch + "@{u}");
         return !upstream.isEmpty();
       } catch (Exception e) {
         return false;
@@ -596,20 +539,26 @@ public class mgit {
     }
   }
 
-  static String runGitCommand(File repo, String... cmd) {
+  static String runGitCommand(String operation, File repo, String... cmd) {
     List<String> cmdList = new ArrayList<>();
     cmdList.add("git");
     cmdList.add("-C");
     cmdList.add(repo.getAbsolutePath());
-    cmdList.addAll(List.of(cmd));
-
+    for (String s : cmd)
+      cmdList.add(s);
     String printableCmd = String.join(" ", cmdList);
-    log.info("Run: {}", printableCmd);
-
+    log.info("run {}: {}", operation, printableCmd);
     try {
-      return new ProcessExecutor().command(cmdList).readOutput(true).exitValueNormal().execute().outputUTF8().trim();
+      org.zeroturnaround.exec.ProcessExecutor proc = new org.zeroturnaround.exec.ProcessExecutor().command(cmdList)
+          .readOutput(true).exitValueNormal();
+      return proc.execute().outputUTF8().trim();
     } catch (Exception e) {
-      throw new RuntimeException("Failed: " + printableCmd + ": " + e.getMessage(), e);
+      throw new RuntimeException("Failed on %s: [%s] %s".formatted(operation, printableCmd, e.getMessage()), e);
     }
+  }
+
+  static String getCurrentBranch(File repo) {
+    String branch = runGitCommand("", repo, "symbolic-ref", "--short", "HEAD");
+    return branch.isEmpty() ? null : branch;
   }
 }
