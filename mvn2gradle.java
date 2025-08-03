@@ -74,6 +74,8 @@ public class mvn2gradle {
         - new: antlr4 support
         - new: compile excludes support
         - new: proper config of mavenLocal
+      - 2025-08-03
+        - new: add jaxb plugin configs
 
       ## TODO
 
@@ -1047,6 +1049,9 @@ public class mvn2gradle {
             }
             """.formatted(version, version);
       }));
+      register(new PluginConvertor("org.jvnet.jaxb:jaxb-maven-plugin:generate", null, null,
+          (ctx, pom) -> jbangAndXjcPlugin));
+
     }
 
     public static Integer sync(Cli cli) throws Exception {
@@ -1485,7 +1490,7 @@ public class mvn2gradle {
           tasks.withType<JavaCompile> {
             %s
           }
-          """.formatted(prefixLines(generateExcludesBlock(excludes),"","  ")) : "";
+          """.formatted(prefixLines(generateExcludesBlock(excludes), "", "  ")) : "";
       return String.format(
           """
               %s
@@ -2286,4 +2291,134 @@ public class mvn2gradle {
       return "implementation";
     }
   }
+  private static final String jbangVersion= "0.128.7";
+  private static final String jbangAndXjcPlugin = """
+      val jbangVersion = "0.128.7"
+      val jaxbVersion = "4.0.5"
+      val outputPackage = "com.example.xbrl.generated"
+      val outputDir = "target/generated-sources-jaxb"
+      
+      val jbangZipUrl = "https://github.com/jbangdev/jbang/releases/download/v$jbangVersion/jbang-$jbangVersion.zip"
+      val jbangToolsDir = layout.buildDirectory.get().asFile.resolve("tools")
+      val jbangInstallDir = jbangToolsDir.resolve("jbang-$jbangVersion")
+      val jbangJar = jbangInstallDir.resolve("bin/jbang.jar")
+      tasks.register("downloadAndUnpackJbang") {
+        outputs.dir(jbangInstallDir)
+        doLast {
+          val zipFile = jbangToolsDir.resolve("jbang-$jbangVersion.zip")
+          if (!zipFile.exists()) {
+            logger.lifecycle("Downloading JBang zip from $jbangZipUrl")
+            zipFile.parentFile.mkdirs()
+            URL(jbangZipUrl).openStream().use { input ->
+              zipFile.outputStream().use { output -> input.copyTo(output) }
+            }
+          }
+          if (!jbangJar.exists()) {
+            logger.lifecycle("Unpacking $zipFile to $jbangToolsDir")
+            ZipInputStream(zipFile.inputStream()).use { zip ->
+              var entry = zip.nextEntry
+              while (entry != null) {
+                val outPath = jbangToolsDir.resolve(entry.name)
+                if (entry.isDirectory) {
+                  outPath.mkdirs()
+                } else {
+                  outPath.parentFile.mkdirs()
+                  outPath.outputStream().use { out -> zip.copyTo(out) }
+                }
+                entry = zip.nextEntry
+              }
+            }
+          }
+          check(jbangJar.exists()) { "jbang.jar not found at $jbangJar after unzip" }
+        }
+      }
+
+      tasks.register("runJbangXjcFull") {
+          group = "codegen"
+          description = "Run xjc via jbang.jar, print all outputs colorfully, and fail-fast on errors."
+          dependsOn("downloadAndUnpackJbang")
+
+          doLast {
+              val ansiReset = "\u001B[0m"
+              val ansiRed = "\u001B[31m"
+              val ansiGreen = "\u001B[32m"
+              val ansiCyan = "\u001B[36m"
+              val ansiYellow = "\u001B[33m"
+
+              val jbangJar = file("target/gradle/tools/jbang-"+jbangVersion+"/bin/jbang.jar")
+              val xjcDeps = listOf(
+                  "org.glassfish.jaxb:jaxb-xjc:"+jaxbVersion,
+                  "org.glassfish.jaxb:jaxb-runtime:"+jaxbVersion,
+                  "org.jvnet.jaxb:jaxb-plugins:4.0.0",
+                  "org.jvnet.jaxb:jaxb-plugin-annotate:4.0.0",
+                  "org.slf4j:slf4j-simple:1.7.36"
+              ).joinToString(",")
+
+              val jbangArgs = listOf(
+                  "--java", "17",
+                  "--verbose",
+                  "--deps", xjcDeps,
+                  "org.glassfish.jaxb:jaxb-xjc:"+jaxbVersion,
+                  "-extension", "-Xannotate", "-Xinheritance", "-Xcopyable", "-XtoString", "-Xequals", "-XhashCode",
+                  "-d", outputDir,
+                  "-p", outputPackage,
+                  "src/main/resources/XBRLConfigurations.xsd"
+              )
+
+              println("${ansiCyan}STEP 1: Running jbang (dev.jbang.Main) to start XJC...$ansiReset")
+              check(jbangJar.exists()) { "jbang.jar not found at $jbangJar" }
+
+              val out1 = ByteArrayOutputStream()
+              val err1 = ByteArrayOutputStream()
+              val proc1 = exec {
+                  commandLine("java", "-classpath", jbangJar.absolutePath, "dev.jbang.Main", *jbangArgs.toTypedArray())
+                  standardOutput = out1
+                  errorOutput = err1
+                  isIgnoreExitValue = true
+              }
+              val stdOut1 = out1.toString(Charsets.UTF_8).trim()
+              val stdErr1 = err1.toString(Charsets.UTF_8).trim()
+              val all1 = (stdOut1 + "\n" + stdErr1).trim()
+
+              // Look for the first line that is a Java exec command (typically starts with 'C:\\...' or '/usr/...')
+              val maybeXjcCmd = stdOut1.lines().firstOrNull {
+                  it.contains("java") && it.contains("XJCFacade")
+              }?.trim()
+
+              // Print all jbang output in yellow for visibility
+              println("${ansiYellow}JBang output:$ansiReset\n$all1")
+
+              if (maybeXjcCmd == null) {
+                  println("${ansiRed}Could not find computed XJC command in output!$ansiReset")
+                  throw GradleException("Failed to extract XJC exec command from jbang output.")
+              }
+
+              println("${ansiGreen}STEP 2: Running computed XJC command:$ansiReset")
+              println("${ansiCyan}$maybeXjcCmd$ansiReset")
+
+              // Split command for exec (handle both Windows and Unix quoting)
+              val commandArgs = org.apache.tools.ant.types.Commandline.translateCommandline(maybeXjcCmd)
+
+              val out2 = ByteArrayOutputStream()
+              val err2 = ByteArrayOutputStream()
+              val xjcExit = exec {
+                  commandLine(*commandArgs)
+                  standardOutput = out2
+                  errorOutput = err2
+                  isIgnoreExitValue = true
+              }.exitValue
+
+              val stdOut2 = out2.toString(Charsets.UTF_8).trim()
+              val stdErr2 = err2.toString(Charsets.UTF_8).trim()
+              if (stdOut2.isNotEmpty()) println("${ansiGreen}XJC STDOUT:$ansiReset\n$stdOut2")
+              if (stdErr2.isNotEmpty()) println("${ansiRed}XJC STDERR:$ansiReset\n$stdErr2")
+
+              if (xjcExit != 0) {
+                  throw GradleException("XJC failed (exit $xjcExit). See output above.")
+              } else {
+                  println("${ansiGreen}XJC completed successfully!$ansiReset")
+              }
+          }
+      }
+      """;
 }
