@@ -163,9 +163,44 @@ public class mgit {
       }
       StatusCounts counts = new StatusCounts();
       for (File repo : repoDirs) {
-        StatusState state = getRepoState(repo);
-        System.out.println(getShortStatus(repo));
-        updateStatusCounts(counts, state);
+        RepoStatus rs = computeRepoStatus(repo);
+
+        StringBuilder tags = new StringBuilder();
+        String blue = "\u001B[94m";
+        String green = "\u001B[32m";
+        String red = "\u001B[31m";
+        String yellow = "\u001B[33m";
+        String magenta = "\u001B[35m";
+        String cyan = "\u001B[36m";
+        String reset = "\u001B[0m";
+
+        if (rs.dirty)
+          tags.append(red).append("[DIRTY]").append(reset);
+        if (rs.ahead > 0)
+          tags.append(yellow).append("[AHEAD ").append(rs.ahead).append("]").append(reset);
+        if (rs.behind > 0)
+          tags.append(magenta).append("[BEHIND ").append(rs.behind).append("]").append(reset);
+        if (rs.onlyLocal && !rs.dirty)
+          tags.append(cyan).append("[LOCAL]").append(reset);
+        if (!rs.dirty && rs.ahead == 0 && rs.behind == 0 && !rs.onlyLocal)
+          tags.append(green).append("[CLEAN]").append(reset);
+
+        String header = String.format("%s%s/%s/#%s%s %s", blue, repo.getName(), rs.branch, rs.shortHash, reset, tags);
+
+        System.out.println(rs.dirty ? header + "\n" + rs.dirtyFiles : header);
+
+        // Update counts
+        if (rs.dirty) {
+          counts.dirty++;
+        } else if (rs.ahead > 0) {
+          counts.ahead++;
+        } else if (rs.behind > 0) {
+          counts.behind++;
+        } else if (rs.onlyLocal) {
+          counts.local++;
+        } else {
+          counts.clean++;
+        }
       }
       printStatusSummary(counts, true);
       return 0;
@@ -254,33 +289,6 @@ public class mgit {
           state.onlyLocal = true;
         } else {
           throw new RuntimeException("Tracking unavailable for repo " + repo.getName(), ex);
-        }
-      }
-
-      // Ahead/behind vs default branch (main/master)
-      String defaultBranch = getDefaultBranch(repo);
-   // Compare HEAD vs origin/defaultBranch even if you're on main or not
-   try {
-     String cmp = runGitCommand("",repo, "rev-list", "--left-right", "--count", "HEAD...origin/" + defaultBranch);
-     String[] parts = cmp.split("\\s+");
-     if (parts.length == 2) {
-       state.defaultAhead = Integer.parseInt(parts[0]);
-       state.defaultBehind = Integer.parseInt(parts[1]);
-       if (state.defaultBehind > 0) {
-         // e.g. "Your branch is behind origin/main by n commits"
-         state.dirtyFiles = state.dirtyFiles + (state.dirtyFiles.isEmpty() ? "" : "\n")
-           + String.format("  Relative to origin/%s: behind %d", defaultBranch, state.defaultBehind);
-       }
-     }
-   } catch (Exception e) {
-     log.debug("Could not compare to origin/{}: {}", defaultBranch, e.toString());
-   }
-      String currentBranch = getCurrentBranch(repo);
-      if (defaultBranch != null && currentBranch != null && !defaultBranch.equals(currentBranch)) {
-        String cmp = getAheadBehind(repo, currentBranch, defaultBranch);
-        if (!cmp.isEmpty()) {
-          state.dirtyFiles = state.dirtyFiles + (state.dirtyFiles.isEmpty() ? "" : "\n")
-              + String.format("  Relative to %s: %s", defaultBranch, cmp);
         }
       }
       return state;
@@ -561,4 +569,82 @@ public class mgit {
     String branch = runGitCommand("", repo, "symbolic-ref", "--short", "HEAD");
     return branch.isEmpty() ? null : branch;
   }
+
+  static class RepoStatus {
+    String branch;
+    String shortHash;
+    boolean dirty;
+    String dirtyFiles;
+    int ahead;
+    int behind;
+    boolean onlyLocal;
+  }
+
+  static RepoStatus computeRepoStatus(File repo) {
+    RepoStatus rs = new RepoStatus();
+
+    // Run "git status --branch --porcelain"
+    String statusOutput = runGitCommand("status", repo, "status", "--branch", "--porcelain");
+    String[] lines = statusOutput.split("\\r?\\n");
+    rs.dirty = lines.length > 1;
+    rs.dirtyFiles = rs.dirty ? StreamEx.of(lines).skip(1).map(l -> "  " + l.trim()).joining("\n") : "";
+
+    // Parse first line for branch and ahead/behind/local
+    if (lines.length > 0 && lines[0].startsWith("##")) {
+      String header = lines[0].substring(2).trim();
+      // Example: "main...origin/main [ahead 1, behind 2]"
+      int dotIdx = header.indexOf("...");
+      int spaceIdx = header.indexOf(' ');
+      if (dotIdx >= 0) {
+        rs.branch = header.substring(0, dotIdx);
+        String afterDots = header.substring(dotIdx + 3);
+        if (afterDots.startsWith("origin/")) {
+          // skip remote, check for [ahead/behind]
+          int bracketIdx = afterDots.indexOf('[');
+          if (bracketIdx >= 0) {
+            String status = afterDots.substring(bracketIdx + 1, afterDots.length() - 1);
+            for (String token : status.split(",")) {
+              token = token.trim();
+              if (token.startsWith("ahead")) {
+                rs.ahead = Integer.parseInt(token.substring(6));
+              } else if (token.startsWith("behind")) {
+                rs.behind = Integer.parseInt(token.substring(7));
+              }
+            }
+          }
+        }
+      } else if (spaceIdx > 0) {
+        // Example: "main [gone]"
+        rs.branch = header.substring(0, spaceIdx);
+        if (header.contains("no upstream")) {
+          rs.onlyLocal = true;
+        }
+      } else {
+        rs.branch = header;
+      }
+      if (header.contains("no upstream")) {
+        rs.onlyLocal = true;
+      }
+    } else {
+      rs.branch = "(unknown)";
+    }
+
+    // If neither ahead nor behind, and onlyLocal not set, try to detect local-only
+    // via '[gone]' or 'no upstream'
+    if (!rs.onlyLocal && (rs.ahead == 0 && rs.behind == 0) && lines.length > 0) {
+      String header = lines[0];
+      if (header.contains("no upstream") || header.contains("[gone]")) {
+        rs.onlyLocal = true;
+      }
+    }
+
+    // Get short hash (separate command)
+    try {
+      rs.shortHash = runGitCommand("shortHash", repo, "rev-parse", "--short=8", "HEAD");
+    } catch (Exception ex) {
+      rs.shortHash = "--------";
+    }
+    return rs;
+  }
+
 }
