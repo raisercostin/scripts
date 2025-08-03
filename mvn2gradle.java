@@ -1,5 +1,5 @@
-// Description: Convert Maven pom.xml to Gradle build.gradle.kts
 //usr/bin/env jbang "$0" "$@" ; exit $?
+//Description: Convert Multimodule Maven pom.xml to Gradle build.gradle.kts
 //DEPS info.picocli:picocli:4.7.7
 //DEPS org.slf4j:slf4j-api:2.0.9
 //DEPS ch.qos.logback:logback-classic:1.4.14
@@ -23,10 +23,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.stream.Collectors;
 
 import org.fusesource.jansi.AnsiConsole;
 import org.zeroturnaround.exec.InvalidExitValueException;
@@ -39,6 +41,7 @@ import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper;
+import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty;
 
 import one.util.streamex.StreamEx;
 import picocli.CommandLine;
@@ -68,7 +71,9 @@ public class mvn2gradle {
         - new: use testJars dependencies directly at compile - no jar build necessary
         - new: use submodules dependencies independent of location (as long as they are locally)
         - new: annotation processor are handled as well: immutable, mapstruct, etc.
-        - new: antlr4 support 
+        - new: antlr4 support
+        - new: compile excludes support
+        - new: proper config of mavenLocal
 
       ## TODO
 
@@ -106,6 +111,9 @@ public class mvn2gradle {
 
     @Option(names = "--force-generate-effective-pom", description = "Force regeneration of effective-pom.xml even if it exists", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
     public boolean forceGenerateEffectivePom = true;
+
+    @Option(names = "--debug-repositories", description = "Debug info on repositories", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
+    public boolean debugRepositories = false;
 
     @Override
     public Integer call() throws Exception {
@@ -233,6 +241,7 @@ public class mvn2gradle {
       for (EffectivePom epPom : effectivePom.project) {
         if (pom.groupId != null && pom.groupId.equals(epPom.groupId) && pom.artifactId != null
             && pom.artifactId.equals(epPom.artifactId)) {
+          epPom.pomFile = pom.pomFile;
           return epPom;
         }
       }
@@ -246,6 +255,17 @@ public class mvn2gradle {
     public Project effectivePomOrThis() {
       var effectivePom = effectivePom();
       return effectivePom != null ? effectivePom : this;
+    }
+
+    public Plugin compilerPlugin() {
+      if (build != null && build.plugins != null && build.plugins.plugin != null) {
+        for (Plugin plugin : build.plugins.plugin) {
+          if ("maven-compiler-plugin".equals(plugin.artifactId) && plugin.configuration != null) {
+            return plugin;
+          }
+        }
+      }
+      return new Plugin();
     }
   }
 
@@ -571,7 +591,7 @@ public class mvn2gradle {
     public Boolean inherited;
     public Executions executions;
     public Dependencies dependencies;
-    public PluginConfiguration configuration;
+    public PluginConfiguration configuration = new PluginConfiguration();
 
     private Plugin() {
     }
@@ -579,15 +599,24 @@ public class mvn2gradle {
     public String getEffectiveGroupId() {
       return groupId != null ? groupId : "org.apache.maven.plugins";
     }
+
+    @Override
+    public String toString() {
+      return "%s:%s:%s".formatted(getEffectiveGroupId(), artifactId, version != null ? version : "");
+    }
   }
 
   private static class PluginConfiguration {
     // maven-compiler-plugin - properties
     public String source;
     public String target;
+    @JacksonXmlElementWrapper(localName = "excludes")
+    @JacksonXmlProperty(localName = "exclude")
+    public java.util.List<String> excludes;
     // checkstyle plugin
     public String skip;
     public String configLocation;
+    //
 
     @com.fasterxml.jackson.annotation.JsonAnySetter
     public java.util.Map<String, Object> any = new java.util.HashMap<>();
@@ -976,30 +1005,30 @@ public class mvn2gradle {
             tasks.register("generateGrammarSource") {
                 group = "antlr"
                 description = "Generate ANTLR sources - one invocation per .g4 file with correct working dir"
-            
+
                 doLast {
                     val files = grammarRoot.walkTopDown()
                         .filter { it.isFile && it.extension == "g4" }
                         .toList()
-            
+
                     files.forEach { g4file ->
                         val relativePath = g4file.parentFile.relativeTo(grammarRoot).invariantSeparatorsPath
                         val packageName = if (relativePath.isEmpty()) "" else relativePath.replace('/', '.')
-            
+
                         javaexec {
                             workingDir = grammarRoot
                             classpath = configurations.annotationProcessor.get()
                             mainClass.set("org.antlr.v4.Tool")
-            
+
                             val argsList = mutableListOf("-visitor", "-listener", "-o", outputDir.absolutePath)
                             if (packageName.isNotEmpty()) {
                                 argsList.addAll(listOf("-package", packageName))
                             }
                             // Provide grammar path relative to grammarRoot because workingDir is grammarRoot
                             argsList.add(g4file.relativeTo(grammarRoot).path)
-            
+
                             args = argsList
-            
+
                             println("Running ANTLR on ${g4file.relativeTo(file(".")).path} with package: $packageName")
                         }
                     }
@@ -1060,18 +1089,131 @@ public class mvn2gradle {
       String includesStr = StreamEx.of(includes).map(m -> "include(\"" + m + "\")").joining("\n");
       String mirrorsRepositoriesBlock = generateGradleRepositoriesFromMirrors(
           readMavenSettings(new File(System.getProperty("user.home"), ".m2/settings.xml")));
-
       return """
           rootProject.name = "%s"
           dependencyResolutionManagement {
-              repositories {
-                  mavenLocal()
-                  %s
-                  mavenCentral()
-              }
+            %s
           }
           %s
-          """.formatted(rootName, mirrorsRepositoriesBlock, includesStr);
+          %s
+          """.formatted(rootName, prefixLines(repositories(mirrorsRepositoriesBlock), "", "  "), includesStr,
+          rootPom.context.cli.debugRepositories ? debugRepositories() : "");
+    }
+
+    private static String prefixLines(String allLines, String firstLinePrefix, String restPrefix) {
+      return new StringJoiner("\n").add(firstLinePrefix + allLines.lines().findFirst().orElse(""))
+          .add(allLines.lines().skip(1).map(line -> restPrefix + line).collect(Collectors.joining("\n"))).toString();
+    }
+
+    private static String repositories(String additionalRepositoriesBlock) {
+      return """
+          repositories {
+            //Do not use just mavenLocal() as ignores files if maven-metadata-local.xml is not found - https://discuss.gradle.org/t/mavenlocal-headaches/39104/7
+            mavenLocal {
+              metadataSources {
+                mavenPom()
+                artifact()
+              }
+            }
+            %s
+            mavenCentral()
+          }
+          """
+          .formatted(prefixLines(additionalRepositoriesBlock, "", "  "));
+    }
+
+    private static String debugRepositories() {
+      String debugRepositories = """
+          gradle.projectsEvaluated {
+              repositories.forEach {
+                println("${it.name} resolves to: ${(it as org.gradle.api.artifacts.repositories.MavenArtifactRepository).url} and is ${it}")
+              }
+          }
+          /**
+          configurations.all {
+              resolutionStrategy.eachDependency {
+                  println("? [${requested.group}:${requested.name}:${requested.version}]")
+              }
+          }
+          gradle.projectsEvaluated {
+              repositories.forEach { repo ->
+                  if (repo is org.gradle.api.artifacts.repositories.MavenArtifactRepository) {
+                      println("==== ${repo.name} (${repo.javaClass.simpleName}) ====")
+                      // Print common public properties
+                      println("  url: ${repo.url}")
+                      println("  contentFilter: ${repo.contentFilter}")
+                      println("  metadataSources: ${repo.metadataSources}")
+                      println("  allowInsecureProtocol: ${repo.isAllowInsecureProtocol}")
+                      println("  authentication: ${repo.authentication}")
+                      // Print all getter methods via reflection
+                      repo.javaClass.methods
+                          .filter { it.name.startsWith("get") && it.parameterCount == 0 }
+                          .forEach { method ->
+                              try {
+                                  println("  ${method.name}: ${method.invoke(repo)}")
+                              } catch (e: Exception) {
+                                  println("  ${method.name}: <error: ${e.message}>")
+                              }
+                          }
+                      println()
+                  }
+              }
+          }
+
+          gradle.projectsEvaluated {
+              repositories.forEach { repo ->
+                  if (repo is MavenArtifactRepository) {
+                      println("==== ${repo.name} (${repo.javaClass.simpleName}) ====")
+                      println("  url: ${repo.url}")
+                      println("  metadataSources: ${repo.metadataSources}")
+                      println("  allowInsecureProtocol: ${repo.isAllowInsecureProtocol}")
+                      println("  authentication: ${repo.authentication}")
+
+                      // Optional: print all public getter methods and their values
+                      repo.javaClass.methods
+                          .filter { it.name.startsWith("get") && it.parameterCount == 0}
+                          .forEach { method ->
+                              try {
+                                  println("  ${method.name}: ${method.invoke(repo)}")
+                              } catch (e: Exception) {
+                                  println("  ${method.name}: <error: ${e.message}>")
+                              }
+                          }
+                      println()
+                  }
+              }
+          }
+          */
+          val ignoreProperties = setOf(
+              "getRootComponentProperty",
+              "getClass",
+              "getAuthentication",
+              "getAuthenticationSchemes",
+              "getConfiguredAuthentication",
+              "getCredentials"
+          )
+
+          gradle.projectsEvaluated {
+              repositories.forEach { repo ->
+                  println("==== ${repo.name} (${repo.javaClass.simpleName}) ====")
+                  repo.javaClass.methods
+                      .filter {
+                          it.name.startsWith("get") &&
+                          it.parameterCount == 0 &&
+                          it.name !in ignoreProperties
+                      }
+                      .forEach { method ->
+                          try {
+                              println("  ${method.name}: ${method.invoke(repo)}")
+                          } catch (e: Throwable) {
+                            throw RuntimeException("Error on calling ${method.name}:", e)
+                          }
+                      }
+                  println()
+              }
+          }
+          """;
+      return debugRepositories;
     }
 
     public static class MvnSettings {
@@ -1203,7 +1345,7 @@ public class mvn2gradle {
         pomCache.put(key, pom);
 
         if (pom.parentGav != null) {
-          var parent = findParentPomFileNoCheck(pom, ignoreUnknown);
+          var parent = findParentPomFileNoCheck(pom.effectivePomOrThis(), ignoreUnknown);
           if (parent == pom) {
             throw new RuntimeException("Parent POM is self-referential: " + pom.id());
           }
@@ -1338,7 +1480,12 @@ public class mvn2gradle {
         pluginsMap.put("io.freefair.lombok", "8.6");
 
       String pluginsBlock = buildPluginsBlockKts(pluginsMap);
-
+      List<String> excludes = pom.effectivePomOrThis().compilerPlugin().configuration.excludes;
+      String excludesBlock = excludes != null && excludes.size() > 0 ? """
+          tasks.withType<JavaCompile> {
+            %s
+          }
+          """.formatted(prefixLines(generateExcludesBlock(excludes),"","  ")) : "";
       return String.format(
           """
               %s
@@ -1361,10 +1508,7 @@ public class mvn2gradle {
               version = "%s"
               layout.buildDirectory.set(file("$projectDir/target/gradle"))
 
-              repositories {
-                  mavenLocal()
-                  mavenCentral()
-              }
+              %s
 
               tasks.withType<JavaCompile> {
                   //-Xlint:unchecked can be configured with -P-GCompiler-Xlint:unchecked -P-GCompiler-nowarn
@@ -1422,9 +1566,21 @@ public class mvn2gradle {
               }
 
               %s
+              %s
               """,
           gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
-          depResult.dependencyBlock, pluginConfigSnippets);
+          repositories(""), depResult.dependencyBlock, pluginConfigSnippets, excludesBlock);
+    }
+
+    public static String generateExcludesBlock(List<String> excludes) {
+      if (excludes == null || excludes.isEmpty()) {
+        return "";
+      }
+      StringBuilder sb = new StringBuilder();
+      for (String exclude : excludes) {
+        sb.append("    excludes.add(\"").append(exclude.replace("\"", "\\\"")).append("\")\n");
+      }
+      return sb.toString();
     }
 
     static String toKotlinVar(String key) {
@@ -1870,26 +2026,20 @@ public class mvn2gradle {
     private static String extractJavaVersionFromEffectivePom(Project pom, Cli cli) {
       String rawVersion = null;
 
-      if (pom.build != null && pom.build.plugins != null && pom.build.plugins.plugin != null) {
-        for (Plugin plugin : pom.build.plugins.plugin) {
-          if ("maven-compiler-plugin".equals(plugin.artifactId) && plugin.configuration != null) {
-            try {
-              String source = plugin.configuration.source;
-              String target = plugin.configuration.target;
-              if (source != null && !source.isBlank() && target != null && !target.isBlank()) {
-                rawVersion = source.equals(target) ? source : source; // prefer source if different
-                break;
-              } else if (source != null && !source.isBlank()) {
-                rawVersion = source;
-                break;
-              } else if (target != null && !target.isBlank()) {
-                rawVersion = target;
-                break;
-              }
-            } catch (Exception e) {
-              throw new RuntimeException("Failed to read compiler plugin configuration", e);
-            }
+      Plugin plugin = pom.compilerPlugin();
+      if (plugin != null) {
+        try {
+          String source = plugin.configuration.source;
+          String target = plugin.configuration.target;
+          if (source != null && !source.isBlank() && target != null && !target.isBlank()) {
+            rawVersion = source.equals(target) ? source : source; // prefer source if different
+          } else if (source != null && !source.isBlank()) {
+            rawVersion = source;
+          } else if (target != null && !target.isBlank()) {
+            rawVersion = target;
           }
+        } catch (Exception e) {
+          throw new RuntimeException("Failed to read compiler plugin configuration", e);
         }
       }
 
@@ -1985,7 +2135,7 @@ public class mvn2gradle {
         return xmlMapper.readValue(xml, Projects.class);
       } catch (UnrecognizedPropertyException e) {
         // If failed because no 'project' wrapper, parse single PomModel then wrap it
-        if (e.getMessage().contains("Unrecognized field \"project\"") && e.getMessage().contains("PomModel")) {
+        if (e.getMessage().contains("one known property: \"project\"")) {
           EffectivePom singlePom = xmlMapper.readValue(xml, EffectivePom.class);
           Projects projects = new Projects();
           projects.project.add(singlePom);
