@@ -8,13 +8,16 @@
 //SOURCES com/namekis/utils/RichLogback.java
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeoutException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.zeroturnaround.exec.InvalidExitValueException;
 import org.zeroturnaround.exec.ProcessExecutor;
 
 import com.namekis.utils.RichLogback;
@@ -27,6 +30,7 @@ import picocli.CommandLine.Help.Visibility;
 import picocli.CommandLine.Option;
 
 public class mgit {
+  static final Logger log = LoggerFactory.getLogger(mgit.class);
 
   public static void main(String... args) {
     // AnsiConsole.systemInstall();
@@ -65,13 +69,11 @@ public class mgit {
         log.info("Filtering to explicit repos: {}", StreamEx.of(explicit).map(File::getName).joining(", "));
       } else {
         File cwd = new File(".");
-        explicit = StreamEx.of(Objects.requireNonNull(cwd.listFiles())).toList();;
+        explicit = StreamEx.of(Objects.requireNonNull(cwd.listFiles())).toList();
         log.info("Scanning all subdirectories in '{}'", cwd.getAbsolutePath());
       }
-      List<File> filtered = explicit.stream()
-          .filter(f -> f.isDirectory() && new File(f, ".git").exists())
-          .filter(f -> exclude == null || exclude.isEmpty() || !exclude.contains(f.getName()))
-          .toList();
+      List<File> filtered = explicit.stream().filter(f -> f.isDirectory() && new File(f, ".git").exists())
+          .filter(f -> exclude == null || exclude.isEmpty() || !exclude.contains(f.getName())).toList();
 
       log.info("Final repo list after filtering: {}", filtered.stream().map(File::getName).toList());
       return filtered;
@@ -86,9 +88,8 @@ public class mgit {
   }
 
   @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = """
-    Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
-    """, subcommands = {
-      CheckoutBranch.class, Status.class, Commit.class, Push.class }, sortOptions = false)
+      Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
+      """, subcommands = { CheckoutBranch.class, Status.class, Commit.class, Push.class }, sortOptions = false)
   public static class MgitRoot extends MGitCommon implements Runnable {
     static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
 
@@ -247,14 +248,10 @@ public class mgit {
     static StatusState getRepoState(File repo) {
       StatusState state = new StatusState();
       // Uncommitted changes
-      try {
-        state.dirtyFiles = getPorcelainStatus(repo);
-        state.dirty = !state.dirtyFiles.isEmpty();
-      } catch (Exception e) {
-        log.error("Error checking dirty state in {}: {}", repo, e.getMessage(), e);
-        throw new RuntimeException("Cannot determine dirty state");
-      }
-      // Ahead/behind
+      state.dirtyFiles = getPorcelainStatus(repo);
+      state.dirty = !state.dirtyFiles.isEmpty();
+
+      // Ahead/behind vs upstream
       try {
         String trackingOutput = new ProcessExecutor()
             .command("git", "rev-list", "--left-right", "--count", "HEAD...@{u}").directory(repo).readOutput(true)
@@ -268,14 +265,68 @@ public class mgit {
         String msg = ex.getMessage();
         if (msg != null && (msg.contains("no upstream configured for branch") || msg.contains("no upstream branch")
             || msg.contains("fatal: no upstream"))) {
-          // No upstream set: mark as only local.
           state.onlyLocal = true;
         } else {
-          log.error("Error getting tracking info in {}: {}", repo, msg, ex);
-          throw new RuntimeException("Tracking unavailable");
+          throw new RuntimeException("Tracking unavailable for repo " + repo.getName(), ex);
+        }
+      }
+
+      // Ahead/behind vs default branch (main/master)
+      String defaultBranch = getDefaultBranch(repo);
+      String currentBranch = getCurrentBranch(repo);
+      if (defaultBranch != null && currentBranch != null && !defaultBranch.equals(currentBranch)) {
+        String cmp = getAheadBehind(repo, currentBranch, defaultBranch);
+        if (!cmp.isEmpty()) {
+          state.dirtyFiles = state.dirtyFiles + (state.dirtyFiles.isEmpty() ? "" : "\n")
+              + String.format("  Relative to %s: %s", defaultBranch, cmp);
         }
       }
       return state;
+    }
+
+    static String getDefaultBranch(File repo) {
+      try {
+        String out = new ProcessExecutor().command("git", "symbolic-ref", "refs/remotes/origin/HEAD").directory(repo)
+            .readOutput(true).exitValueNormal().execute().outputUTF8().trim();
+        // Parse: refs/remotes/origin/main
+        int idx = out.lastIndexOf('/');
+        return (idx >= 0) ? out.substring(idx + 1) : out;
+      } catch (Exception e) {
+        // fallback
+        return "main";
+      }
+    }
+
+    static String getCurrentBranch(File repo) {
+      try {
+        String branch = new ProcessExecutor().command("git", "symbolic-ref", "--short", "HEAD").directory(repo)
+            .readOutput(true).exitValueNormal().execute().outputUTF8().trim();
+        return branch.isEmpty() ? null : branch;
+      } catch (InvalidExitValueException | IOException | InterruptedException | TimeoutException e) {
+        throw new RuntimeException(e);
+      }
+    }
+
+    static String getAheadBehind(File repo, String branch, String baseBranch) {
+      try {
+        String out = new ProcessExecutor()
+            .command("git", "rev-list", "--left-right", "--count", branch + "..." + baseBranch).directory(repo)
+            .readOutput(true).exitValueNormal().execute().outputUTF8().trim();
+        String[] parts = out.split("\\s+");
+        if (parts.length == 2) {
+          int ahead = Integer.parseInt(parts[0]);
+          int behind = Integer.parseInt(parts[1]);
+          List<String> status = new ArrayList<>();
+          if (ahead > 0)
+            status.add("ahead " + ahead);
+          if (behind > 0)
+            status.add("behind " + behind);
+          return String.join(", ", status);
+        }
+        return "";
+      } catch (InvalidExitValueException | IOException | InterruptedException | TimeoutException e) {
+        throw new RuntimeException(e);
+      }
     }
 
     // Helper: Short hash
@@ -519,20 +570,17 @@ public class mgit {
     }
 
     boolean isNothingToPush(File repo) {
-      // Check if branch is ahead or dirty; if not, skip
       try {
-        String trackingOutput = new ProcessExecutor()
-            .command("git", "rev-list", "--left-right", "--count", "HEAD...@{u}").directory(repo).readOutput(true)
-            .exitValueAny().execute().outputUTF8().trim();
+        // Check if branch is ahead or dirty; if not, skip
+        String trackingOutput = runGitCommand(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}");
         String[] parts = trackingOutput.split("\\s+");
         if (parts.length == 2) {
           int ahead = Integer.parseInt(parts[0]);
           return ahead == 0;
         }
-        // If can't parse, just try push
         return false;
       } catch (Exception e) {
-        // No upstream; must push (set-upstream)
+        log.debug("Failed to check if nothing to push in {}: {}", repo, e.toString());
         return false;
       }
     }
@@ -545,6 +593,23 @@ public class mgit {
       } catch (Exception e) {
         return false;
       }
+    }
+  }
+
+  static String runGitCommand(File repo, String... cmd) {
+    List<String> cmdList = new ArrayList<>();
+    cmdList.add("git");
+    cmdList.add("-C");
+    cmdList.add(repo.getAbsolutePath());
+    cmdList.addAll(List.of(cmd));
+
+    String printableCmd = String.join(" ", cmdList);
+    log.info("Run: {}", printableCmd);
+
+    try {
+      return new ProcessExecutor().command(cmdList).readOutput(true).exitValueNormal().execute().outputUTF8().trim();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed: " + printableCmd + ": " + e.getMessage(), e);
     }
   }
 }
