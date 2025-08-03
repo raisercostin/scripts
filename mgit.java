@@ -5,17 +5,27 @@
 //DEPS org.fusesource.jansi:jansi:2.4.0
 //DEPS org.zeroturnaround:zt-exec:1.12
 //DEPS one.util:streamex:0.8.2
+//DEPS com.fasterxml.jackson.core:jackson-databind:2.17.1
+//DEPS com.fasterxml.jackson.core:jackson-annotations:2.17.1
 //SOURCES com/namekis/utils/RichLogback.java
 
 import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.namekis.utils.RichLogback;
 
 import one.util.streamex.StreamEx;
@@ -80,14 +90,15 @@ public class mgit {
 
   @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = """
       Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
-      """, subcommands = { CheckoutBranch.class, Status.class, Commit.class, Push.class }, sortOptions = false)
+      """, subcommands = { CheckoutBranch.class, Status.class, Commit.class, Push.class, Uprebase.class,
+      PrCreated.class, PrMerged.class }, sortOptions = false)
   public static class MgitRoot extends MGitCommon implements Runnable {
     static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
 
     @Override
     public void run() {
       RichLogback.configureLogbackByVerbosity(verbosity != null ? verbosity.length : 0, quiet, color);
-      System.out.println("Use a subcommand. Try: mgit status or mgit checkout -b <branch>");
+      new CommandLine(this).usage(System.out);
     }
   }
 
@@ -188,7 +199,18 @@ public class mgit {
         String header = String.format("%s%s/%s/#%s%s %s", blue, repo.getName(), rs.branch, rs.shortHash, reset, tags);
 
         System.out.println(rs.dirty ? header + "\n" + rs.dirtyFiles : header);
-
+        String prLink = getPrLink(repo, rs.branch);
+        if (prLink != null && !prLink.isBlank()) {
+          String prState = getPrState(repo, rs.branch);
+          System.out.print("  PR: " + prLink);
+          if (prState != null) {
+            System.out.print(" [" + prState.toUpperCase() + "]");
+            if ("merged".equalsIgnoreCase(prState)) {
+              System.out.print(" (local branch can be deleted, consider checking out default)");
+            }
+          }
+          System.out.println();
+        }
         // Update counts
         if (rs.dirty) {
           counts.dirty++;
@@ -409,7 +431,7 @@ public class mgit {
     @Option(names = { "-am", "--message" }, required = true, description = "Commit message")
     String message;
 
-    final Logger log = LoggerFactory.getLogger(Commit.class);
+    final static Logger log = LoggerFactory.getLogger(Commit.class);
 
     @Override
     public Integer call() throws Exception {
@@ -478,8 +500,12 @@ public class mgit {
 
   @Command(name = "push", description = "Push current branch for all submodules. If branch is not tracked, will use 'git push -u origin <branch>'.")
   public static class Push extends MGitWritableCommon implements Callable<Integer> {
+    final static Logger log = LoggerFactory.getLogger(Push.class);
+    @Option(names = "--force-with-lease", description = "Force push with lease (git push --force-with-lease)")
+    private boolean forceWithLease;
 
-    final Logger log = LoggerFactory.getLogger(Push.class);
+    @Option(names = "--force", description = "Force push (git push --force). Use with caution.")
+    private boolean force;
 
     @Override
     public Integer call() throws Exception {
@@ -505,10 +531,27 @@ public class mgit {
         }
         boolean hasUpstream = hasUpstream(repo, branch);
 
-        List<String> cmd = hasUpstream ? List.of("push") : List.of("push", "-u", "origin", branch);
-
+        List<String> cmd;
+        if (hasUpstream) {
+          cmd = new ArrayList<>(List.of("push"));
+        } else {
+          cmd = new ArrayList<>(List.of("push", "-u", "origin", branch));
+        }
+        if (forceWithLease) {
+          cmd.add("--force-with-lease");
+        } else if (force) {
+          cmd.add("--force");
+        }
         try {
-          runGitCommand("push", repo, cmd.toArray(new String[0]));
+          String pushOutput = runGitCommand("push", repo, cmd.toArray(new String[0]));
+          // Detect PR link
+          Pattern prLinkPattern = Pattern.compile("https?://[^\\s]+/pull-requests\\?[^\\s]+");
+          Matcher m = prLinkPattern.matcher(pushOutput);
+          if (m.find()) {
+            String url = m.group();
+            setPrLink(repo, branch, url);
+            System.out.printf("\u001B[36m[%s] PR link: %s\u001B[0m%n", repo.getName(), url);
+          }
           System.out.printf("\u001B[32m[%s] pushed (%s)%s\u001B[0m%n", repo.getName(), branch,
               hasUpstream ? "" : " [set-upstream]");
           pushed++;
@@ -559,7 +602,9 @@ public class mgit {
     try {
       org.zeroturnaround.exec.ProcessExecutor proc = new org.zeroturnaround.exec.ProcessExecutor().command(cmdList)
           .readOutput(true).exitValueNormal();
-      return proc.execute().outputUTF8().trim();
+      String output = proc.execute().outputUTF8().trim();
+      log.debug("output {}:\n{}", operation, output);
+      return output;
     } catch (Exception e) {
       throw new RuntimeException("Failed on %s: [%s] %s".formatted(operation, printableCmd, e.getMessage()), e);
     }
@@ -647,4 +692,203 @@ public class mgit {
     return rs;
   }
 
+  @Command(name = "uprebase", description = "Fetch and rebase current branch on remote, print the push command.")
+  private static class Uprebase extends MGitWritableCommon implements Callable<Integer> {
+    private final Logger log = LoggerFactory.getLogger(Uprebase.class);
+    @Option(names = "--force-rebase", description = "Force rebase all commits (--no-ff). Rewrites all commit hashes.")
+    private boolean forceRebase;
+
+    @Override
+    public Integer call() throws Exception {
+      RichLogback.configureLogbackByVerbosity(verbosity != null ? verbosity.length : 0, quiet, color);
+      List<File> repoDirs = findRepos();
+      if (repoDirs.isEmpty()) {
+        log.warn("No repos found.");
+        return 1;
+      }
+      int rebased = 0, failed = 0;
+      for (File repo : repoDirs) {
+        String branch = getCurrentBranch(repo);
+        if (branch == null) {
+          log.warn("Repo '{}' is in detached HEAD, skipping.", repo.getName());
+          continue;
+        }
+        try {
+          runGitCommand("fetch", repo, "fetch", "origin");
+          String defaultBranch = getRemoteDefaultBranch(repo);
+          List<String> rebaseCmd = new ArrayList<>(List.of("rebase", "--autostash"));
+          if (forceRebase) {
+            rebaseCmd.add("--force-rebase");
+          }
+          rebaseCmd.add("origin/" + defaultBranch);
+          runGitCommand("rebase", repo, rebaseCmd.toArray(new String[0]));
+          String pushCmd = "git -C " + repo.getAbsolutePath() + " push --force-with-lease";
+          System.out.printf("\u001B[32m[%s] rebase OK. To push: %s\u001B[0m%n", repo.getName(), pushCmd);
+          rebased++;
+        } catch (Exception ex) {
+          log.error("Rebase failed in '{}': {}", repo.getName(), ex.getMessage());
+          System.out.printf("\u001B[31m[%s] rebase FAILED. Resolve manually\u001B[0m%n", repo.getName());
+          failed++;
+        }
+      }
+      log.info("Rebased: {}, Failed: {}", rebased, failed);
+      return failed > 0 ? 1 : 0;
+    }
+  }
+
+  private static String getRemoteDefaultBranch(File repo) {
+    String ref = runGitCommand("defaultBranch", repo, "symbolic-ref", "refs/remotes/origin/HEAD");
+    final String prefix = "refs/remotes/origin/";
+    return ref.startsWith(prefix) ? ref.substring(prefix.length()) : ref;
+  }
+
+  private static void setPrLink(File repo, String branch, String url) {
+    runGitConfig(repo, "mgit.pr." + configKeyBranch(branch) + ".link", url);
+  }
+
+  private static String getPrLink(File repo, String branch) {
+    return runGitConfig(repo, "--get", "mgit.pr." + configKeyBranch(branch) + ".link", null);
+  }
+
+  private static void removePrLink(File repo, String branch) {
+    runGitConfig(repo, "--unset", "mgit.pr." + configKeyBranch(branch) + ".link", null);
+  }
+
+  private static void setPrState(File repo, String branch, String state) {
+    runGitConfig(repo, "mgit.pr." + configKeyBranch(branch) + ".state", state);
+  }
+
+  private static String getPrState(File repo, String branch) {
+    return runGitConfig(repo, "--get", "mgit.pr." + configKeyBranch(branch) + ".state", null);
+  }
+
+  private static void removePrState(File repo, String branch) {
+    runGitConfig(repo, "--unset", "mgit.pr." + configKeyBranch(branch) + ".state", null);
+  }
+
+  private static List<String> listPrLinks(File repo) {
+    String out = runGitConfig(repo, "--get-regexp", "^mgit\\.prLink\\.", null);
+    if (out == null || out.isBlank())
+      return List.of();
+    return StreamEx.of(out.split("\\r?\\n")).toList();
+  }
+
+  private static List<String> listPrStates(File repo) {
+    String out = runGitConfig(repo, "--get-regexp", "^mgit\\.pr\\..*\\.state", null);
+    if (out == null || out.isBlank())
+      return List.of();
+    return StreamEx.of(out.split("\\r?\\n")).toList();
+  }
+
+  // Internal method to run git config
+  private static String runGitConfig(File repo, String... args) {
+    List<String> cmd = new ArrayList<>();
+    cmd.add("git");
+    cmd.add("-C");
+    cmd.add(repo.getAbsolutePath());
+    cmd.add("config");
+    cmd.add("--local");
+    for (String s : args)
+      if (s != null)
+        cmd.add(s);
+    log.info("run git-config: {}", String.join(" ", cmd));
+    try {
+      org.zeroturnaround.exec.ProcessExecutor proc = new org.zeroturnaround.exec.ProcessExecutor().command(cmd)
+          .readOutput(true).exitValues(0, 1); // exit 1 for unset/get if key not present
+      String output = proc.execute().outputUTF8().trim();
+      log.debug("git-config output:\n{}", output);
+      return output;
+    } catch (Exception e) {
+      log.debug("git-config failed: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  private static String configKeyBranch(String branch) {
+    return branch.replaceAll("[^a-zA-Z0-9]+", "-").replaceAll("^-+|-+$", "").toLowerCase();
+  }
+
+  @Command(name = "pr-created", description = "Mark PR as created for branch")
+  private static class PrCreated extends MGitWritableCommon implements Callable<Integer> {
+    @Option(names = "--branch", required = true, description = "Branch to mark")
+    String branch;
+
+    @Override
+    public Integer call() throws Exception {
+      List<File> repos = findRepos();
+      for (File repo : repos) {
+        setPrState(repo, branch, "created");
+        System.out.printf("[%s] PR state set to CREATED for branch %s%n", repo.getName(), branch);
+      }
+      return 0;
+    }
+  }
+
+  @Command(name = "pr-merged", description = "Mark PR as merged for branch")
+  private static class PrMerged extends MGitWritableCommon implements Callable<Integer> {
+    @Option(names = "--branch", required = true, description = "Branch to mark")
+    String branch;
+
+    @Override
+    public Integer call() throws Exception {
+      List<File> repos = findRepos();
+      for (File repo : repos) {
+        setPrState(repo, branch, "merged");
+        // Optionally: delete PR link
+        removePrLink(repo, branch);
+        System.out.printf("[%s] PR state set to MERGED for branch %s%n", repo.getName(), branch);
+      }
+      return 0;
+    }
+  }
+
+  private static boolean remoteBranchExists(File repo, String branch) {
+    String remoteBranch = branch;
+    if (!branch.startsWith("origin/")) {
+      remoteBranch = "origin/" + branch;
+    }
+    String out = runGitCommand("ls-remote", repo, "ls-remote", "--heads", "origin", remoteBranch);
+    return out != null && !out.isBlank();
+  }
+
+  @Command(name = "fetch", description = "Fetch all remotes for repos, and auto-merge PR state if remote branch is deleted")
+  private static class Fetch extends MGitCommon implements Callable<Integer> {
+
+    final Logger log = LoggerFactory.getLogger(Fetch.class);
+
+    @Override
+    public Integer call() throws Exception {
+      RichLogback.configureLogbackByVerbosity(verbosity != null ? verbosity.length : 0, quiet, color);
+      List<File> repoDirs = findRepos();
+      int fetched = 0, errors = 0;
+      for (File repo : repoDirs) {
+        try {
+          runGitCommand("fetch", repo, "fetch", "origin");
+          System.out.printf("\u001B[32m[%s] fetched\u001B[0m%n", repo.getName());
+          // After fetch, check PR states
+          List<String> prStates = listPrStates(repo);
+          for (String entry : prStates) {
+            String[] parts = entry.split("\\s+", 2);
+            if (parts.length < 2)
+              continue;
+            String key = parts[0], state = parts[1];
+            if (!"created".equalsIgnoreCase(state))
+              continue;
+            String branch = key.substring("mgit.prState.".length()).replace("__", "/");
+            if (!remoteBranchExists(repo, branch)) {
+              setPrState(repo, branch, "merged");
+              System.out.printf("[%s] PR branch %s is gone from remote; state set to MERGED.%n", repo.getName(),
+                  branch);
+            }
+          }
+          fetched++;
+        } catch (Exception ex) {
+          log.error("Fetch failed in '{}': {}", repo.getName(), ex.getMessage());
+          errors++;
+        }
+      }
+      log.info("Fetched: {}, Errors: {}", fetched, errors);
+      return errors > 0 ? 1 : 0;
+    }
+  }
 }
