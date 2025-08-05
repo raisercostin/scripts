@@ -86,12 +86,12 @@ public class mvn2gradle {
         between submodules and generates eclipse project files
 
       """)
-  private static class Cli implements Callable<Integer> {
+  public static class Cli implements Callable<Integer> {
     @CommandLine.Parameters(index = "0", description = "Directory containing pom.xml")
-    private File projectDir;
+    public File projectDir;
 
     @CommandLine.Option(names = { "--ignore-unknown" }, description = "Ignore unknown XML fields")
-    boolean ignoreUnknown = false;
+    public boolean ignoreUnknown = false;
 
     @Option(names = "--use-effective-pom", description = "Use mvn help:effective-pom")
     public boolean useEffectivePom = true;
@@ -100,13 +100,13 @@ public class mvn2gradle {
     public boolean usePomInheritance = true;
 
     @Option(names = "--inline-versions", description = "Inline dependency versions instead of using val variables")
-    boolean inlineVersions = false;
+    public boolean inlineVersions = false;
 
     @Option(names = "--maven-compatible", description = "Generate settings.gradle.kts compatible with Maven:\n - generate inside target/gradle")
-    boolean mavenCompatible = true;
+    public boolean mavenCompatible = true;
 
     @Option(names = "--ignore-unknown-versions", description = "Ignore unknown dependencies versions (useful in debug)", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
-    boolean ignoreUnknownVersions = false;
+    public boolean ignoreUnknownVersions = false;
 
     @Option(names = "--ignore-unknown-java-version", description = "Ignore unknown Java version in pom.xml (useful in debug)", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
     public boolean ignoreUnknownJavaVersion = true;
@@ -149,7 +149,7 @@ public class mvn2gradle {
   }
 
   @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlRootElement(localName = "project")
-  private static class Project {
+  public static class Project {
     // --- Root attributes (namespace, schema) ---
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(isAttribute = true, localName = "xmlns")
     public String xmlns;
@@ -271,7 +271,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Gav {
+  public static class Gav {
     public String groupId;
     public String artifactId;
     public String version;
@@ -291,7 +291,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Licenses {
+  public static class Licenses {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "license")
     public java.util.List<License> license;
@@ -300,7 +300,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class License {
+  public static class License {
     public String name;
     public String url;
     public String distribution;
@@ -310,7 +310,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Developers {
+  public static class Developers {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "developer")
     public java.util.List<Developer> developer;
@@ -319,7 +319,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Developer {
+  public static class Developer {
     public String id;
     public String name;
     public String email;
@@ -333,7 +333,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Contributors {
+  public static class Contributors {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "contributor")
     public List<Contributor> contributor;
@@ -342,7 +342,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Contributor {
+  public static class Contributor {
     public String name;
     public String email;
     public String url;
@@ -355,7 +355,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class MailingLists {
+  public static class MailingLists {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "mailingList")
     public List<MailingList> mailingList;
@@ -364,7 +364,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class MailingList {
+  public static class MailingList {
     public String name;
     public String subscribe;
     public String unsubscribe;
@@ -377,14 +377,14 @@ public class mvn2gradle {
     }
   }
 
-  private static class Prerequisites {
+  public static class Prerequisites {
     public String maven;
 
     private Prerequisites() {
     }
   }
 
-  private static class CiManagement {
+  public static class CiManagement {
     public String system;
     public String url;
 
@@ -392,7 +392,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Scm {
+  public static class Scm {
     public String connection;
     public String developerConnection;
     public String url;
@@ -402,7 +402,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class IssueManagement {
+  public static class IssueManagement {
     public String system;
     public String url;
 
@@ -410,7 +410,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class DistributionManagement {
+  public static class DistributionManagement {
     public DeploymentRepository repository;
     public DeploymentRepository snapshotRepository;
     public String site;
@@ -419,7 +419,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class DeploymentRepository {
+  public static class DeploymentRepository {
     public String id;
     public String name;
     public String url;
@@ -434,7 +434,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Organization {
+  public static class Organization {
     public String name;
     public String url;
 
@@ -442,14 +442,14 @@ public class mvn2gradle {
     }
   }
 
-  private static class DependencyManagement {
+  public static class DependencyManagement {
     public Dependencies dependencies;
 
     private DependencyManagement() {
     }
   }
 
-  private static class Dependencies {
+  public static class Dependencies {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "dependency")
     public java.util.List<Dependency> dependency;
@@ -458,7 +458,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Dependency {
+  public static class Dependency {
     public String groupId;
     public String artifactId;
     public String version;
@@ -478,7 +478,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Exclusions {
+  public static class Exclusions {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "exclusion")
     public java.util.List<Exclusion> exclusion;
@@ -487,7 +487,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Exclusion {
+  public static class Exclusion {
     public String groupId;
     public String artifactId;
 
@@ -495,7 +495,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Properties {
+  public static class Properties {
     @com.fasterxml.jackson.annotation.JsonAnySetter
     public java.util.TreeMap<String, String> any = new java.util.TreeMap<>();
 
@@ -503,7 +503,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Build {
+  public static class Build {
     public String finalName;
     public String sourceDirectory;
     public String testSourceDirectory;
@@ -524,7 +524,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Resources {
+  public static class Resources {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "resource")
     public java.util.List<Resource> resource;
@@ -533,7 +533,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class TestResources {
+  public static class TestResources {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "testResource")
     public java.util.List<Resource> testResource;
@@ -542,7 +542,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Resource {
+  public static class Resource {
     public String directory;
     public String targetPath;
     public Boolean filtering;
@@ -554,7 +554,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Includes {
+  public static class Includes {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<String> include;
 
@@ -562,7 +562,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Excludes {
+  public static class Excludes {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<String> exclude;
 
@@ -570,14 +570,14 @@ public class mvn2gradle {
     }
   }
 
-  private static class PluginManagement {
+  public static class PluginManagement {
     public Plugins plugins;
 
     private PluginManagement() {
     }
   }
 
-  private static class Plugins {
+  public static class Plugins {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "plugin")
     public java.util.List<Plugin> plugin;
@@ -586,7 +586,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Plugin {
+  public static class Plugin {
     public String groupId;
     public String artifactId;
     public String version;
@@ -608,7 +608,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class PluginConfiguration {
+  public static class PluginConfiguration {
     // maven-compiler-plugin - properties
     public String source;
     public String target;
@@ -631,7 +631,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Executions {
+  public static class Executions {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "execution")
     public java.util.List<Execution> execution;
@@ -640,7 +640,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Execution {
+  public static class Execution {
     public String id;
     public String phase;
     public Goals goals;
@@ -651,7 +651,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Goals {
+  public static class Goals {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "goal")
     public java.util.List<String> goal;
@@ -660,7 +660,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Modules {
+  public static class Modules {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "module")
     public java.util.List<String> module;
@@ -669,7 +669,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Repositories {
+  public static class Repositories {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "repository")
     public java.util.List<Repository> repository;
@@ -678,7 +678,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Repository {
+  public static class Repository {
     public String id;
     public String name;
     public String url;
@@ -690,7 +690,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class PluginRepositories {
+  public static class PluginRepositories {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<PluginRepository> pluginRepository;
 
@@ -698,7 +698,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class PluginRepository {
+  public static class PluginRepository {
     public String id;
     public String name;
     public String url;
@@ -710,7 +710,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class RepositoryPolicy {
+  public static class RepositoryPolicy {
     public String enabled;
     public String updatePolicy;
     public String checksumPolicy;
@@ -719,7 +719,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Extensions {
+  public static class Extensions {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<Extension> extension;
 
@@ -727,7 +727,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Extension {
+  public static class Extension {
     public String groupId;
     public String artifactId;
     public String version;
@@ -736,7 +736,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Reporting {
+  public static class Reporting {
     public Boolean excludeDefaults;
     public String outputDirectory;
     public ReportPlugins plugins;
@@ -745,7 +745,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ReportPlugins {
+  public static class ReportPlugins {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<ReportPlugin> plugin;
 
@@ -753,7 +753,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ReportPlugin {
+  public static class ReportPlugin {
     public String groupId;
     public String artifactId;
     public String version;
@@ -765,7 +765,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ReportPluginExecutions {
+  public static class ReportPluginExecutions {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<ReportPluginExecution> execution;
 
@@ -773,7 +773,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ReportPluginExecution {
+  public static class ReportPluginExecution {
     public String id;
     public String phase;
     public String goals; // can be a list in some schemas
@@ -783,7 +783,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ReportPluginConfiguration {
+  public static class ReportPluginConfiguration {
     private java.util.Map<String, Object> any = new java.util.HashMap<>();
 
     @JsonAnySetter
@@ -799,7 +799,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ReportSets {
+  public static class ReportSets {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<ReportSet> reportSet;
 
@@ -807,7 +807,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ReportSet {
+  public static class ReportSet {
     public String id;
     public Reports reports;
     public String inherited; // "true"/"false"
@@ -818,7 +818,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Reports {
+  public static class Reports {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<String> report;
 
@@ -826,7 +826,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Profiles {
+  public static class Profiles {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     public java.util.List<Profile> profile;
 
@@ -834,7 +834,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Profile {
+  public static class Profile {
     public String id;
     public Activation activation;
     public Properties properties;
@@ -854,7 +854,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class Activation {
+  public static class Activation {
     public ActivationProperty property;
     public String activeByDefault;
     public String jdk;
@@ -866,7 +866,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ActivationProperty {
+  public static class ActivationProperty {
     public String name;
     public String value;
 
@@ -874,7 +874,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ActivationOs {
+  public static class ActivationOs {
     public String name;
     public String family;
     public String arch;
@@ -884,7 +884,7 @@ public class mvn2gradle {
     }
   }
 
-  private static class ActivationFile {
+  public static class ActivationFile {
     public String exists;
     public String missing;
 
@@ -892,18 +892,18 @@ public class mvn2gradle {
     }
   }
 
-  private static class ActivationCustom {
+  public static class ActivationCustom {
     // Could contain scripts, etc.
     private ActivationCustom() {
     }
   }
 
-  private static class GradleKtsGenerator {
+  public static class GradleKtsGenerator {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(GradleKtsGenerator.class);
     private static final Map<String, PluginConvertor> pluginConversionRegistry = new HashMap<>();
 
     // Helper record/class
-    private static class PluginConvertor {
+    public static class PluginConvertor {
       private String mavenGroupAndArtifactId;
       public final String gradlePluginId;
       public final String gradlePluginVersion;
@@ -987,16 +987,17 @@ public class mvn2gradle {
               add("testArtifacts", tasks.named("testJar"))
           }
           """));
-//      register(
-//          new PluginConvertor("org.codehaus.mojo:build-helper-maven-plugin:add-source", null, null, (ctx, pom) -> """
-//              sourceSets {
-//                  main {
-//                      java {
-//                          srcDir("target/generated-sources/javacc")
-//                      }
-//                  }
-//              }
-//              """));
+      // register(
+      // new PluginConvertor("org.codehaus.mojo:build-helper-maven-plugin:add-source",
+      // null, null, (ctx, pom) -> """
+      // sourceSets {
+      // main {
+      // java {
+      // srcDir("target/generated-sources/javacc")
+      // }
+      // }
+      // }
+      // """));
       register(new PluginConvertor("org.antlr:antlr4-maven-plugin:antlr4", null, null, (ctx, pom) -> {
         String version = ctx.plugin.version != null ? ctx.plugin.version : "unknown";
         return """
@@ -1399,16 +1400,17 @@ public class mvn2gradle {
       String relPath = (pom.parentGav.relativePath == null || pom.parentGav.relativePath.isBlank()) ? "../pom.xml"
           : pom.parentGav.relativePath;
       relPath = relPath.endsWith("/pom.xml") ? relPath : relPath + "/pom.xml";
-//      File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
-//      if (parentPomFile != null && parentPomFile.exists()) {
-//        pom.parentPom = loadPom(root, null, parentPomFile, ignoreUnknown, effectivePom);
-//        if (pom.parentPom != null) {
-//          if (pom.groupId == null) {
-//            pom.groupId = pom.parentPom.groupId;
-//          }
-//        }
-//        checkIsSame(pom);
-//      }
+      // File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
+      // if (parentPomFile != null && parentPomFile.exists()) {
+      // pom.parentPom = loadPom(root, null, parentPomFile, ignoreUnknown,
+      // effectivePom);
+      // if (pom.parentPom != null) {
+      // if (pom.groupId == null) {
+      // pom.groupId = pom.parentPom.groupId;
+      // }
+      // }
+      // checkIsSame(pom);
+      // }
 
       try {
         String candidateKey = new File(projectDir, relPath).getCanonicalPath();
@@ -1574,7 +1576,8 @@ public class mvn2gradle {
               %s
               """,
           gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
-          "",//do not render local repositories - are configured in settings repositories("")
+          "", // do not render local repositories - are configured in settings
+              // repositories("")
           depResult.dependencyBlock, pluginConfigSnippets, excludesBlock);
     }
 
@@ -2102,7 +2105,7 @@ public class mvn2gradle {
       }
     }
 
-    private static void generateEffectivePom(File projectDir, Path effPomPath)
+    static void generateEffectivePom(File projectDir, Path effPomPath)
         throws IOException, InterruptedException, TimeoutException {
       String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
       int exit;
@@ -2165,7 +2168,7 @@ public class mvn2gradle {
       return propDefs.toString();
     }
 
-    private static class DependencyEmitResult {
+    public static class DependencyEmitResult {
       final String variableBlock;
       final String dependencyBlock;
       private boolean hasLombok;
@@ -2291,13 +2294,14 @@ public class mvn2gradle {
       return "implementation";
     }
   }
-  private static final String jbangVersion= "0.128.7";
+
+  private static final String jbangVersion = "0.128.7";
   private static final String jbangAndXjcPlugin = """
       val jbangVersion = "0.128.7"
       val jaxbVersion = "4.0.5"
       val outputPackage = "com.example.xbrl.generated"
       val outputDir = "target/generated-sources-jaxb"
-      
+
       val jbangZipUrl = "https://github.com/jbangdev/jbang/releases/download/v$jbangVersion/jbang-$jbangVersion.zip"
       val jbangToolsDir = layout.buildDirectory.get().asFile.resolve("tools")
       val jbangInstallDir = jbangToolsDir.resolve("jbang-$jbangVersion")
