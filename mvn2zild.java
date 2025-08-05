@@ -15,6 +15,7 @@
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -112,8 +113,6 @@ public class mvn2zild {
     return mvn2gradle.GradleKtsGenerator.loadPom(root, parentDirPom, projectDirOrPomFile, context);
   }
 
-  // --- Zild Model Section ---
-  // This would be imported from zild.java, but shown inline here for completeness
   public static class ZildSpec {
     public String name;
     public String group;
@@ -123,57 +122,29 @@ public class mvn2zild {
     public String url;
     public Map<String, String> properties = new HashMap<>();
     public List<ZildModule> modules = new ArrayList<>();
+    public List<String> dependencies = new ArrayList<>();
+    public List<String> repositories = new ArrayList<>();
+    public List<String> plugins = new ArrayList<>();
+    public Map<String, Object> extra = new HashMap<>();
   }
 
   public static class ZildModule {
     public String name;
     public String path;
-    public List<ZildStep> steps = new ArrayList<>();
+    public List<ZildTask> tasks = new ArrayList<>();
+    // If you want to support submodules: public ZildSpec module;
   }
 
-  public static class ZildStep {
-    public String name; // e.g. "compile", "generate-sources", "jar"
-    public List<String> inputs = new ArrayList<>(); // paths, globs
-    public List<String> outputs = new ArrayList<>(); // paths, globs
-    public List<ZildEdge> edges = new ArrayList<>(); // links to other modules’ outputs if needed
-  }
-
-  public static class ZildEdge {
-    public String fromModule;
-    public String fromStep;
-    public String outputPath;
-    public String toInputPath;
-  }
-
-  public static class ZildDependency {
-    public String group;
+  public static class ZildTask {
     public String name;
-    public String version;
-    public String scope;
-    public String type;
-    public String classifier;
-    public boolean optional;
-    public List<ZildExclusion> exclusions = new ArrayList<>();
-  }
-
-  public static class ZildExclusion {
-    public String group;
-    public String name;
-  }
-
-  public static class ZildRepository {
-    public String id;
-    public String url;
-    public String type;
-  }
-
-  public static class ZildPlugin {
-    public String id;
-    public String group;
-    public String artifact;
-    public String version;
-    public Map<String, Object> config = new LinkedHashMap<>();
-    public List<String> goals = new ArrayList<>();
+    public String description;
+    public String process; // e.g. "javac", "jar", "copy", or null for a group
+    public List<String> inputs = new ArrayList<>();
+    public List<String> outputs = new ArrayList<>();
+    public Map<String, Object> options = new HashMap<>();
+    public List<ZildTask> tasks = new ArrayList<>(); // Nested
+    public String ref; // Reference to external/inherited execution
+    public String importFile; // Import subtree from external file
   }
 
   public static ZildSpec fromPom(mvn2gradle.Project rootPom, mvn2gradle.Projects effectivePom, boolean recursive) {
@@ -192,131 +163,200 @@ public class mvn2zild {
     for (var entry : allModules.entrySet()) {
       String dir = entry.getKey();
       mvn2gradle.Project mod = entry.getValue();
+
       ZildModule zm = new ZildModule();
       zm.name = mod.artifactId;
       zm.path = dir;
+      zm.tasks = new ArrayList<>();
 
-      Map<String, ZildStep> stepsByGoal = new LinkedHashMap<>();
-
-      // --- 1. Standard Maven goals for Java modules ---
       // Compile
-      if (isJavaModule(mod)) {
-        ZildStep compile = new ZildStep();
+      {
+        ZildTask compile = new ZildTask();
         compile.name = "compile";
-        compile.inputs.add(dir + "/src/main/java");
-        // Include annotation-processed sources as input
-        compile.inputs.add(dir + "/target/generated-sources/annotations");
-        compile.outputs.add(dir + "/target/classes");
-        stepsByGoal.put(compile.name, compile);
-
-        // Test compile
-        ZildStep testCompile = new ZildStep();
-        testCompile.name = "test-compile";
-        testCompile.inputs.add(dir + "/src/test/java");
-        testCompile.inputs.add(dir + "/target/classes"); // depend on main
-        testCompile.inputs.add(dir + "/target/generated-test-sources/test-annotations");
-        testCompile.outputs.add(dir + "/target/test-classes");
-        stepsByGoal.put(testCompile.name, testCompile);
-
-        // Jar
-        ZildStep jar = new ZildStep();
-        jar.name = "jar";
-        jar.inputs.add(dir + "/target/classes");
-        jar.outputs.add(dir + "/target/" + mod.artifactId + "-" + mod.version + ".jar");
-        stepsByGoal.put(jar.name, jar);
-
-        // Test-jar
-        ZildStep testJar = new ZildStep();
-        testJar.name = "test-jar";
-        testJar.inputs.add(dir + "/target/test-classes");
-        testJar.outputs.add(dir + "/target/" + mod.artifactId + "-" + mod.version + "-tests.jar");
-        stepsByGoal.put(testJar.name, testJar);
-
-        // Process-resources
-        ZildStep res = new ZildStep();
-        res.name = "process-resources";
-        res.inputs.add(dir + "/src/main/resources");
-        res.outputs.add(dir + "/target/classes"); // usually merged to classes
-        stepsByGoal.put(res.name, res);
+        compile.process = "javac";
+        compile.inputs = Arrays.asList(dir + "/src/main/java", dir + "/target/generated-sources/annotations" // or from
+                                                                                                             // annotation
+                                                                                                             // processors
+        );
+        compile.outputs = List.of(dir + "/target/classes");
+        zm.tasks.add(compile);
       }
 
-      // --- 2. Generated sources & annotation processors ---
-      // Generated sources (from plugins)
-      if (mod.build != null && mod.build.plugins != null && mod.build.plugins.plugin != null) {
-        for (var plugin : mod.build.plugins.plugin) {
-          if ("org.antlr".equals(plugin.groupId) && "antlr4-maven-plugin".equals(plugin.artifactId)) {
-            ZildStep antlr = new ZildStep();
-            antlr.name = "generate-antlr";
-            antlr.inputs.add(dir + "/src/main/antlr4");
-            antlr.outputs.add(dir + "/target/generated-sources/antlr4");
-            stepsByGoal.put(antlr.name, antlr);
-            // Compile must depend on this
-            stepsByGoal.getOrDefault("compile", null).inputs.add(dir + "/target/generated-sources/antlr4");
+      // Test-compile
+      {
+        ZildTask testCompile = new ZildTask();
+        testCompile.name = "test-compile";
+        testCompile.process = "javac";
+        testCompile.inputs = Arrays.asList(dir + "/src/test/java", dir + "/target/classes",
+            dir + "/target/generated-test-sources/test-annotations");
+        testCompile.outputs = List.of(dir + "/target/test-classes");
+        zm.tasks.add(testCompile);
+      }
+
+      // Jar
+      {
+        ZildTask jarExec = new ZildTask();
+        jarExec.name = "jar";
+        jarExec.process = "jar";
+        jarExec.inputs = List.of(dir + "/target/classes");
+        jarExec.outputs = List
+            .of(dir + "/target/" + mod.artifactId + "-" + (mod.version != null ? mod.version : "SNAPSHOT") + ".jar");
+        zm.tasks.add(jarExec);
+      }
+
+      // Test-jar (if needed)
+      if (hasTestJar(mod)) {
+        ZildTask testJar = new ZildTask();
+        testJar.name = "test-jar";
+        testJar.process = "jar";
+        testJar.inputs = List.of(dir + "/target/test-classes");
+        testJar.outputs = List.of(
+            dir + "/target/" + mod.artifactId + "-" + (mod.version != null ? mod.version : "SNAPSHOT") + "-tests.jar");
+        zm.tasks.add(testJar);
+      }
+
+      // Process-resources
+      if (exists(dir + "/src/main/resources")) {
+        ZildTask procRes = new ZildTask();
+        procRes.name = "process-resources";
+        procRes.process = "copy";
+        procRes.inputs = List.of(dir + "/src/main/resources");
+        procRes.outputs = List.of(dir + "/target/classes");
+        zm.tasks.add(procRes);
+      }
+
+      // Generate annotations (if APs used)
+      if (usesAnnotationProcessing(mod)) {
+        ZildTask apGen = new ZildTask();
+        apGen.name = "generate-annotations";
+        apGen.process = "annotation-processor";
+        apGen.inputs = List.of(dir + "/src/main/java");
+        apGen.outputs = List.of(dir + "/target/generated-sources/annotations");
+        zm.tasks.add(apGen);
+      }
+
+      // Submodule dependencies: refer by <module>.<execution>.outputs
+      for (var dep : safeList(mod.dependencies != null ? mod.dependencies.dependency : null)) {
+        String depGA = dep.groupId + ":" + dep.artifactId;
+        for (var mEntry : allModules.entrySet()) {
+          mvn2gradle.Project cand = mEntry.getValue();
+          if (dep.groupId.equals(cand.groupId) && dep.artifactId.equals(cand.artifactId)) {
+            if (!mEntry.getKey().equals(dir)) {
+              // Find the correct execution name, typically "jar"
+              // For example: core.jar.outputs, api.test-jar.outputs, etc.
+              // You may want to add a synthetic execution for "compile" (classes dir)
+              // Below: add a pseudo-input to 'compile' execution as an example
+              zm.tasks.stream().filter(exec -> exec.name.equals("compile")).findFirst()
+                  .ifPresent(exec -> exec.inputs.add(cand.artifactId + ".jar.outputs"));
+            }
           }
-          if ("org.apache.maven.plugins".equals(plugin.groupId) && "maven-compiler-plugin".equals(plugin.artifactId)) {
-            // Annotation processors
-            ZildStep ap = new ZildStep();
-            ap.name = "generate-annotations";
-            ap.inputs.add(dir + "/src/main/java");
-            ap.outputs.add(dir + "/target/generated-sources/annotations");
-            stepsByGoal.put(ap.name, ap);
-            // Compile must depend on this
-            stepsByGoal.getOrDefault("compile", null).inputs.add(dir + "/target/generated-sources/annotations");
-          }
-          if ("org.jvnet.jaxb".equals(plugin.groupId) && "jaxb-maven-plugin".equals(plugin.artifactId)) {
-            ZildStep jaxb = new ZildStep();
-            jaxb.name = "generate-jaxb";
-            jaxb.inputs.add(dir + "/src/main/resources"); // default, update if needed
-            jaxb.outputs.add(dir + "/target/generated-sources/jaxb");
-            stepsByGoal.put(jaxb.name, jaxb);
-            stepsByGoal.getOrDefault("compile", null).inputs.add(dir + "/target/generated-sources/jaxb");
-          }
-          // Add more plugin-based steps as needed (mapstruct, javacc, etc)
         }
       }
+      zs.modules.add(zm);
+    }
+    return zs;
+  }
 
-      // --- 3. Inter-module edges (submodule dependencies only, not external libs)
-      // ---
-      if (mod.dependencies != null && mod.dependencies.dependency != null) {
-        for (var dep : mod.dependencies.dependency) {
-          String depGA = dep.groupId + ":" + dep.artifactId;
-          for (var mEntry : allModules.entrySet()) {
-            mvn2gradle.Project cand = mEntry.getValue();
-            if (dep.groupId.equals(cand.groupId) && dep.artifactId.equals(cand.artifactId)) {
-              if (!mEntry.getKey().equals(dir)) {
-                // This is a submodule dependency: create a hyperedge from their jar/test-jar to
-                // our inputs
-                // By Maven convention, main jar goes to compile, test-jar goes to test-compile
-                String depModulePath = mEntry.getKey();
-                if (stepsByGoal.containsKey("compile")) {
-                  ZildEdge edge = new ZildEdge();
-                  edge.fromModule = depModulePath;
-                  edge.fromStep = "jar";
-                  edge.outputPath = depModulePath + "/target/" + cand.artifactId + "-" + cand.version + ".jar";
-                  edge.toInputPath = dir + "/lib"; // or custom path
-                  stepsByGoal.get("compile").edges.add(edge);
-                  stepsByGoal.get("compile").inputs.add(edge.outputPath);
-                }
-                if (stepsByGoal.containsKey("test-compile")) {
-                  ZildEdge edge = new ZildEdge();
-                  edge.fromModule = depModulePath;
-                  edge.fromStep = "test-jar";
-                  edge.outputPath = depModulePath + "/target/" + cand.artifactId + "-" + cand.version + "-tests.jar";
-                  edge.toInputPath = dir + "/lib-test";
-                  stepsByGoal.get("test-compile").edges.add(edge);
-                  stepsByGoal.get("test-compile").inputs.add(edge.outputPath);
+//Returns true if module has <packaging>jar</packaging> and test-jar goal or plugin configured
+  public static boolean hasTestJar(mvn2gradle.Project mod) {
+    if (mod.packaging != null && mod.packaging.equals("pom"))
+      return false;
+    // Look for maven-jar-plugin <goal>test-jar</goal>
+    if (mod.build != null && mod.build.plugins != null && mod.build.plugins.plugin != null) {
+      for (mvn2gradle.Plugin plugin : mod.build.plugins.plugin) {
+        if ("maven-jar-plugin".equals(plugin.artifactId)) {
+          if (plugin.executions != null && plugin.executions.execution != null) {
+            for (mvn2gradle.Execution exec : plugin.executions.execution) {
+              if (exec.goals != null && exec.goals.goal != null) {
+                for (String goal : exec.goals.goal) {
+                  if ("test-jar".equals(goal))
+                    return true;
                 }
               }
             }
           }
         }
       }
-
-      // --- 4. Add all steps to module ---
-      zm.steps.addAll(stepsByGoal.values());
-      zs.modules.add(zm);
     }
-    return zs;
+    return false;
+  }
+
+  public static boolean hasSourcesJar(mvn2gradle.Project mod) {
+    if (mod.packaging != null && mod.packaging.equals("pom"))
+      return false;
+    // Look for maven-source-plugin goal "jar"
+    if (mod.build != null && mod.build.plugins != null && mod.build.plugins.plugin != null) {
+      for (mvn2gradle.Plugin plugin : mod.build.plugins.plugin) {
+        if ("maven-source-plugin".equals(plugin.artifactId)) {
+          if (plugin.executions != null && plugin.executions.execution != null) {
+            for (mvn2gradle.Execution exec : plugin.executions.execution) {
+              if (exec.goals != null && exec.goals.goal != null) {
+                for (String goal : exec.goals.goal) {
+                  if ("jar".equals(goal))
+                    return true;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  public static boolean hasJavadocJar(mvn2gradle.Project mod) {
+    if (mod.packaging != null && mod.packaging.equals("pom"))
+      return false;
+    // Look for maven-javadoc-plugin goal "jar"
+    if (mod.build != null && mod.build.plugins != null && mod.build.plugins.plugin != null) {
+      for (mvn2gradle.Plugin plugin : mod.build.plugins.plugin) {
+        if ("maven-javadoc-plugin".equals(plugin.artifactId)) {
+          if (plugin.executions != null && plugin.executions.execution != null) {
+            for (mvn2gradle.Execution exec : plugin.executions.execution) {
+              if (exec.goals != null && exec.goals.goal != null) {
+                for (String goal : exec.goals.goal) {
+                  if ("jar".equals(goal))
+                    return true;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+//Checks if a file or directory exists
+  public static boolean exists(String path) {
+    return new java.io.File(path).exists();
+  }
+
+//Null-safe list iteration: returns an empty list if input is null
+  public static <T> java.util.List<T> safeList(java.util.List<T> in) {
+    return in == null ? java.util.Collections.emptyList() : in;
+  }
+
+//Checks if module uses annotation processing (checks for maven-compiler-plugin configuration or annotationProcessorPaths)
+  public static boolean usesAnnotationProcessing(mvn2gradle.Project mod) {
+    if (mod.build != null && mod.build.plugins != null && mod.build.plugins.plugin != null) {
+      for (mvn2gradle.Plugin plugin : mod.build.plugins.plugin) {
+        if ("maven-compiler-plugin".equals(plugin.artifactId)) {
+          // Check configuration: <annotationProcessorPaths> or <compilerArgs> with
+          // -processor
+          if (plugin.configuration != null) {
+            if (plugin.configuration.any.containsKey("annotationProcessorPaths")) {
+              return true;
+            }
+            Object args = plugin.configuration.any.get("compilerArgs");
+            if (args != null && args.toString().contains("-processor")) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+    return false;
   }
 
 // Helper: is this a Java module? (you can expand this as needed)

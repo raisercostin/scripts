@@ -1,0 +1,12 @@
+tasks:
+  - name: release-prepare
+    process: "maven-release-plugin:prepare"
+    description: "Prepares the project for a release (checks, tag, versions)."
+    inputs: [ "." ]
+    outputs: [ "release-prepare-info", "release.properties", "scm-tag" ]
+
+  - name: release-perform
+    process: "maven-release-plugin:perform"
+    description: "Performs the release (build, deploy, etc)."
+    inputs: [ "release.properties", "scm-tag" ]
+    outputs: [ "released-artifacts", "release.log" ]

@@ -1,0 +1,66 @@
+tasks:
+  - name: "clean"
+    process: "gradle:delete"
+    description: "Removes build directory."
+    inputs: [ "." ]
+    outputs: [ "build/" ]
+
+  - name: "compileJava"
+    process: "gradle:compileJava"
+    description: "Compiles Java sources."
+    inputs: [ "src/main/java", "src/main/kotlin", "build/generated/sources/annotationProcessor/java/main" ]
+    outputs: [ "build/classes/java/main" ]
+
+  - name: "processResources"
+    process: "gradle:processResources"
+    description: "Processes resources."
+    inputs: [ "src/main/resources" ]
+    outputs: [ "build/resources/main" ]
+
+  - name: "compileTestJava"
+    process: "gradle:compileTestJava"
+    description: "Compiles test sources."
+    inputs: [ "src/test/java", "build/classes/java/main" ]
+    outputs: [ "build/classes/java/test" ]
+
+  - name: "processTestResources"
+    process: "gradle:processTestResources"
+    description: "Processes test resources."
+    inputs: [ "src/test/resources" ]
+    outputs: [ "build/resources/test" ]
+
+  - name: "test"
+    process: "gradle:test"
+    description: "Runs unit tests."
+    inputs: [ "build/classes/java/test" ]
+    outputs: [ "build/test-results/test" ]
+
+  - name: "jar"
+    process: "gradle:jar"
+    description: "Packages main JAR."
+    inputs: [ "build/classes/java/main", "build/resources/main" ]
+    outputs: [ "build/libs/${project.name}.jar" ]
+
+  - name: "sourcesJar"
+    process: "gradle:sourcesJar"
+    description: "Packages sources JAR."
+    inputs: [ "src/main/java" ]
+    outputs: [ "build/libs/${project.name}-sources.jar" ]
+
+  - name: "javadocJar"
+    process: "gradle:javadocJar"
+    description: "Packages Javadoc JAR."
+    inputs: [ "build/docs/javadoc" ]
+    outputs: [ "build/libs/${project.name}-javadoc.jar" ]
+
+  - name: "publishToMavenLocal"
+    process: "gradle:publishToMavenLocal"
+    description: "Publishes to local Maven repo."
+    inputs: [ "build/libs/${project.name}.jar" ]
+    outputs: [ "~/.m2/repository" ]
+
+  - name: "publish"
+    process: "gradle:publish"
+    description: "Publishes to remote repository."
+    inputs: [ "build/libs/${project.name}.jar" ]
+    outputs: [ "remote-repository" ]

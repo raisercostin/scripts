@@ -1,0 +1,129 @@
+groups:
+  - name: "validate"
+    tasks:
+      - name: "validate"
+        process: "maven:org.apache.maven.plugins:maven-enforcer-plugin:enforce"
+        description: "Checks prerequisites, enforces standards."
+        inputs: [ "." ]
+        outputs: [ "validate.log" ]
+
+  - name: "initialize"
+    tasks:
+      - name: "initialize"
+        process: "maven:org.codehaus.mojo:buildnumber-maven-plugin:create"
+        description: "Sets up build numbers, environment."
+        inputs: [ "." ]
+        outputs: [ "target/buildnumber.properties" ]
+
+  - name: "generate-sources"
+    tasks:
+      - name: "generate-sources"
+        process: "maven:org.codehaus.mojo:build-helper-maven-plugin:add-source"
+        description: "Adds extra source directories."
+        inputs: [ "src/main/java" ]
+        outputs: [ "target/generated-sources" ]
+      - name: "annotation-processing"
+        process: "maven:org.apache.maven.plugins:maven-compiler-plugin:process-annotations"
+        description: "Generates code from annotation processors."
+        inputs: [ "src/main/java" ]
+        outputs: [ "target/generated-sources/annotations" ]
+
+  - name: "process-resources"
+    tasks:
+      - name: "process-resources"
+        process: "maven:org.apache.maven.plugins:maven-resources-plugin:resources"
+        description: "Copies and filters resources."
+        inputs: [ "src/main/resources" ]
+        outputs: [ "target/classes" ]
+
+  - name: "compile"
+    tasks:
+      - name: "compile"
+        process: "maven:org.apache.maven.plugins:maven-compiler-plugin:compile"
+        description: "Compiles main sources."
+        inputs: [ "src/main/java", "target/generated-sources/annotations" ]
+        outputs: [ "target/classes" ]
+
+  - name: "process-test-resources"
+    tasks:
+      - name: "process-test-resources"
+        process: "maven:org.apache.maven.plugins:maven-resources-plugin:testResources"
+        description: "Processes test resources."
+        inputs: [ "src/test/resources" ]
+        outputs: [ "target/test-classes" ]
+
+  - name: "test-compile"
+    tasks:
+      - name: "test-compile"
+        process: "maven:org.apache.maven.plugins:maven-compiler-plugin:testCompile"
+        description: "Compiles test sources."
+        inputs: [ "src/test/java", "target/classes" ]
+        outputs: [ "target/test-classes" ]
+
+  - name: "test"
+    tasks:
+      - name: "test"
+        process: "maven:org.apache.maven.plugins:maven-surefire-plugin:test"
+        description: "Runs unit tests."
+        inputs: [ "target/test-classes" ]
+        outputs: [ "target/surefire-reports" ]
+
+  - name: "package"
+    tasks:
+      - name: "jar"
+        process: "maven:org.apache.maven.plugins:maven-jar-plugin:jar"
+        description: "Packages main JAR."
+        inputs: [ "target/classes" ]
+        outputs: [ "target/${project.artifactId}-${project.version}.jar" ]
+      - name: "test-jar"
+        process: "maven:org.apache.maven.plugins:maven-jar-plugin:test-jar"
+        description: "Packages test JAR."
+        inputs: [ "target/test-classes" ]
+        outputs: [ "target/${project.artifactId}-${project.version}-tests.jar" ]
+      - name: "sources-jar"
+        process: "maven:org.apache.maven.plugins:maven-source-plugin:jar"
+        description: "Packages sources JAR."
+        inputs: [ "src/main/java" ]
+        outputs: [ "target/${project.artifactId}-${project.version}-sources.jar" ]
+      - name: "javadoc-jar"
+        process: "maven:org.apache.maven.plugins:maven-javadoc-plugin:jar"
+        description: "Packages Javadoc JAR."
+        inputs: [ "src/main/java" ]
+        outputs: [ "target/${project.artifactId}-${project.version}-javadoc.jar" ]
+      - name: "shade"
+        process: "maven:org.apache.maven.plugins:maven-shade-plugin:shade"
+        description: "Builds an uber-jar."
+        inputs: [ "target/classes", "dependencies" ]
+        outputs: [ "target/${project.artifactId}-${project.version}-all.jar" ]
+
+  - name: "integration-test"
+    tasks:
+      - name: "integration-test"
+        process: "maven:org.apache.maven.plugins:maven-failsafe-plugin:integration-test"
+        description: "Runs integration tests."
+        inputs: [ "target/classes", "target/test-classes" ]
+        outputs: [ "target/failsafe-reports" ]
+
+  - name: "verify"
+    tasks:
+      - name: "verify"
+        process: "maven:org.apache.maven.plugins:maven-verifier-plugin:verify"
+        description: "Performs additional checks."
+        inputs: [ "." ]
+        outputs: [ "target/verify.log" ]
+
+  - name: "install"
+    tasks:
+      - name: "install"
+        process: "maven:org.apache.maven.plugins:maven-install-plugin:install"
+        description: "Installs artifact to local repo."
+        inputs: [ "target/${project.artifactId}-${project.version}.jar" ]
+        outputs: [ "~/.m2/repository" ]
+
+  - name: "deploy"
+    tasks:
+      - name: "deploy"
+        process: "maven:org.apache.maven.plugins:maven-deploy-plugin:deploy"
+        description: "Deploys artifact to remote repo."
+        inputs: [ "target/${project.artifactId}-${project.version}.jar" ]
+        outputs: [ "remote-repository" ]

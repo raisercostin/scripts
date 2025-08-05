@@ -1,0 +1,12 @@
+tasks:
+  - name: site
+    process: "maven-site-plugin:site"
+    description: "Generates the project site."
+    inputs: [ "src/site", "pom.xml", "target/classes" ]
+    outputs: [ "target/site" ]
+
+  - name: site-deploy
+    process: "maven-site-plugin:deploy"
+    description: "Deploys the site to the configured web server."
+    inputs: [ "target/site" ]
+    outputs: [ "site-deploy.log", "https://your.site.url/" ]
