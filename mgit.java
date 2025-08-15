@@ -10,12 +10,9 @@
 //SOURCES com/namekis/utils/RichLogback.java
 
 import java.io.File;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.io.IOException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.regex.Matcher;
@@ -24,8 +21,6 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.namekis.utils.RichLogback;
 
 import one.util.streamex.StreamEx;
@@ -34,8 +29,41 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Help.Ansi;
 import picocli.CommandLine.Help.Visibility;
 import picocli.CommandLine.Option;
+import picocli.CommandLine.Parameters;
 
 public class mgit {
+  static final String description = """
+      
+      mgit - Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
+
+      HISTORY:
+        2025-08-15: Add checkout from DEFAULT which is remote default branch.
+        2025-08-03: Initial version (multi-repo status, commit, push, checkout).
+
+      EXAMPLES:
+        mgit status --repos=foo,bar --exclude=bar  # Show status for foo
+        mgit checkout -b feature/foo DEFAULT       # New branch from default remote branch
+        mgit push --force-with-lease               # Push with force protection
+        mgit uprebase                              # Rebase local branch on remote default
+
+      NOTES:
+        - All commands support --repos and --exclude (comma-separated).
+        - PR creation and merge states tracked in git config (mgit.pr.<branch>.link/state).
+        - Use --dry-run to see what would be done without making changes.
+        - Use --verbose (-v) to increase verbosity, --quiet (-q) to suppress output.
+        - Use --color to enable colored output (default: true).
+        - Use --force-with-lease to safely force push, or --force to override.
+        - Use --force-rebase to rewrite commit history during rebase.
+        - Use --message (-am) to specify commit message for commit command.
+        - Use --exclude to skip specific repos by folder name.
+        - Use --repos to specify explicit subdirectories to scan for repos.
+
+      Full docs: https://github.com/raisercostin/scripts/mgit.java
+      Report bugs: https://github.com/raisercostin/scripts/issues
+
+      Options:
+      """;
+
   static final Logger log = LoggerFactory.getLogger(mgit.class);
 
   public static void main(String... args) {
@@ -66,20 +94,26 @@ public class mgit {
 
     public List<File> findRepos() {
       log.debug("findRepos(): repos option = '{}', exclude = '{}'", repos, exclude);
-      List<File> explicit;
-      if (repos != null && !repos.isBlank()) {
-        explicit = StreamEx.of(repos.split(",")).map(String::trim).map(File::new).toList();
-        log.info("Filtering to explicit repos: {}", StreamEx.of(explicit).map(File::getName).joining(", "));
-      } else {
-        File cwd = new File(".");
-        explicit = StreamEx.of(Objects.requireNonNull(cwd.listFiles())).toList();
-        log.info("Scanning all subdirectories in '{}'", cwd.getAbsolutePath());
+      try {
+        List<File> explicit;
+        if (repos != null && !repos.isBlank()) {
+          explicit = StreamEx.of(repos.split(",")).map(String::trim).map(File::new).toList();
+          log.info("Filtering to explicit repos: {}", StreamEx.of(explicit).map(File::getName).joining(", "));
+        } else {
+          File cwd = new File(".").getCanonicalFile();
+          explicit = StreamEx.of(cwd).append(StreamEx.of(Objects.requireNonNull(cwd.listFiles()))).toList();
+          log.info("Scanning all subdirectories in '{}'", cwd.getAbsolutePath());
+        }
+        explicit = explicit.stream()
+            .filter(f -> f.isDirectory() && new File(f, ".git").exists() && !f.getName().startsWith(".")).toList();
+        log.info("Found {} explicit repos: {}", explicit.size(), explicit.stream().map(File::getName).toList());
+        List<File> filtered = explicit.stream()
+            .filter(f -> exclude == null || exclude.isEmpty() || !exclude.contains(f.getName())).toList();
+        log.info("Final repo list after filtering: {}", filtered.stream().map(File::getName).toList());
+        return filtered;
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to find repos: " + e.getMessage(), e);
       }
-      List<File> filtered = explicit.stream().filter(f -> f.isDirectory() && new File(f, ".git").exists())
-          .filter(f -> exclude == null || exclude.isEmpty() || !exclude.contains(f.getName())).toList();
-
-      log.info("Final repo list after filtering: {}", filtered.stream().map(File::getName).toList());
-      return filtered;
     }
   }
 
@@ -88,10 +122,9 @@ public class mgit {
     public boolean dryRun;
   }
 
-  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = """
-      Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
-      """, subcommands = { CheckoutBranch.class, Status.class, Commit.class, Push.class, Uprebase.class,
-      PrCreated.class, PrMerged.class }, sortOptions = false)
+  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = {
+      MgitCheckout.class, Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class,
+      PrMerged.class }, sortOptions = false)
   public static class MgitRoot extends MGitCommon implements Runnable {
     static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
 
@@ -102,12 +135,15 @@ public class mgit {
     }
   }
 
-  @Command(name = "checkout", description = "Checkout a new branch in all repos with changes")
-  public static class CheckoutBranch extends MGitWritableCommon implements Callable<Integer> {
-    @Option(names = "-b", required = true, description = "Branch to create")
-    String branchName;
+  @Command(name = "checkout", description = "Switch or create a branch in all repos. Use -b for new branch. 'DEFAULT' source uses remote default branch.")
+  public static class MgitCheckout extends MGitWritableCommon implements Callable<Integer> {
+    @Option(names = "-b", description = "Branch name to create and checkout (will track source).")
+    String newBranch;
 
-    final Logger log = LoggerFactory.getLogger(CheckoutBranch.class);
+    @Parameters(index = "0", description = "Source branch/ref/commit. Use 'DEFAULT' for remote default branch.")
+    String from;
+
+    final Logger log = LoggerFactory.getLogger(MgitCheckout.class);
 
     @Override
     public Integer call() throws Exception {
@@ -119,35 +155,57 @@ public class mgit {
       }
       int changed = 0;
       for (File repo : repoDirs) {
-        if (hasChanges(repo)) {
-          log.info("Repo '{}' has changes, creating branch '{}'", repo.getName(), branchName);
-          checkoutBranch(repo, branchName);
-          changed++;
-        } else {
-          log.debug("Repo '{}' is clean, skipping", repo.getName());
-        }
+        checkout(repo, newBranch, from);
+        changed++;
       }
-      log.info("Branched {} repos.", changed);
+      log.info("Processed {} repos.", changed);
       return 0;
     }
 
-    boolean hasChanges(File repo) {
-      try {
-        String out = runGitCommand("changes", repo, "status", "--porcelain");
-        return !out.isEmpty();
-      } catch (Exception e) {
-        log.error("Failed git status in {}: {}", repo, e.toString());
-        return false;
+    private void checkout(File repo, String localBranch, String from) {
+      String effectiveFrom = from;
+      if ("default".equalsIgnoreCase(from)) {
+        effectiveFrom = getRemoteDefaultBranch(repo);
+      }
+      if (localBranch != null && !localBranch.isBlank()) {
+        if (localBranchExists(repo, localBranch)) {
+          throw new IllegalArgumentException(
+              "Local branch '" + localBranch + "' already exists in repo " + repo.getName());
+        }
+        String remoteRef = remoteBranchExists(repo, effectiveFrom) ? "origin/" + effectiveFrom : effectiveFrom;
+        runGitCommand("checkout", repo, "checkout", "-b", localBranch, remoteRef);
+        runGitCommand("set-upstream", repo, "branch", "--set-upstream-to", remoteRef, localBranch);
+        System.out.printf("\u001B[32m[%s] created branch '%s' from '%s' and set upstream\u001B[0m%n", repo.getName(),
+            localBranch, remoteRef);
+      } else {
+        if (localBranchExists(repo, effectiveFrom)) {
+          runGitCommand("checkout", repo, "checkout", effectiveFrom);
+          System.out.printf("\u001B[32m[%s] switched to existing branch '%s'\u001B[0m%n", repo.getName(),
+              effectiveFrom);
+        } else if (remoteBranchExists(repo, effectiveFrom)) {
+          runGitCommand("checkout", repo, "checkout", "--track", "origin/" + effectiveFrom);
+          System.out.printf("\u001B[32m[%s] checked out and tracking 'origin/%s'\u001B[0m%n", repo.getName(),
+              effectiveFrom);
+        } else {
+          throw new IllegalArgumentException("Branch '" + effectiveFrom + "' does not exist locally or on remote.");
+        }
       }
     }
 
-    void checkoutBranch(File repo, String branch) {
-      try {
-        runGitCommand("checkout", repo, "checkout", "-b", branch);
-        System.out.printf("\u001B[32m[%s] checked out '%s'\u001B[0m%n", repo.getName(), branch);
-      } catch (Exception e) {
-        log.error("Failed to checkout branch in {}: {}", repo, e.toString());
-      }
+    private static boolean localBranchExists(File repo, String branch) {
+      String out = runGitCommand("branch-local", repo, "rev-parse", "--verify", branch);
+      return out != null && !out.isBlank();
+    }
+
+    private static boolean remoteBranchExists(File repo, String branch) {
+      String out = runGitCommand("ls-remote", repo, "ls-remote", "--heads", "origin", branch);
+      return out != null && out.toLowerCase().contains("refs/heads/" + branch.toLowerCase());
+    }
+
+    private static String getRemoteDefaultBranch(File repo) {
+      String out = runGitCommand("remote-default-branch", repo, "symbolic-ref", "refs/remotes/origin/HEAD");
+      final String prefix = "refs/remotes/origin/";
+      return out.startsWith(prefix) ? out.substring(prefix.length()) : out;
     }
   }
 
