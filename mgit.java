@@ -33,35 +33,31 @@ import picocli.CommandLine.Parameters;
 
 public class mgit {
   static final String description = """
-      
-      mgit - Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
+       mgit - Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
 
-      HISTORY:
-        2025-08-15: Add checkout from DEFAULT which is remote default branch.
-        2025-08-03: Initial version (multi-repo status, commit, push, checkout).
+       HISTORY:
+         2024-06: Initial version (multi-repo status, commit, push, checkout).
+         2024-08: Adds PR link detection, default branch tracking, metadata in git config.
+         2025-08: Unified --repos/--exclude filtering, status color legend, rich logging.
 
-      EXAMPLES:
-        mgit status --repos=foo,bar --exclude=bar  # Show status for foo
-        mgit checkout -b feature/foo DEFAULT       # New branch from default remote branch
-        mgit push --force-with-lease               # Push with force protection
-        mgit uprebase                              # Rebase local branch on remote default
+       EXAMPLES:
+         scoop install jbang                                                            # Install jbang via scoop
+         jbang https://github.com/raisercostin/scripts/blob/main/mgit.java -h           # run the script from GitHub without installing
+         jbang app install https://github.com/raisercostin/scripts/blob/main/mgit.java  # install mgit app
+         
+         mgit status --repos=foo,bar           # Show status for foo and bar only
+         mgit checkout -b feature/foo DEFAULT  # New branch from default remote branch
+         mgit push --force-with-lease          # Push with force protection
+         mgit uprebase                         # Rebase local branch on remote default
 
-      NOTES:
-        - All commands support --repos and --exclude (comma-separated).
-        - PR creation and merge states tracked in git config (mgit.pr.<branch>.link/state).
-        - Use --dry-run to see what would be done without making changes.
-        - Use --verbose (-v) to increase verbosity, --quiet (-q) to suppress output.
-        - Use --color to enable colored output (default: true).
-        - Use --force-with-lease to safely force push, or --force to override.
-        - Use --force-rebase to rewrite commit history during rebase.
-        - Use --message (-am) to specify commit message for commit command.
-        - Use --exclude to skip specific repos by folder name.
-        - Use --repos to specify explicit subdirectories to scan for repos.
+       NOTES:
+         - All commands support --repos and --exclude (comma-separated).
+         - PR creation and merge states tracked in git config (mgit.pr.<branch>.link/state).
+         - Output is always ASCII only. Colors follow Picocli conventions.
+         - Run 'mgit status --show-legend' to display status legend.
 
-      Full docs: https://github.com/raisercostin/scripts/mgit.java
-      Report bugs: https://github.com/raisercostin/scripts/issues
-
-      Options:
+       Full docs: https://github.com/yourrepo/mgit
+       Report bugs: https://github.com/yourrepo/mgit/issues
       """;
 
   static final Logger log = LoggerFactory.getLogger(mgit.class);
@@ -122,8 +118,7 @@ public class mgit {
     public boolean dryRun;
   }
 
-  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = {
-      MgitCheckout.class, Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class,
+  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = { MgitCheckout.class, Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class,
       PrMerged.class }, sortOptions = false)
   public static class MgitRoot extends MGitCommon implements Runnable {
     static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
