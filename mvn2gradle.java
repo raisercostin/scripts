@@ -14,8 +14,10 @@
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -24,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -117,9 +120,23 @@ public class mvn2gradle {
     @Option(names = "--debug-repositories", description = "Debug info on repositories", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
     public boolean debugRepositories = false;
 
+    @Option(names = "--use-implementation-dependencies", description = "Use implementation dependencies instead of api. Use this if you want to compile only against explicit dependencies.", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
+    public Boolean useImplementationDependencies = null;
+
+    @Option(names = "--use-api-dependencies", description = "Use api dependencies instead of implementation. Dependencies appearing in the api configurations will be transitively exposed to consumers of the library, and as such will appear on the compile classpath of consumers. This is the default since maven offers only this.", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ALWAYS)
+    public Boolean useApiDependencies = null;
+
     @Override
     public Integer call() throws Exception {
       return GradleKtsGenerator.sync(this);
+    }
+
+    public boolean useApiDependencies() {
+      if (useApiDependencies == useImplementationDependencies) {
+        throw new IllegalArgumentException(
+            "Cannot use both --use-api-dependencies and --use-implementation-dependencies at the same time.");
+      }
+      return useApiDependencies && !useImplementationDependencies;
     }
   }
 
@@ -618,7 +635,12 @@ public class mvn2gradle {
     // checkstyle plugin
     public String skip;
     public String configLocation;
-    //
+
+    // jaxb plugin
+    public String jaxbVersion = "${jaxb.version}";
+    public String generatePackage = "";
+    public String generateDirectory = "target/generated-sources-jaxb";
+    public String schemaDirectory = "src/main/resources";
 
     @com.fasterxml.jackson.annotation.JsonAnySetter
     public java.util.Map<String, Object> any = new java.util.HashMap<>();
@@ -1050,8 +1072,24 @@ public class mvn2gradle {
             }
             """.formatted(version, version);
       }));
-      register(new PluginConvertor("org.jvnet.jaxb:jaxb-maven-plugin:generate", null, null,
-          (ctx, pom) -> jbangAndXjcPlugin));
+      register(new PluginConvertor("org.jvnet.jaxb:jaxb-maven-plugin:generate", null, null, (ctx, pom) -> {
+        // schema directory contains xsd files
+        if (ctx.configuration.schemaDirectory == null || !new File(ctx.configuration.schemaDirectory).exists()) {
+          return "//jaxb plugin disabled - no schema directory";
+        }
+        // check xsd files by walking the directory via Path api
+        try {
+          long count = Files.walk(Paths.get(ctx.configuration.schemaDirectory))
+              .filter(FileSystems.getDefault().getPathMatcher("glob:**/*.xsd")::matches).count();
+          if (count == 0) {
+            return "//jaxb plugin disabled - no xsd files found in " + ctx.configuration.schemaDirectory;
+          }
+        } catch (IOException e) {
+          throw new RuntimeException("Error checking xsd files in " + ctx.configuration.schemaDirectory, e);
+        }
+        return jbangAndXjcPlugin.formatted("0.128.7", "4.0.5", ctx.configuration.generatePackage,
+            ctx.configuration.generateDirectory, ctx.configuration.schemaDirectory);
+      }));
 
     }
 
@@ -1072,8 +1110,8 @@ public class mvn2gradle {
       Project rootPom = loadPom(null, null, context.cli.projectDir, context);
 
       // At top-level in sync
-      Map<String, String> artifactIdToGradlePath = collectModuleArtifactIdToGradlePath(rootPom, cli.projectDir,
-          cli.ignoreUnknown, effectivePom);
+      GradleModules gradleModules = collectModuleArtifactIdToGradlePath(rootPom, cli.projectDir, cli.ignoreUnknown,
+          effectivePom);
 
       // Generate settings.gradle.kts for root project and modules
       String settingsGradle = generateSettingsGradleKts(rootPom);
@@ -1081,7 +1119,7 @@ public class mvn2gradle {
       log.info("Generated settings.gradle.kts");
 
       // Generate build.gradle.kts recursively for root and modules
-      generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, artifactIdToGradlePath, true);
+      generateForModulesRecursively(cli.projectDir.toPath(), rootPom, cli, effectivePom, gradleModules, true);
 
       log.info("Sync done.");
       return 0;
@@ -1275,10 +1313,10 @@ public class mvn2gradle {
 
     // TODO refactor to use pom structure
     private static void generateForModulesRecursively(Path baseDir, Project pom, Cli cli, Projects effectivePom,
-        Map<String, String> artifactIdToGradlePath, boolean isRoot) {
+        GradleModules gradleModules, boolean isRoot) {
       log.info("Generating build.gradle.kts for {}", pom.artifactId);
 
-      String gradleKts = generate(pom, effectivePom, artifactIdToGradlePath, cli);
+      String gradleKts = generate(pom, effectivePom, gradleModules, cli);
 
       try {
         Files.writeString(baseDir.resolve("build.gradle.kts"), gradleKts);
@@ -1291,7 +1329,7 @@ public class mvn2gradle {
           Path moduleDir = baseDir.resolve(moduleName);
           if (Files.exists(moduleDir)) {
             Project modulePom = loadPom(null, null, moduleDir.toFile(), pom.context);
-            generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, artifactIdToGradlePath, false);
+            generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, gradleModules, false);
           } else {
             log.warn("Module directory not found: {}", moduleDir);
           }
@@ -1416,14 +1454,14 @@ public class mvn2gradle {
         String candidateKey = new File(projectDir, relPath).getCanonicalPath();
         Project parentPom = pomCache.get(candidateKey);
         if (parentPom != null) {
-          if (parentPom.id().equals(pom.parentGav.id())) {
+          if (parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
             return parentPom;
           }
         }
 
         parentPom = loadPom(pom.context.root, pom.parentDirPom, projectDir, pom.context);
         if (parentPom != null) {
-          if (parentPom.id().equals(pom.parentGav.id())) {
+          if (parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
             return parentPom;
           }
         }
@@ -1464,8 +1502,7 @@ public class mvn2gradle {
       }
     }
 
-    public static String generate(Project pom, Projects effectivePom, Map<String, String> artifactIdToGradlePath,
-        Cli cli) {
+    public static String generate(Project pom, Projects effectivePom, GradleModules gradleModules, Cli cli) {
 
       // 1. Emit Maven property variables for all referenced properties in dependency
       // versions
@@ -1476,7 +1513,7 @@ public class mvn2gradle {
       Map<String, String> pluginsMap = collectGradlePluginsAndConfigs(pom, pluginConfigSnippets, cli);
 
       // 3. Emit dependencies and any version variables
-      DependencyEmitResult depResult = emitDeps(pom, effectivePom, artifactIdToGradlePath, cli);
+      DependencyEmitResult depResult = emitDeps(pom, effectivePom, gradleModules, cli);
 
       // 4. Standard project attributes
       String group = resolveProperties(pom.groupId, pom);
@@ -1500,6 +1537,7 @@ public class mvn2gradle {
 
               plugins {
                   id("java")
+                  id("java-library") //allows api dependencies
                   id("eclipse")
                   id("com.vanniktech.dependency.graph.generator") version "0.8.0"
                   id ("project-report")
@@ -1575,9 +1613,17 @@ public class mvn2gradle {
               %s
               %s
               """,
-          gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version,
-          "", // do not render local repositories - are configured in settings
-              // repositories("")
+          gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version, "", // do
+                                                                                                                    // not
+                                                                                                                    // render
+                                                                                                                    // local
+                                                                                                                    // repositories
+                                                                                                                    // -
+                                                                                                                    // are
+                                                                                                                    // configured
+                                                                                                                    // in
+                                                                                                                    // settings
+                                                                                                                    // repositories("")
           depResult.dependencyBlock, pluginConfigSnippets, excludesBlock);
     }
 
@@ -1718,15 +1764,28 @@ public class mvn2gradle {
     // }
     // }
 
-    private static DependencyEmitResult emitDeps(Project pom, Projects effectivePom,
-        Map<String, String> artifactIdToGradlePath, Cli cli) {
+    static class GradleModules {
+      Map<String, String> modules = new TreeMap<>();
+
+      public String findByMavenGroupAndArtifact(String resolvedGroupId, String resolvedArtifactId) {
+        return modules.get(resolvedGroupId + ":" + resolvedArtifactId);
+      }
+
+      public void addGradleModule(String ga, String gradlePath) {
+        modules.put(ga, gradlePath);
+      }
+    }
+
+    private static DependencyEmitResult emitDeps(Project pom, Projects effectivePom, GradleModules gradleModules,
+        Cli cli) {
       pom = pom.effectivePomOrThis();
 
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
         return new DependencyEmitResult("", "", false);
       }
-      pom.dependencies.dependency.sort(
-          java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope)).thenComparing(d -> d.artifactId));
+      pom.dependencies.dependency
+          .sort(java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope, cli.useApiDependencies()))
+              .thenComparing(d -> d.artifactId));
 
       StringBuilder varDecls = new StringBuilder();
       StringBuilder deps = new StringBuilder();
@@ -1736,7 +1795,7 @@ public class mvn2gradle {
         String resolvedGroupId = resolveGroupId(dep, pom);
         String resolvedArtifactId = resolveProperties(dep.artifactId, pom);
         String version = dep.version;
-        String conf = toGradleConf(dep.scope);
+        String conf = toGradleConf(dep.scope, cli.useApiDependencies());
         boolean isTestJar = "test-jar".equals(dep.type) || "tests".equals(dep.classifier);
         boolean isNotTestScope = dep.scope == null || !"test".equals(dep.scope);
 
@@ -1745,8 +1804,8 @@ public class mvn2gradle {
               "Dependency on {}:{} with classifier=test/type=test-jar is missing <scope>test</scope>-Gradle may not handle this as a test dependency.",
               dep.groupId, dep.artifactId);
         }
-        if (artifactIdToGradlePath.containsKey(resolvedArtifactId)) {
-          String gradlePath = artifactIdToGradlePath.get(resolvedArtifactId);
+        String gradlePath = gradleModules.findByMavenGroupAndArtifact(resolvedGroupId, resolvedArtifactId);
+        if (gradlePath != null) {
           // Handle test-jar module dependency
           if ("test".equals(conf) || "testImplementation".equals(conf)) {
             if (isTestJar) {
@@ -1885,15 +1944,15 @@ public class mvn2gradle {
       return varName;
     }
 
-    private static Map<String, String> collectModuleArtifactIdToGradlePath(Project rootPom, File rootDir,
+    private static GradleModules collectModuleArtifactIdToGradlePath(Project rootPom, File rootDir,
         boolean ignoreUnknown, Projects effectivePom) {
-      Map<String, String> artifactIdToGradlePath = new HashMap<>();
-      collectModulesRecursivelyWithPaths(rootPom, rootPom, rootDir, "", artifactIdToGradlePath);
-      return artifactIdToGradlePath;
+      GradleModules gradleModules = new GradleModules();
+      collectModulesRecursivelyWithPaths(rootPom, rootPom, rootDir, "", gradleModules);
+      return gradleModules;
     }
 
     private static void collectModulesRecursivelyWithPaths(Project root, Project pom, File baseDir,
-        String parentGradlePath, Map<String, String> artifactIdToGradlePath) {
+        String parentGradlePath, GradleModules gradleModules) {
       if (pom == null || pom.modules == null || pom.modules.module == null)
         return;
 
@@ -1902,8 +1961,8 @@ public class mvn2gradle {
         Project childPom = loadPom(root, pom, moduleDir, root.context);
         if (childPom != null && childPom.artifactId != null) {
           String fullPath = parentGradlePath.isEmpty() ? moduleName : parentGradlePath + ":" + moduleName;
-          artifactIdToGradlePath.put(childPom.ga(), fullPath);
-          collectModulesRecursivelyWithPaths(root, childPom, moduleDir, fullPath, artifactIdToGradlePath);
+          gradleModules.addGradleModule(childPom.ga(), fullPath);
+          collectModulesRecursivelyWithPaths(root, childPom, moduleDir, fullPath, gradleModules);
         }
       }
     }
@@ -2275,9 +2334,9 @@ public class mvn2gradle {
       return sb.toString();
     }
 
-    private static String toGradleConf(String scope) {
+    private static String toGradleConf(String scope, boolean useApiDependencies) {
       if (scope == null || scope.isBlank() || "compile".equals(scope) || "compile+runtime".equals(scope)) {
-        return "implementation";
+        return useApiDependencies? "api" : "implementation";
       }
       if ("provided".equals(scope) || "providedCompile".equals(scope)) {
         return "compileOnly";
@@ -2291,16 +2350,18 @@ public class mvn2gradle {
       if ("system".equals(scope)) {
         return "compileOnly";
       }
+      log.warn("Unknown Maven scope '{}', defaulting to 'implementation'", scope);
       return "implementation";
     }
   }
 
   private static final String jbangVersion = "0.128.7";
   private static final String jbangAndXjcPlugin = """
-      val jbangVersion = "0.128.7"
-      val jaxbVersion = "4.0.5"
-      val outputPackage = "com.example.xbrl.generated"
-      val outputDir = "target/generated-sources-jaxb"
+      val jbangVersion = "%s"
+      val jaxbVersion = "%s"
+      val outputPackage = "%s"
+      val outputDir = "%s"
+      val schemaDirectory = "%s"
 
       val jbangZipUrl = "https://github.com/jbangdev/jbang/releases/download/v$jbangVersion/jbang-$jbangVersion.zip"
       val jbangToolsDir = layout.buildDirectory.get().asFile.resolve("tools")
@@ -2366,7 +2427,7 @@ public class mvn2gradle {
                   "-extension", "-Xannotate", "-Xinheritance", "-Xcopyable", "-XtoString", "-Xequals", "-XhashCode",
                   "-d", outputDir,
                   "-p", outputPackage,
-                  "src/main/resources/XBRLConfigurations.xsd"
+                  schemaDirectory
               )
 
               println("${ansiCyan}STEP 1: Running jbang (dev.jbang.Main) to start XJC...$ansiReset")
@@ -2382,7 +2443,7 @@ public class mvn2gradle {
               }
               val stdOut1 = out1.toString(Charsets.UTF_8).trim()
               val stdErr1 = err1.toString(Charsets.UTF_8).trim()
-              val all1 = (stdOut1 + "\n" + stdErr1).trim()
+              val all1 = (stdOut1 + "\\n" + stdErr1).trim()
 
               // Look for the first line that is a Java exec command (typically starts with 'C:\\...' or '/usr/...')
               val maybeXjcCmd = stdOut1.lines().firstOrNull {
@@ -2390,7 +2451,7 @@ public class mvn2gradle {
               }?.trim()
 
               // Print all jbang output in yellow for visibility
-              println("${ansiYellow}JBang output:$ansiReset\n$all1")
+              println("${ansiYellow}JBang output:$ansiReset\\n$all1")
 
               if (maybeXjcCmd == null) {
                   println("${ansiRed}Could not find computed XJC command in output!$ansiReset")
@@ -2414,8 +2475,8 @@ public class mvn2gradle {
 
               val stdOut2 = out2.toString(Charsets.UTF_8).trim()
               val stdErr2 = err2.toString(Charsets.UTF_8).trim()
-              if (stdOut2.isNotEmpty()) println("${ansiGreen}XJC STDOUT:$ansiReset\n$stdOut2")
-              if (stdErr2.isNotEmpty()) println("${ansiRed}XJC STDERR:$ansiReset\n$stdErr2")
+              if (stdOut2.isNotEmpty()) println("${ansiGreen}XJC STDOUT:$ansiReset\\n$stdOut2")
+              if (stdErr2.isNotEmpty()) println("${ansiRed}XJC STDERR:$ansiReset\\n$stdErr2")
 
               if (xjcExit != 0) {
                   throw GradleException("XJC failed (exit $xjcExit). See output above.")
@@ -2425,4 +2486,66 @@ public class mvn2gradle {
           }
       }
       """;
+  /*
+   * Try1 build.gradle.kts import java.net.URL import java.util.zip.ZipInputStream
+   * import java.io.ByteArrayOutputStream
+   * 
+   * plugins { id("java") id("eclipse")
+   * id("com.vanniktech.dependency.graph.generator") version "0.8.0"
+   * id("project-report") id("com.intershop.gradle.jaxb") version "7.0.2" }
+   * 
+   * val jaxbXjcPlugins by configurations.creating
+   * 
+   * configurations { jaxbXjcPlugins }
+   * 
+   * dependencies { // Add all your required XJC plugin jars here // covers
+   * -Xequals, -XhashCode, -XtoString, -Xcopyable, -Xinheritance
+   * jaxbXjcPlugins("org.jvnet.jaxb:jaxb-plugins:4.0.0") // covers
+   * -Xannotate/annox jaxbXjcPlugins("org.jvnet.jaxb:jaxb-plugin-annotate:4.0.0")
+   * } jaxb { javaGen { register("main") { schemas =
+   * fileTree("src/main/resources") { include("
+   **//*
+       * .xsd") } outputDir =
+       * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+       * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+       * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+       * //args = listOf("-extension") packageName =
+       * "com.foo.compare.generated" args = listOf("-extension",
+       * "-Xannotate", "-Xinheritance", "-Xcopyable", "-XtoString", "-Xequals",
+       * "-XhashCode") //options { // xjcClasspath = jaxbXjcPlugins //} } } }
+       * afterEvaluate { tasks.matching { it.name == "jaxbJavaGenMain" }.configureEach
+       * { doFirst { // Add the plugin jars to the Ant classpath for the XJC task
+       * ant.withGroovyBuilder { "project"("antProject") { "taskdef"( "name" to "xjc",
+       * "classname" to "com.sun.tools.xjc.XJCTask", "classpath" to
+       * jaxbXjcPlugins.asPath ) } } } } }
+       * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+       * "generated-sources/jaxb"))
+       */
+
+  /*
+   * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
+   * //for a single file //schema = file("src/main/resources/your.xsd") schemaDir
+   * = file("src/main/resources") // if you have .xjb files bindingDir =
+   * file("src/main/resources") generatePackage =
+   * "com.foo.compare.generated" outputDir =
+   * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile locale =
+   * "en" removeOldOutput = true args = listOf("-XtoString", "-Xequals",
+   * "-XhashCode", "-Xcopyable", "-Xinheritance", "-Xannotate") // plugin
+   * configurations if needed: // plugins = ... } } }
+   */
+  /*
+   * Try3 tasks.register<Jar>("testJar") { archiveClassifier.set("tests")
+   * from(sourceSets.test.get().output) } configurations { create("testArtifacts")
+   * } artifacts { add("testArtifacts", tasks.named("testJar")) }
+   * 
+   * 
+   * tasks.register<Exec>("jbangXjc") { group = "codegen" description =
+   * "Run JAXB xjc via jbang (JAXB 4.x)"
+   * 
+   * // On Windows with cmder/git-cmd, jbang should be on PATH commandLine =
+   * listOf( "jbang.cmd", "--java", "17", "--deps",
+   * "org.glassfish.jaxb:jaxb-xjc:4.0.5,org.glassfish.jaxb:jaxb-runtime:4.0.5",
+   * "org.glassfish.jaxb:jaxb-xjc:4.0.5", "-d", "target/generated-sources", "-p",
+   * "com.example.generated", "src/main/resources/schema.xsd" ) }
+   */
 }
