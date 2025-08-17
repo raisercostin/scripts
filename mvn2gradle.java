@@ -306,6 +306,10 @@ public class mvn2gradle {
     public String id() {
       return "%s:%s:%s".formatted(groupId, artifactId, version != null ? version : "SNAPSHOT");
     }
+
+    public String ga() {
+      return "%s:%s".formatted(groupId, artifactId);
+    }
   }
 
   public static class Licenses {
@@ -1088,9 +1092,13 @@ public class mvn2gradle {
           throw new RuntimeException("Error checking xsd files in " + ctx.configuration.schemaDirectory, e);
         }
         return jbangAndXjcPlugin.formatted("0.128.7", "4.0.5", ctx.configuration.generatePackage,
-            ctx.configuration.generateDirectory, ctx.configuration.schemaDirectory);
+            //linuxPath(ctx.configuration.generateDirectory),
+            linuxPath(ctx.configuration.schemaDirectory));
       }));
+    }
 
+    private static String linuxPath(String dir) {
+      return dir.replace('\\', '/').replaceAll("/$", "");
     }
 
     public static Integer sync(Cli cli) throws Exception {
@@ -1389,6 +1397,7 @@ public class mvn2gradle {
         pomCache.put(key, pom);
 
         if (pom.parentGav != null) {
+          log.info("Resolving parent POM for {} -> {}", pom.ga(), pom.parentGav.ga());
           var parent = findParentPomFileNoCheck(pom.effectivePomOrThis(), ignoreUnknown);
           if (parent == pom) {
             throw new RuntimeException("Parent POM is self-referential: " + pom.id());
@@ -1451,7 +1460,8 @@ public class mvn2gradle {
       // }
 
       try {
-        String candidateKey = new File(projectDir, relPath).getCanonicalPath();
+        File parentProjectDir = new File(projectDir, relPath).getCanonicalFile();
+        String candidateKey = parentProjectDir.getCanonicalPath();
         Project parentPom = pomCache.get(candidateKey);
         if (parentPom != null) {
           if (parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
@@ -1459,10 +1469,25 @@ public class mvn2gradle {
           }
         }
 
-        parentPom = loadPom(pom.context.root, pom.parentDirPom, projectDir, pom.context);
+        // parentPom = loadPom(pom.context.root, pom.parentDirPom, projectDir,
+        // pom.context);
+        parentPom = loadPom(pom.context.root, pom.parentDirPom, parentProjectDir, pom.context);
         if (parentPom != null) {
-          if (parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
+          if (parentPom.effectivePomOrThis().ga().equals(pom.parentGav.ga())) {
+            if (!parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
+              if (parentPom.effectivePomOrThis().version.contains("${")) {
+                log.info("In {} > Parent POM {} has unresolved version, using effective POM version: {}", pom.ga(),
+                    parentPom.effectivePomOrThis().id(), pom.parentGav.id());
+              } else {
+                log.warn("In {} > Different versions found between parent POM {} and {}", pom.ga(),
+                    parentPom.effectivePomOrThis().id(), pom.parentGav.id());
+              }
+            }
             return parentPom;
+          } else {
+            log.info(
+                "In {} > Inheritable declared parent POM [{}] differs from supra-module directory parent [{}] ... searching in .m2 repo next.",
+                pom.ga(), pom.parentGav.ga(), parentPom.effectivePomOrThis().ga());
           }
         }
         // If the parent POM is not found in the expected relative path, we fallback to
@@ -1506,7 +1531,9 @@ public class mvn2gradle {
 
       // 1. Emit Maven property variables for all referenced properties in dependency
       // versions
-      String gradlePropertyBlock = emitReferencedMavenPropertiesKts(pom);
+      //String gradlePropertyBlock = emitReferencedMavenPropertiesKts(pom);
+      //NOTE disabled because the gradle doesn't use unresolved properties anymore 
+      String gradlePropertyBlock = "";
 
       // 2. Collect Gradle plugins and config snippets as before
       StringBuilder pluginConfigSnippets = new StringBuilder();
@@ -1768,10 +1795,16 @@ public class mvn2gradle {
       Map<String, String> modules = new TreeMap<>();
 
       public String findByMavenGroupAndArtifact(String resolvedGroupId, String resolvedArtifactId) {
-        return modules.get(resolvedGroupId + ":" + resolvedArtifactId);
+        String ga = resolvedGroupId + ":" + resolvedArtifactId;
+        return modules.get(ga);
       }
 
       public void addGradleModule(String ga, String gradlePath) {
+        if (modules.containsKey(ga)) {
+          log.warn("Gradle module {} already exists for {}. Overwriting with {}", ga, modules.get(ga), gradlePath);
+          throw new RuntimeException(
+              "Gradle module " + ga + " already exists for " + modules.get(ga) + ". Overwriting with " + gradlePath);
+        }
         modules.put(ga, gradlePath);
       }
     }
@@ -1816,6 +1849,7 @@ public class mvn2gradle {
           }
           // Normal module dependency
           deps.append(String.format("    %s(project(\":%s\"))\n", conf, gradlePath));
+          var searchAgain = gradleModules.findByMavenGroupAndArtifact(resolvedGroupId, resolvedArtifactId);
           continue;
         }
         // ---- Lombok special case ----
@@ -1861,7 +1895,6 @@ public class mvn2gradle {
             log.warn("Dependency {}:{} has unknown version, skipping", resolvedGroupId, resolvedArtifactId);
             continue;
           }
-          String resolvedVersion2 = resolveVersion(dep, pom, cli.useEffectivePom, effectivePom);
           throw new RuntimeException("Failed to resolve version for dependency: %s:%s:%s on %s"
               .formatted(resolvedGroupId, resolvedArtifactId, finalVersion, pom.idAndPath()));
         }
@@ -2336,7 +2369,7 @@ public class mvn2gradle {
 
     private static String toGradleConf(String scope, boolean useApiDependencies) {
       if (scope == null || scope.isBlank() || "compile".equals(scope) || "compile+runtime".equals(scope)) {
-        return useApiDependencies? "api" : "implementation";
+        return useApiDependencies ? "api" : "implementation";
       }
       if ("provided".equals(scope) || "providedCompile".equals(scope)) {
         return "compileOnly";
@@ -2357,16 +2390,22 @@ public class mvn2gradle {
 
   private static final String jbangVersion = "0.128.7";
   private static final String jbangAndXjcPlugin = """
+      sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated-sources-jaxb"))      
+      tasks.named("compileJava") {
+          dependsOn("runJbangXjcFull")
+      }
+
       val jbangVersion = "%s"
       val jaxbVersion = "%s"
       val outputPackage = "%s"
-      val outputDir = "%s"
+      val outputDir = layout.buildDirectory.dir("generated-sources-jaxb").get().asFile
       val schemaDirectory = "%s"
 
       val jbangZipUrl = "https://github.com/jbangdev/jbang/releases/download/v$jbangVersion/jbang-$jbangVersion.zip"
       val jbangToolsDir = layout.buildDirectory.get().asFile.resolve("tools")
       val jbangInstallDir = jbangToolsDir.resolve("jbang-$jbangVersion")
       val jbangJar = jbangInstallDir.resolve("bin/jbang.jar")
+      
       tasks.register("downloadAndUnpackJbang") {
         outputs.dir(jbangInstallDir)
         doLast {
@@ -2374,13 +2413,13 @@ public class mvn2gradle {
           if (!zipFile.exists()) {
             logger.lifecycle("Downloading JBang zip from $jbangZipUrl")
             zipFile.parentFile.mkdirs()
-            URL(jbangZipUrl).openStream().use { input ->
+            uri(jbangZipUrl).toURL().openStream().use { input ->
               zipFile.outputStream().use { output -> input.copyTo(output) }
             }
           }
           if (!jbangJar.exists()) {
             logger.lifecycle("Unpacking $zipFile to $jbangToolsDir")
-            ZipInputStream(zipFile.inputStream()).use { zip ->
+            `java.util.zip`.ZipInputStream(zipFile.inputStream()).use { zip ->
               var entry = zip.nextEntry
               while (entry != null) {
                 val outPath = jbangToolsDir.resolve(entry.name)
@@ -2404,11 +2443,11 @@ public class mvn2gradle {
           dependsOn("downloadAndUnpackJbang")
 
           doLast {
-              val ansiReset = "\u001B[0m"
-              val ansiRed = "\u001B[31m"
-              val ansiGreen = "\u001B[32m"
-              val ansiCyan = "\u001B[36m"
-              val ansiYellow = "\u001B[33m"
+              val ansiReset = "\\u001B[0m"
+              val ansiRed = "\\u001B[31m"
+              val ansiGreen = "\\u001B[32m"
+              val ansiCyan = "\\u001B[36m"
+              val ansiYellow = "\\u001B[33m"
 
               val jbangJar = file("target/gradle/tools/jbang-"+jbangVersion+"/bin/jbang.jar")
               val xjcDeps = listOf(
@@ -2418,6 +2457,9 @@ public class mvn2gradle {
                   "org.jvnet.jaxb:jaxb-plugin-annotate:4.0.0",
                   "org.slf4j:slf4j-simple:1.7.36"
               ).joinToString(",")
+              
+              
+              if (!outputDir.exists()) check(outputDir.mkdirs()) { "failed to create: ${outputDir.absolutePath}" }
 
               val jbangArgs = listOf(
                   "--java", "17",
@@ -2425,7 +2467,7 @@ public class mvn2gradle {
                   "--deps", xjcDeps,
                   "org.glassfish.jaxb:jaxb-xjc:"+jaxbVersion,
                   "-extension", "-Xannotate", "-Xinheritance", "-Xcopyable", "-XtoString", "-Xequals", "-XhashCode",
-                  "-d", outputDir,
+                  "-d", outputDir.absolutePath,
                   "-p", outputPackage,
                   schemaDirectory
               )
@@ -2433,8 +2475,8 @@ public class mvn2gradle {
               println("${ansiCyan}STEP 1: Running jbang (dev.jbang.Main) to start XJC...$ansiReset")
               check(jbangJar.exists()) { "jbang.jar not found at $jbangJar" }
 
-              val out1 = ByteArrayOutputStream()
-              val err1 = ByteArrayOutputStream()
+              val out1 = `java.io`.ByteArrayOutputStream()
+              val err1 = `java.io`.ByteArrayOutputStream()
               val proc1 = exec {
                   commandLine("java", "-classpath", jbangJar.absolutePath, "dev.jbang.Main", *jbangArgs.toTypedArray())
                   standardOutput = out1
@@ -2464,8 +2506,8 @@ public class mvn2gradle {
               // Split command for exec (handle both Windows and Unix quoting)
               val commandArgs = org.apache.tools.ant.types.Commandline.translateCommandline(maybeXjcCmd)
 
-              val out2 = ByteArrayOutputStream()
-              val err2 = ByteArrayOutputStream()
+              val out2 = `java.io`.ByteArrayOutputStream()
+              val err2 = `java.io`.ByteArrayOutputStream()
               val xjcExit = exec {
                   commandLine(*commandArgs)
                   standardOutput = out2
@@ -2509,15 +2551,14 @@ public class mvn2gradle {
        * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
        * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
        * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-       * //args = listOf("-extension") packageName =
-       * "com.foo.compare.generated" args = listOf("-extension",
-       * "-Xannotate", "-Xinheritance", "-Xcopyable", "-XtoString", "-Xequals",
-       * "-XhashCode") //options { // xjcClasspath = jaxbXjcPlugins //} } } }
-       * afterEvaluate { tasks.matching { it.name == "jaxbJavaGenMain" }.configureEach
-       * { doFirst { // Add the plugin jars to the Ant classpath for the XJC task
-       * ant.withGroovyBuilder { "project"("antProject") { "taskdef"( "name" to "xjc",
-       * "classname" to "com.sun.tools.xjc.XJCTask", "classpath" to
-       * jaxbXjcPlugins.asPath ) } } } } }
+       * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+       * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+       * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+       * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+       * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+       * Ant classpath for the XJC task ant.withGroovyBuilder {
+       * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+       * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
        * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
        * "generated-sources/jaxb"))
        */
@@ -2526,10 +2567,9 @@ public class mvn2gradle {
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
    * //for a single file //schema = file("src/main/resources/your.xsd") schemaDir
    * = file("src/main/resources") // if you have .xjb files bindingDir =
-   * file("src/main/resources") generatePackage =
-   * "com.foo.compare.generated" outputDir =
-   * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile locale =
-   * "en" removeOldOutput = true args = listOf("-XtoString", "-Xequals",
+   * file("src/main/resources") generatePackage = "com.foo.compare.generated"
+   * outputDir = layout.buildDirectory.dir("generated-sources/jaxb").get().asFile
+   * locale = "en" removeOldOutput = true args = listOf("-XtoString", "-Xequals",
    * "-XhashCode", "-Xcopyable", "-Xinheritance", "-Xannotate") // plugin
    * configurations if needed: // plugins = ... } } }
    */
