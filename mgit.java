@@ -11,12 +11,17 @@
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,7 +49,7 @@ public class mgit {
          scoop install jbang                                                            # Install jbang via scoop
          jbang https://github.com/raisercostin/scripts/blob/main/mgit.java -h           # run the script from GitHub without installing
          jbang app install https://github.com/raisercostin/scripts/blob/main/mgit.java  # install mgit app
-         
+
          mgit status --repos=foo,bar           # Show status for foo and bar only
          mgit checkout -b feature/foo DEFAULT  # New branch from default remote branch
          mgit push --force-with-lease          # Push with force protection
@@ -91,25 +96,43 @@ public class mgit {
     public List<File> findRepos() {
       log.debug("findRepos(): repos option = '{}', exclude = '{}'", repos, exclude);
       try {
-        List<File> explicit;
-        if (repos != null && !repos.isBlank()) {
-          explicit = StreamEx.of(repos.split(",")).map(String::trim).map(File::new).toList();
-          log.info("Filtering to explicit repos: {}", StreamEx.of(explicit).map(File::getName).joining(", "));
+        Path start = new File(".").getCanonicalFile().toPath();
+        Path root = gitRootOrSelf(start);
+        if (!root.equals(start)) {
+          log.info("Ascended to repo root: {}", root.toAbsolutePath());
         } else {
-          File cwd = new File(".").getCanonicalFile();
-          explicit = StreamEx.of(cwd).append(StreamEx.of(Objects.requireNonNull(cwd.listFiles()))).toList();
-          log.info("Scanning all subdirectories in '{}'", cwd.getAbsolutePath());
+          log.info("Scanning from: {}", root.toAbsolutePath());
         }
-        explicit = explicit.stream()
-            .filter(f -> f.isDirectory() && new File(f, ".git").exists() && !f.getName().startsWith(".")).toList();
-        log.info("Found {} explicit repos: {}", explicit.size(), explicit.stream().map(File::getName).toList());
-        List<File> filtered = explicit.stream()
-            .filter(f -> exclude == null || exclude.isEmpty() || !exclude.contains(f.getName())).toList();
-        log.info("Final repo list after filtering: {}", filtered.stream().map(File::getName).toList());
-        return filtered;
-      } catch (IOException e) {
+
+        Set<String> repoNames = (repos != null && !repos.isBlank())
+            ? StreamEx.of(repos.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toSet()
+            : null;
+
+        List<File> found;
+        try (Stream<Path> s = Files.walk(root, 3)) {
+          found = s.filter(Files::isDirectory).filter(p -> Files.exists(p.resolve(".git"))) // .git file or dir
+              .filter(p -> repoNames == null || repoNames.contains(p.getFileName().toString())).map(p -> {
+                try {
+                  return p.toFile().getCanonicalFile();
+                } catch (IOException e) {
+                  throw new UncheckedIOException(e);
+                }
+              }).toList();
+        }
+
+        return found.stream().filter(f -> exclude == null || exclude.isEmpty() || !exclude.contains(f.getName()))
+            .sorted(Comparator.comparing(File::getAbsolutePath)).toList();
+      } catch (IOException | UncheckedIOException e) {
         throw new RuntimeException("Failed to find repos: " + e.getMessage(), e);
       }
+    }
+
+    private static Path gitRootOrSelf(Path start) {
+      for (Path p = start; p != null; p = p.getParent()) {
+        if (Files.exists(p.resolve(".git")))
+          return p;
+      }
+      return start;
     }
   }
 
@@ -118,7 +141,8 @@ public class mgit {
     public boolean dryRun;
   }
 
-  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = { MgitCheckout.class, Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class,
+  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = {
+      MgitCheckout.class, Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class,
       PrMerged.class }, sortOptions = false)
   public static class MgitRoot extends MGitCommon implements Runnable {
     static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
