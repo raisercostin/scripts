@@ -127,6 +127,9 @@ public class mvn2gradle {
     @Option(names = "--use-api-dependencies", description = "Use api dependencies instead of implementation. Dependencies appearing in the api configurations will be transitively exposed to consumers of the library, and as such will appear on the compile classpath of consumers. This is the default since maven offers only this.", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ALWAYS)
     public Boolean useApiDependencies = null;
 
+    @Option(names = "--force-provided-for-tests", description = "Force compileOnly+testImplementation for the maven scope=provided libraries [:group:artifact1:,:group2:artifact2:]", defaultValue = ":org.apache.maven:maven-compat:", showDefaultValue = CommandLine.Help.Visibility.ALWAYS)
+    public String forceProvidedForTests = ":org.apache.maven:maven-compat:";
+
     @Override
     public Integer call() throws Exception {
       return GradleKtsGenerator.sync(this);
@@ -487,7 +490,7 @@ public class mvn2gradle {
     public String scope;
     public String type;
     public String classifier;
-    public String optional;
+    public Boolean optional;
     public Exclusions exclusions;
 
     private Dependency() {
@@ -497,6 +500,11 @@ public class mvn2gradle {
     public String toString() {
       return "%s:%s:%s:%s:%s%s:%s:%s']".formatted(groupId, artifactId, version, scope, type, classifier, optional,
           exclusions);
+    }
+
+    /** Ga with prefix and suffix to match start and end. */
+    public String gaFull() {
+      return ":%s:%s:".formatted(groupId, artifactId);
     }
   }
 
@@ -613,6 +621,7 @@ public class mvn2gradle {
     public String artifactId;
     public String version;
     public Boolean inherited;
+    public Boolean extensions;
     public Executions executions;
     public Dependencies dependencies;
     public PluginConfiguration configuration = new PluginConfiguration();
@@ -1824,9 +1833,9 @@ public class mvn2gradle {
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
         return new DependencyEmitResult("", "", false);
       }
-      pom.dependencies.dependency
-          .sort(java.util.Comparator.comparing((Dependency d) -> toGradleConf(d.scope, cli.useApiDependencies()))
-              .thenComparing(d -> d.artifactId));
+      pom.dependencies.dependency.sort(
+          java.util.Comparator.comparing((Dependency d) -> toGradleConf(cli, d, d.scope, cli.useApiDependencies()))
+              .thenComparing(d -> d.gaFull()));
 
       StringBuilder varDecls = new StringBuilder();
       StringBuilder deps = new StringBuilder();
@@ -1836,7 +1845,7 @@ public class mvn2gradle {
         String resolvedGroupId = resolveGroupId(dep, pom);
         String resolvedArtifactId = resolveProperties(dep.artifactId, pom);
         String version = dep.version;
-        String conf = toGradleConf(dep.scope, cli.useApiDependencies());
+        String conf = toGradleConf(cli, dep, dep.scope, cli.useApiDependencies());
         boolean isTestJar = "test-jar".equals(dep.type) || "tests".equals(dep.classifier);
         boolean isNotTestScope = dep.scope == null || !"test".equals(dep.scope);
 
@@ -1852,6 +1861,10 @@ public class mvn2gradle {
             if (isTestJar) {
               deps.append(String.format(
                   "    testImplementation(project(path = \":%s\", configuration = \"testArtifacts\"))\n", gradlePath));
+              if(GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION.equals(conf)) {
+                deps.append(String.format(
+                    "    compileOnly(project(path = \":%s\", configuration = \"testArtifacts\"))\n", gradlePath));
+              }
               continue;
             }
           }
@@ -2383,11 +2396,15 @@ public class mvn2gradle {
       return sb.toString();
     }
 
-    private static String toGradleConf(String scope, boolean useApiDependencies) {
+    private static final String GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION = "compileOnly+testImplementation";
+    private static String toGradleConf(Cli cli, Dependency dep, String scope, boolean useApiDependencies) {
       if (scope == null || scope.isBlank() || "compile".equals(scope) || "compile+runtime".equals(scope)) {
         return useApiDependencies ? "api" : "implementation";
       }
       if ("provided".equals(scope) || "providedCompile".equals(scope)) {
+        if (cli.forceProvidedForTests.contains(dep.gaFull())) {
+          return GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION;
+        }
         return "compileOnly";
       }
       if ("runtime".equals(scope)) {
@@ -2479,13 +2496,13 @@ public class mvn2gradle {
           val zipFile = `java.io`.File(toolsRoot, "jbang-$jbangVersion.zip")
           val installDir = `java.io`.File(toolsRoot, "jbang-$jbangVersion")
           val jbangJar = `java.io`.File(installDir, "bin/jbang.jar")
-      
+
           if (!zipFile.exists()) downloadTo(jbangZipUrl, zipFile)
           if (!jbangJar.exists()) unzip(zipFile, toolsRoot)
           check(jbangJar.exists()) { "jbang.jar not found at $jbangJar after unzip" }
           return jbangJar
       }
-      
+
       fun unzip(zipFile: `java.io`.File, destDir: `java.io`.File) {
           ensureDir(destDir)
           (`java.util.zip`.ZipInputStream(zipFile.inputStream())).use { zip ->
@@ -2502,19 +2519,19 @@ public class mvn2gradle {
               }
           }
       }
-      
+
       fun downloadTo(url: String, dest: `java.io`.File) {
           ensureDir(dest.parentFile)
           (`java.net`.URL(url)).openStream().use { input ->
               dest.outputStream().use { out -> input.copyTo(out) }
           }
       }
-      
+
       fun ensureDir(dir: `java.io`.File): `java.io`.File {
           if (!dir.exists()) check(dir.mkdirs()) { "failed to create: ${dir.absolutePath}" }
           return dir
       }
-      
+
       fun runProcess(args: List<String>): Triple<Int, String, String> {
           val pb = (`java.lang`.ProcessBuilder(args))
           pb.redirectErrorStream(false)
@@ -2527,7 +2544,7 @@ public class mvn2gradle {
           tOut.join(); tErr.join()
           return Triple(exit, out.toString(Charsets.UTF_8).trim(), err.toString(Charsets.UTF_8).trim())
       }
-      
+
       fun performRunJbangXjcFull(
           jbangJar: `java.io`.File,
           jaxbVersion: String,
@@ -2544,16 +2561,16 @@ public class mvn2gradle {
           val ansiGreen = "\\u001B[32m"
           val ansiCyan = "\\u001B[36m"
           val ansiYellow = "\\u001B[33m"
-      
+
           fun quoteForDisplay(s: String): String =
               if (s.any { it.isWhitespace() || it == '"' || it == '\\'' }) "\\"${s.replace("\\"", "\\\\\\"")}\\"" else s
-      
+
           ensureDir(outputDir)
           check(outputPackage.isNotBlank()) { "outputPackage is required" }
           check(schemaDirectory.exists()) { "schemaDirectory not found: ${schemaDirectory.absolutePath}" }
-      
+
           val depsCsv = extraDeps.joinToString(",")
-      
+
           val jbangArgs = listOf(
               "--java", "17",
               if (verbose) "--verbose" else "--quiet",
@@ -2564,18 +2581,18 @@ public class mvn2gradle {
               "-p", outputPackage,
               schemaDirectory.absolutePath
           )
-      
+
           // STEP 1: show the exact command sent to jbang and capture its output + exit
           val cmd1 = listOf(javaCmd, "-classpath", jbangJar.absolutePath, "dev.jbang.Main") + jbangArgs
           val cmd1Display = cmd1.joinToString(" ") { quoteForDisplay(it) }
           println("${ansiCyan}STEP 1: Running jbang (dev.jbang.Main) to prepare XJC...$ansiReset")
           println("${ansiYellow}CMD:$ansiReset $cmd1Display")
-      
+
           val (exit1, out1, err1) = runProcess(cmd1, workingDir = workingDir)
           val all1 = (out1 + "\\n" + err1).trim()
           if (all1.isNotEmpty()) println("${ansiYellow}JBang output:$ansiReset\\n$all1")
           println("${ansiYellow}JBang exit:$ansiReset $exit1")
-      
+
           val xjcCmd = parseXjcCmd(out1)
           if (xjcCmd == null) {
               // only hard-fail if we could not extract the XJC command
@@ -2585,31 +2602,31 @@ public class mvn2gradle {
               // proceed anyway (this mirrors your original behavior), but make it visible
               println("${ansiYellow}Warning:$ansiReset jbang returned non-zero ($exit1) but an XJC command was found. Continuing...")
           }
-      
+
           // STEP 2: run the printed XJC command exactly; show cmd, stdout, stderr, and exit code
           println("${ansiGreen}STEP 2: Running computed XJC command:$ansiReset")
           println("${ansiCyan}$xjcCmd$ansiReset")
-      
+
           val args2 = antTranslate(xjcCmd)
           val cmd2Display = args2.joinToString(" ") { quoteForDisplay(it) }
           println("${ansiYellow}CMD:$ansiReset $cmd2Display")
-      
+
           val (exit2, out2, err2) = runProcess(args2, workingDir = workingDir)
           if (out2.isNotEmpty()) println("${ansiGreen}XJC STDOUT:$ansiReset\\n$out2")
           if (err2.isNotEmpty()) println("${ansiRed}XJC STDERR:$ansiReset\\n$err2")
           println("${ansiYellow}XJC exit:$ansiReset $exit2")
           check(exit2 == 0) { "XJC failed (exit $exit2). See output above." }
-      
+
           println("${ansiGreen}XJC completed successfully!$ansiReset")
       }
-      
-      
+
+
       fun parseXjcCmd(stdOut: String): String? =
           stdOut.lineSequence().firstOrNull { it.contains("java") && it.contains("XJCFacade") }?.trim()
-      
+
       fun antTranslate(cmd: String): List<String> =
           org.apache.tools.ant.types.Commandline.translateCommandline(cmd).toList()
-      
+
       fun runProcess(args: List<String>, workingDir: `java.io`.File? = null): Triple<Int, String, String> {
           val pb = (`java.lang`.ProcessBuilder(args))
           if (workingDir != null) pb.directory(workingDir)
