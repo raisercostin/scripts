@@ -11,22 +11,41 @@ import org.slf4j.LoggerFactory;
 import java.lang.reflect.Proxy;
 import java.sql.*;
 import java.util.*;
+import java.util.regex.Pattern;
 
 /*
 JDBC URL format:
-  jdbc:mjdbc:default=<label>;[sticky=tx|session|statement];[debug=true];<label>=<jdbc-url>;...
+  jdbc:mjdbc:
+    default=<dsKey>;
+    sticky=tx|session|statement;
+    verbosity=0..5;
+    route=hint,regex,default;
+    drivers=<fqcn1>,<fqcn2>,...;
+    <dsKey>=<jdbc-url>;
+    <dsKey>=<jdbc-url>;
+    ...
 
 Examples:
-  jdbc:mjdbc:default=ora;sticky=statement;debug=true;
-    ora=jdbc:oracle:thin:@//host:1521/xepdb1?user=u&password=p;
-    pg=jdbc:postgresql://localhost:5432/postgres?user=postgres&password=secret
+  jdbc:mjdbc:
+    default=pg;
+    sticky=statement;
+    verbosity=3;
+    route=hint,regex,default;
+    drivers=org.postgresql.Driver,oracle.jdbc.OracleDriver;
+    pg=jdbc:postgresql://localhost:5432/postgres?user=postgres&password=secret;
+    ora=jdbc:oracle:thin:@//host:1521/XEPDB1?user=u&password=p
 
-Routing hint per statement:
-  /\*ds:pg*\/ SELECT ...
+Routing strategies (in order):
+- hint   : leading comment / * ds:<dsKey> * / picks the datasource key and is stripped.
+- regex  : config-driven regex rules route by SQL content (see route.regex.N below).
+- default: fallback to `default=<dsKey>`.
+
+Regex rules:
+  route.regex.1=pg:/\\bFROM\\s+pg_\\w+/i
+  route.regex.2=ora:/\\bFROM\\s+DUAL\\b/
 */
-
 public final class MjdbcDriver implements java.sql.Driver {
-  private static final Logger log = LoggerFactory.getLogger("mjdbc");
+  private static final Logger LOG = LoggerFactory.getLogger("mjdbc");
 
   static {
     try {
@@ -34,47 +53,81 @@ public final class MjdbcDriver implements java.sql.Driver {
     } catch (SQLException e) {
       throw new ExceptionInInitializerError(e);
     }
-
-    try {
-      Class.forName("org.postgresql.Driver");
-    } catch (Throwable ignore) {
-    }
-    try {
-      Class.forName("oracle.jdbc.OracleDriver");
-    } catch (Throwable ignore) {
-    }
-
-    // Optional RichLogback autoconfig if present
-    try {
-      Class<?> cls = Class.forName("com.namekis.utils.RichLogback");
-      cls.getMethod("configureLogbackByVerbosity", int.class, boolean.class, boolean.class).invoke(null, 3, false,
-          true);
-      log.info("RichLogback configured (verbosity=3, color=true)");
-    } catch (Throwable ignore) {
-    }
   }
 
-  public static void main(String[] args) {
-    log.info("mjdbc driver loaded.");
-    log.info(
-        "Example URL: jdbc:mjdbc:default=pg;sticky=statement;verbosity=3;pg=jdbc:postgresql://localhost:5432/postgres?user=postgres&password=secret;ora=jdbc:oracle:thin:@//host:1521/XEPDB1?user=u&password=p");
+  public static void main(String[] args) throws Exception {
+    if (args.length == 0) {
+      LOG.info("mjdbc driver loaded.");
+      LOG.info("Usage: test <jdbc-url> <sql1> <sql2> ...");
+      LOG.info("Example URL: jdbc:mjdbc:default=pg;sticky=statement;verbosity=3;route=hint,regex,default;drivers=org.postgresql.Driver,oracle.jdbc.OracleDriver;pg=jdbc:postgresql://...;ora=jdbc:oracle:thin:@//...?");
+      return;
+    }
+
+    if ("test".equalsIgnoreCase(args[0])) {
+      if (args.length < 3) {
+        LOG.error("Usage: test <jdbc-url> <sql1> <sql2> ...");
+        return;
+      }
+      String jdbcUrl = args[1];
+      Class.forName("org.raisercostin.mjdbc.MjdbcDriver");
+      try (Connection conn = DriverManager.getConnection(jdbcUrl);
+           Statement st = conn.createStatement()) {
+        for (int i = 2; i < args.length; i++) {
+          String sql = args[i];
+          LOG.info("Executing: {}", sql);
+          boolean hasResult = st.execute(sql);
+          if (hasResult) {
+            try (ResultSet rs = st.getResultSet()) {
+              int cols = rs.getMetaData().getColumnCount();
+              // Print header
+              StringBuilder header = new StringBuilder();
+              for (int c = 1; c <= cols; c++) {
+                if (c > 1) header.append(" | ");
+                header.append(rs.getMetaData().getColumnLabel(c));
+              }
+              LOG.info("Header: {}", header);
+
+              // Print rows
+              while (rs.next()) {
+                StringBuilder row = new StringBuilder();
+                for (int c = 1; c <= cols; c++) {
+                  if (c > 1) row.append(" | ");
+                  row.append(rs.getString(c));
+                }
+                LOG.info("Row: {}", row);
+              }
+            }
+          } else {
+            int updateCount = st.getUpdateCount();
+            LOG.info("Update count: {}", updateCount);
+          }
+        }
+      }
+      return;
+    }
+
+    LOG.info("Unknown command: {}. Exiting.", args[0]);
   }
+
+
 
   @Override
   public Connection connect(String url, Properties info) throws SQLException {
     if (!acceptsURL(url))
       return null;
     Parsed p = Parsed.parse(url);
+
+    // Optional: configure global logback via your helper if present.
     try {
-      String vv = p.props.get("verbosity");
-      int verbosity = (vv == null) ? 4 : Integer.parseInt(vv);
+      int verbosity = Integer.parseInt(p.props.getOrDefault("verbosity", "0"));
       Class<?> cls = Class.forName("com.namekis.utils.RichLogback");
       cls.getMethod("configureLogbackByVerbosity", int.class, boolean.class, boolean.class).invoke(null, verbosity,
           false, true);
-      log.info("mjdbc logging configured via RichLogback (verbosity={})", verbosity);
-    } catch (Throwable e) {
-      log.warn("Couldn't configure logging", e);
+      LOG.info("mjdbc logging configured via RichLogback (verbosity={})", verbosity);
+    } catch (Throwable ignore) {
+      // Helper not present or already configured elsewhere. Proceed.
     }
+
     return new RoutedConnection(p);
   }
 
@@ -95,7 +148,7 @@ public final class MjdbcDriver implements java.sql.Driver {
 
   @Override
   public int getMinorVersion() {
-    return 4;
+    return 5;
   }
 
   @Override
@@ -110,13 +163,13 @@ public final class MjdbcDriver implements java.sql.Driver {
 
   // ---------- URL parsing ----------
   static final class Parsed {
-    final String defaultLabel;
-    final Map<String, String> labelToUrl;
+    final String defaultKey;
+    final Map<String, String> keyToUrl;
     final Map<String, String> props;
 
     private Parsed(String def, Map<String, String> map, Map<String, String> props) {
-      this.defaultLabel = def;
-      this.labelToUrl = map;
+      this.defaultKey = def;
+      this.keyToUrl = map;
       this.props = props;
     }
 
@@ -142,23 +195,155 @@ public final class MjdbcDriver implements java.sql.Driver {
         }
       }
       if (def == null || !map.containsKey(def))
-        throw new SQLException("default label missing or unknown.");
+        throw new SQLException("default key ["+def+"] missing or unknown. Available ones: "+map.keySet());
       props.putIfAbsent("sticky", "tx"); // tx|session|statement
-      props.putIfAbsent("verbosity", "0"); // 0..5 (0 = off)
+      props.putIfAbsent("verbosity", "0"); // 0..5
+      props.putIfAbsent("route", "hint,regex,default");
+      props.putIfAbsent("drivers", ""); // comma-separated FQCNs
       return new Parsed(def, map, props);
+    }
+  }
+
+  // ---------- Routing strategies ----------
+  interface RoutingStrategy {
+    /** return chosen datasource key or null if undecided */
+    String selectKey(String sql, String defaultKey, Map<String, String> props) throws SQLException;
+
+    /** optionally transform SQL (e.g., strip hint) when strategy matched */
+    default String transformSql(String sql) {
+      return sql;
+    }
+  }
+
+  static final class HintRoutingStrategy implements RoutingStrategy {
+    @Override
+    public String selectKey(String sql, String def, Map<String, String> props) throws SQLException {
+      String s = sql.trim();
+      if (!s.startsWith("/*ds:"))
+        return null;
+      int e = s.indexOf("*/");
+      if (e < 0)
+        throw new SQLException("Malformed routing hint. Expected closing */");
+      String inside = s.substring(5, e).trim();
+      if (inside.isEmpty())
+        throw new SQLException("Empty datasource key in hint.");
+      return inside;
+    }
+
+    @Override
+    public String transformSql(String sql) {
+      String s = sql.trim();
+      if (!s.startsWith("/*ds:"))
+        return sql;
+      int e = s.indexOf("*/");
+      return (e > 0) ? s.substring(e + 2).trim() : sql;
+    }
+  }
+
+  static final class RegexRoutingStrategy implements RoutingStrategy {
+    static final class Rule {
+      final Pattern p;
+      final String key;
+
+      Rule(Pattern p, String k) {
+        this.p = p;
+        this.key = k;
+      }
+    }
+
+    final List<Rule> rules = new ArrayList<>();
+
+    RegexRoutingStrategy(Map<String, String> props) {
+      props.forEach((k, v) -> {
+        if (k.startsWith("route.regex.")) {
+          int colon = v.indexOf(':');
+          if (colon <= 0)
+            return;
+          String key = v.substring(0, colon).trim();
+          String pat = v.substring(colon + 1).trim();
+          int flags = 0;
+          if (pat.startsWith("/") && pat.lastIndexOf('/') > 0) {
+            int last = pat.lastIndexOf('/');
+            String body = pat.substring(1, last);
+            String f = pat.substring(last + 1);
+            if (f.contains("i"))
+              flags |= Pattern.CASE_INSENSITIVE;
+            pat = body;
+          }
+          rules.add(new Rule(Pattern.compile(pat, flags), key));
+        }
+      });
+    }
+
+    @Override
+    public String selectKey(String sql, String def, Map<String, String> props) {
+      for (Rule r : rules)
+        if (r.p.matcher(sql).find())
+          return r.key;
+      return null;
+    }
+  }
+
+  static final class DefaultRoutingStrategy implements RoutingStrategy {
+    @Override
+    public String selectKey(String sql, String def, Map<String, String> props) {
+      return def;
     }
   }
 
   // ---------- Connection ----------
   static final class RoutedConnection implements Connection {
     private final Parsed cfg;
+
     private Connection active;
-    private String activeLabel;
+    private String activeKey;
     private boolean autoCommit = true;
     private boolean closed;
 
+    private final List<RoutingStrategy> strategies = new ArrayList<>();
+    private final Logger connLog;
+    private final String connId;
+    private boolean driverClassesLoaded = false;
+
     RoutedConnection(Parsed p) {
       this.cfg = p;
+      this.connId = UUID.randomUUID().toString().substring(0, 8);
+      this.connLog = LoggerFactory.getLogger("mjdbc.conn." + connId);
+      setPerConnectionLevelFromVerbosity();
+      initStrategies();
+    }
+
+    private void initStrategies() {
+      String order = cfg.props.getOrDefault("route", "hint,regex,default");
+      for (String s : order.split(",")) {
+        String st = s.trim().toLowerCase(Locale.ROOT);
+        switch (st) {
+        case "hint" -> strategies.add(new HintRoutingStrategy());
+        case "regex" -> strategies.add(new RegexRoutingStrategy(cfg.props));
+        case "default" -> strategies.add(new DefaultRoutingStrategy());
+        default -> {
+          /* ignore unknown */ }
+        }
+      }
+      if (strategies.isEmpty())
+        strategies.add(new DefaultRoutingStrategy());
+    }
+
+    private void setPerConnectionLevelFromVerbosity() {
+      int v;
+      try {
+        v = Integer.parseInt(cfg.props.getOrDefault("verbosity", "0"));
+      } catch (NumberFormatException e) {
+        v = 0;
+      }
+      // Map 0..5 to a level for this connection logger only
+      ch.qos.logback.classic.Level level = (v >= 4) ? ch.qos.logback.classic.Level.TRACE
+          : (v == 3) ? ch.qos.logback.classic.Level.DEBUG
+              : (v >= 1) ? ch.qos.logback.classic.Level.INFO : ch.qos.logback.classic.Level.WARN;
+      if (connLog instanceof ch.qos.logback.classic.Logger lb) {
+        lb.setLevel(level);
+        lb.setAdditive(true); // keep global appenders configured by RichLogback
+      }
     }
 
     private String sticky() {
@@ -166,64 +351,75 @@ public final class MjdbcDriver implements java.sql.Driver {
       return v == null ? "tx" : v;
     }
 
-    private int verbosity() {
-      String v = cfg.props.get("verbosity");
-      try {
-        return v == null ? 0 : Integer.parseInt(v);
-      } catch (NumberFormatException e) {
-        return 0;
-      }
-    }
-
-    private void logRoute(String stage, String label, String sql) {
-      // Always log; RichLogback's verbosity decides what actually appears.
-      if (log.isDebugEnabled()) {
-        String active = (activeLabel == null ? "-" : activeLabel);
-        log.debug("{} sticky={} active={} -> ds={}", stage, sticky(), active, label);
-        if (log.isTraceEnabled() && sql != null) {
-          // Full SQL (hint stripped) only at TRACE to avoid noise
-          log.trace("sql={}", stripHint(sql));
+    private void ensureDriverClassesLoadedOnce() {
+      if (driverClassesLoaded)
+        return;
+      String list = cfg.props.getOrDefault("drivers", "").trim();
+      if (!list.isEmpty()) {
+        for (String cn : list.split(",")) {
+          String cls = cn.trim();
+          if (cls.isEmpty())
+            continue;
+          try {
+            Class.forName(cls);
+            connLog.debug("Loaded driver class: {}", cls);
+          } catch (Throwable t) {
+            connLog.warn("Driver class not found or failed to load: {}", cls);
+          }
         }
       }
+      driverClassesLoaded = true;
     }
 
-    private static String truncate(String s, int n) {
-      return s.length() <= n ? s : s.substring(0, n) + "...";
-    }
-
-    private Connection backend(String label) throws SQLException {
-      log.trace("");
-      String jdbcUrl = cfg.labelToUrl.get(label);
+    private Connection backend(String key) throws SQLException {
+      ensureDriverClassesLoadedOnce();
+      String jdbcUrl = cfg.keyToUrl.get(key);
       if (jdbcUrl == null)
-        throw new SQLException("Unknown backend label: " + label);
-      if (jdbcUrl.startsWith("jdbc:postgresql:")) {
-        try {
-          Class.forName("org.postgresql.Driver");
-        } catch (Throwable ignore) {
-        }
-      } else if (jdbcUrl.startsWith("jdbc:oracle:")) {
-        try {
-          Class.forName("oracle.jdbc.OracleDriver");
-        } catch (Throwable ignore) {
-        }
-      }
+        throw new SQLException("Unknown datasource key: " + key);
       Connection c = DriverManager.getConnection(jdbcUrl);
       if (!autoCommit)
         c.setAutoCommit(false);
       return c;
     }
 
-    private void ensureBackendForTx(String label) throws SQLException {
+    private record Choice(String key, String sql) {
+    }
+
+    private Choice chooseKeyAndSql(String sql) throws SQLException {
+      String chosen = null;
+      String transformed = sql;
+      for (RoutingStrategy st : strategies) {
+        String k = st.selectKey(sql, cfg.defaultKey, cfg.props);
+        if (k != null) {
+          chosen = k;
+          transformed = st.transformSql(transformed);
+          break;
+        }
+      }
+      if (chosen == null)
+        chosen = cfg.defaultKey;
+      return new Choice(chosen, transformed);
+    }
+
+    private void logRoute(String stage, String key, String sql) {
+      if (connLog.isDebugEnabled()) {
+        connLog.debug("{} sticky={} active={} -> ds-key={}", stage, sticky(), activeKey == null ? "-" : activeKey, key);
+        if (connLog.isTraceEnabled() && sql != null)
+          connLog.trace("sql={}", sql);
+      }
+    }
+
+    private void ensureBackendForTx(String key) throws SQLException {
       String mode = sticky();
       if ("statement".equalsIgnoreCase(mode))
-        return; // per-statement handled outside
+        return; // handled per invocation
       if (active == null) {
-        active = backend(label);
-        activeLabel = label;
-        logRoute("open-backend", label, "/*open*/");
+        active = backend(key);
+        activeKey = key;
+        logRoute("open-backend", key, "/*open*/");
         return;
       }
-      if (Objects.equals(activeLabel, label))
+      if (Objects.equals(activeKey, key))
         return;
 
       if ("session".equalsIgnoreCase(mode)) {
@@ -231,59 +427,33 @@ public final class MjdbcDriver implements java.sql.Driver {
           active.close();
         } catch (SQLException ignore) {
         }
-        active = backend(label);
-        activeLabel = label;
-        logRoute("switch-backend(session)", label, "/*switch*/");
+        active = backend(key);
+        activeKey = key;
+        logRoute("switch-backend(session)", key, "/*switch*/");
         return;
       }
 
-      // sticky=tx
       if (autoCommit) {
         try {
           active.close();
         } catch (SQLException ignore) {
         }
-        active = backend(label);
-        activeLabel = label;
-        logRoute("switch-backend(autocommit)", label, "/*switch*/");
+        active = backend(key);
+        activeKey = key;
+        logRoute("switch-backend(autocommit)", key, "/*switch*/");
       } else {
         throw new SQLException(
-            "Cannot switch backend within an open transaction (sticky=tx). COMMIT/ROLLBACK or set sticky=session/statement.");
+            "Cannot switch datasource within an open transaction (sticky=tx). COMMIT/ROLLBACK or set sticky=session/statement.");
       }
     }
 
-    Connection openBackendForStatement(String label) throws SQLException {
-      Connection c = backend(label);
-      logRoute("open-backend(stmt)", label, "/*stmt-open*/");
+    Connection openBackendForStatement(String key) throws SQLException {
+      Connection c = backend(key);
+      logRoute("open-backend(stmt)", key, "/*stmt-open*/");
       return c;
     }
 
-    // ----- hint helpers -----
-    static String parseHintLabel(String sql, String def) throws SQLException {
-      String s = sql.trim();
-      if (s.startsWith("/*ds:")) {
-        int e = s.indexOf("*/");
-        if (e < 0)
-          throw new SQLException("Malformed routing hint. Expected closing */");
-        String inside = s.substring(5, e).trim();
-        if (inside.isEmpty())
-          throw new SQLException("Empty ds label in hint.");
-        return inside;
-      }
-      return def;
-    }
-
-    static String stripHint(String sql) {
-      String s = sql.trim();
-      if (s.startsWith("/*ds:")) {
-        int e = s.indexOf("*/");
-        if (e > 0)
-          return s.substring(e + 2).trim();
-      }
-      return sql;
-    }
-
-    // ----- Statement factories -----
+    // ---------- Statement factories ----------
     @Override
     public Statement createStatement() throws SQLException {
       return new RoutedStatement(this);
@@ -300,7 +470,7 @@ public final class MjdbcDriver implements java.sql.Driver {
       return new RoutedStatement(this, resultSetType, resultSetConcurrency, resultSetHoldability);
     }
 
-    // ----- PreparedStatement factories -----
+    // ---------- PreparedStatement factories ----------
     @Override
     public PreparedStatement prepareStatement(String sql) throws SQLException {
       return ps(sql, (c, body) -> c.prepareStatement(body));
@@ -333,7 +503,7 @@ public final class MjdbcDriver implements java.sql.Driver {
       return ps(sql, (c, body) -> c.prepareStatement(body, resultSetType, resultSetConcurrency, resultSetHoldability));
     }
 
-    // ----- CallableStatement factories -----
+    // ---------- CallableStatement factories ----------
     @Override
     public CallableStatement prepareCall(String sql) throws SQLException {
       return cs(sql, (c, body) -> c.prepareCall(body));
@@ -350,22 +520,21 @@ public final class MjdbcDriver implements java.sql.Driver {
       return cs(sql, (c, body) -> c.prepareCall(body, resultSetType, resultSetConcurrency, resultSetHoldability));
     }
 
-    // ----- shared factory helpers -----
+    // ---------- shared factory helpers ----------
     private interface PSFactory {
       PreparedStatement make(Connection c, String body) throws SQLException;
     }
 
     private PreparedStatement ps(String sql, PSFactory f) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
+      Choice ch = chooseKeyAndSql(sql);
       if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        logRoute("prepareStatement(stmt)", label, body);
-        return autoClose(f.make(c, body), c);
+        Connection c = openBackendForStatement(ch.key);
+        logRoute("prepareStatement(stmt)", ch.key, ch.sql);
+        return autoClose(f.make(c, ch.sql), c);
       }
-      ensureBackendForTx(label);
-      logRoute("prepareStatement", label, body);
-      return f.make(active, body);
+      ensureBackendForTx(ch.key);
+      logRoute("prepareStatement", ch.key, ch.sql);
+      return f.make(active, ch.sql);
     }
 
     private interface CSFactory {
@@ -373,16 +542,15 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     private CallableStatement cs(String sql, CSFactory f) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
+      Choice ch = chooseKeyAndSql(sql);
       if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        logRoute("prepareCall(stmt)", label, body);
-        return autoClose(f.make(c, body), c);
+        Connection c = openBackendForStatement(ch.key);
+        logRoute("prepareCall(stmt)", ch.key, ch.sql);
+        return autoClose(f.make(c, ch.sql), c);
       }
-      ensureBackendForTx(label);
-      logRoute("prepareCall", label, body);
-      return f.make(active, body);
+      ensureBackendForTx(ch.key);
+      logRoute("prepareCall", ch.key, ch.sql);
+      return f.make(active, ch.sql);
     }
 
     private PreparedStatement autoClose(PreparedStatement d, Connection c) {
@@ -419,7 +587,7 @@ public final class MjdbcDriver implements java.sql.Driver {
           });
     }
 
-    // ----- Tx / meta / boilerplate -----
+    // ---------- Tx / meta / boilerplate ----------
     @Override
     public void setAutoCommit(boolean ac) throws SQLException {
       this.autoCommit = ac;
@@ -459,9 +627,9 @@ public final class MjdbcDriver implements java.sql.Driver {
     private Connection metaConn() throws SQLException {
       if (active != null)
         return active;
-      active = backend(cfg.defaultLabel);
-      activeLabel = cfg.defaultLabel;
-      logRoute("open-backend(meta)", activeLabel, "/*meta*/");
+      active = backend(cfg.defaultKey);
+      activeKey = cfg.defaultKey;
+      logRoute("open-backend(meta)", activeKey, "/*meta*/");
       return active;
     }
 
@@ -656,7 +824,6 @@ public final class MjdbcDriver implements java.sql.Driver {
     private final int rsConcurrency;
     private final int rsHoldability;
 
-    // delegate state for DBeaver execute()/getResultSet() flow
     private Statement delegateStmt;
     private Connection delegateConn; // only for sticky=statement
     private ResultSet lastResultSet;
@@ -674,8 +841,6 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     private Statement createStmtSafe(Connection c) throws SQLException {
-      // Try full signature; on driver complaints (e.g., Oracle holdability), fall
-      // back progressively.
       try {
         return c.createStatement(rsType, rsConcurrency, rsHoldability);
       } catch (SQLFeatureNotSupportedException | SQLSyntaxErrorException | SQLDataException e) {
@@ -714,25 +879,26 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     private Connection routeOpen(String sql) throws SQLException {
-      String label = MjdbcDriver.RoutedConnection.parseHintLabel(sql, parent.cfg.defaultLabel);
+      MjdbcDriver.RoutedConnection.Choice ch = parent.chooseKeyAndSql(sql);
+      String key = ch.key();
+      String body = ch.sql();
       if ("statement".equalsIgnoreCase(parent.sticky())) {
-        parent.logRoute("stmt-open(stmt)", label, sql);
-        Connection c = parent.openBackendForStatement(label);
-        delegateConn = c;
-        return c;
+        parent.logRoute("stmt-open(stmt)", key, body);
+        delegateConn = parent.openBackendForStatement(key);
+        return delegateConn;
       }
-      parent.ensureBackendForTx(label);
-      parent.logRoute("stmt-open", label, sql);
+      parent.ensureBackendForTx(key);
+      parent.logRoute("stmt-open", key, body);
       return parent.active;
     }
 
-    private String body(String sql) {
-      return MjdbcDriver.RoutedConnection.stripHint(sql);
+    private String body(String sql) throws SQLException {
+      return parent.chooseKeyAndSql(sql).sql(); // keep single transform path
     }
 
     @Override
     public boolean execute(String sql) throws SQLException {
-      closeDelegate(); // new execution invalidates previous delegate
+      closeDelegate();
       Connection c = routeOpen(sql);
       delegateStmt = createStmtSafe(c);
       boolean hasRS = delegateStmt.execute(body(sql));
@@ -766,7 +932,7 @@ public final class MjdbcDriver implements java.sql.Driver {
       return lastUpdateCount;
     }
 
-    // ---- DBeaver relies on these after execute() ----
+    // ---- DBeaver flow helpers ----
     @Override
     public ResultSet getResultSet() {
       return lastResultSet;
@@ -959,20 +1125,17 @@ public final class MjdbcDriver implements java.sql.Driver {
 
     @Override
     public boolean execute(String sql, int autoGeneratedKeys) throws SQLException {
-      boolean b = execute(sql);
-      return b;
+      return execute(sql);
     }
 
     @Override
     public boolean execute(String sql, int[] columnIndexes) throws SQLException {
-      boolean b = execute(sql);
-      return b;
+      return execute(sql);
     }
 
     @Override
     public boolean execute(String sql, String[] columnNames) throws SQLException {
-      boolean b = execute(sql);
-      return b;
+      return execute(sql);
     }
 
     @Override
