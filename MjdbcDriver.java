@@ -5,60 +5,36 @@
 //DEPS com.oracle.database.jdbc:ojdbc11:23.4.0.24.05
 package org.raisercostin.mjdbc;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.lang.reflect.Proxy;
-import java.sql.Array;
-import java.sql.Blob;
-import java.sql.CallableStatement;
-import java.sql.Clob;
-import java.sql.Connection;
-import java.sql.DatabaseMetaData;
-import java.sql.Driver;
-import java.sql.DriverManager;
-import java.sql.DriverPropertyInfo;
-import java.sql.NClob;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.SQLWarning;
-import java.sql.SQLXML;
-import java.sql.Savepoint;
-import java.sql.Statement;
-import java.sql.Struct;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Properties;
-import java.util.logging.Logger;
+import java.sql.*;
+import java.util.*;
 
 /*
 JDBC URL format:
-  jdbc:mjdbc:default=ds1;ds1=<JDBC-URL-1>;ds2=<JDBC-URL-2>[;prop.key=val...]
+  jdbc:mjdbc:default=<label>;[sticky=tx|session|statement];[debug=true];<label>=<jdbc-url>;...
 
 Examples:
-  jdbc:mjdbc:default=ora;ora=jdbc:oracle:thin:@//host:1521/xepdb1?user=u&password=p;pg=jdbc:postgresql://host:5432/app?user=u&password=p
-  jdbc:mjdbc:default=pg;pg=jdbc:postgresql://...;ora=jdbc:oracle:thin:@...
+  jdbc:mjdbc:default=ora;sticky=statement;debug=true;
+    ora=jdbc:oracle:thin:@//host:1521/xepdb1?user=u&password=p;
+    pg=jdbc:postgresql://localhost:5432/postgres?user=postgres&password=secret
 
 Routing hint per statement:
-  \/*ds:pg*\/ SELECT ...        -- routes this statement to the backend labeled pg
-No hint uses the default backend.
-
-Notes:
-- Passthrough: SQL is forwarded as-is after stripping only the leading comment hint.
-- Transactions sticky modes via URL prop 'sticky':
-    sticky=tx        (default)  pin backend during a transaction, switch only when autocommit=true
-    sticky=session              pin backend for the session; switch closes previous backend
-    sticky=statement            open a fresh backend per statement (good for DBeaver reuse)
+  /\*ds:pg*\/ SELECT ...
 */
 
 public final class MjdbcDriver implements java.sql.Driver {
+  private static final Logger log = LoggerFactory.getLogger("mjdbc");
+
   static {
     try {
       DriverManager.registerDriver(new MjdbcDriver());
     } catch (SQLException e) {
       throw new ExceptionInInitializerError(e);
     }
-    // best-effort auto-registration of common backends present on classpath
+
     try {
       Class.forName("org.postgresql.Driver");
     } catch (Throwable ignore) {
@@ -67,12 +43,21 @@ public final class MjdbcDriver implements java.sql.Driver {
       Class.forName("oracle.jdbc.OracleDriver");
     } catch (Throwable ignore) {
     }
+
+    // Optional RichLogback autoconfig if present
+    try {
+      Class<?> cls = Class.forName("com.namekis.utils.RichLogback");
+      cls.getMethod("configureLogbackByVerbosity", int.class, boolean.class, boolean.class).invoke(null, 3, false,
+          true);
+      log.info("RichLogback configured (verbosity=3, color=true)");
+    } catch (Throwable ignore) {
+    }
   }
 
   public static void main(String[] args) {
-    System.out.println("mjdbc JDBC driver loaded. Example URL:");
-    System.out.println(
-        "jdbc:mjdbc:default=pg;sticky=statement;pg=jdbc:postgresql://localhost:5432/postgres?user=postgres&password=secret;ora=jdbc:oracle:thin:@//host:1521/XEPDB1?user=u&password=p");
+    log.info("mjdbc driver loaded.");
+    log.info(
+        "Example URL: jdbc:mjdbc:default=pg;sticky=statement;verbosity=3;pg=jdbc:postgresql://localhost:5432/postgres?user=postgres&password=secret;ora=jdbc:oracle:thin:@//host:1521/XEPDB1?user=u&password=p");
   }
 
   @Override
@@ -80,6 +65,16 @@ public final class MjdbcDriver implements java.sql.Driver {
     if (!acceptsURL(url))
       return null;
     Parsed p = Parsed.parse(url);
+    try {
+      String vv = p.props.get("verbosity");
+      int verbosity = (vv == null) ? 4 : Integer.parseInt(vv);
+      Class<?> cls = Class.forName("com.namekis.utils.RichLogback");
+      cls.getMethod("configureLogbackByVerbosity", int.class, boolean.class, boolean.class).invoke(null, verbosity,
+          false, true);
+      log.info("mjdbc logging configured via RichLogback (verbosity={})", verbosity);
+    } catch (Throwable e) {
+      log.warn("Couldn't configure logging", e);
+    }
     return new RoutedConnection(p);
   }
 
@@ -100,7 +95,7 @@ public final class MjdbcDriver implements java.sql.Driver {
 
   @Override
   public int getMinorVersion() {
-    return 2;
+    return 4;
   }
 
   @Override
@@ -109,20 +104,20 @@ public final class MjdbcDriver implements java.sql.Driver {
   }
 
   @Override
-  public Logger getParentLogger() {
-    return Logger.getLogger("mjdbc");
+  public java.util.logging.Logger getParentLogger() {
+    return java.util.logging.Logger.getLogger("mjdbc");
   }
 
-  // Parse jdbc:mjdbc:default=ds1;ds1=jdbc:...;ds2=jdbc:...
+  // ---------- URL parsing ----------
   static final class Parsed {
     final String defaultLabel;
     final Map<String, String> labelToUrl;
-    final Map<String, String> extraProps;
+    final Map<String, String> props;
 
-    private Parsed(String def, Map<String, String> m, Map<String, String> props) {
+    private Parsed(String def, Map<String, String> map, Map<String, String> props) {
       this.defaultLabel = def;
-      this.labelToUrl = m;
-      this.extraProps = props;
+      this.labelToUrl = map;
+      this.props = props;
     }
 
     static Parsed parse(String url) throws SQLException {
@@ -133,7 +128,7 @@ public final class MjdbcDriver implements java.sql.Driver {
       for (String part : spec.split(";", -1)) {
         if (part.isEmpty())
           continue;
-        int eq = part.indexOf("=");
+        int eq = part.indexOf('=');
         if (eq < 0)
           throw new SQLException("Malformed segment: " + part);
         String k = part.substring(0, eq).trim();
@@ -148,18 +143,17 @@ public final class MjdbcDriver implements java.sql.Driver {
       }
       if (def == null || !map.containsKey(def))
         throw new SQLException("default label missing or unknown.");
-      // default sticky
-      props.putIfAbsent("sticky", "tx"); // tx | session | statement
+      props.putIfAbsent("sticky", "tx"); // tx|session|statement
+      props.putIfAbsent("verbosity", "0"); // 0..5 (0 = off)
       return new Parsed(def, map, props);
     }
   }
 
+  // ---------- Connection ----------
   static final class RoutedConnection implements Connection {
     private final Parsed cfg;
-    @SuppressWarnings("unused")
-    private final Map<String, Driver> loadedDrivers = new HashMap<>();
-    Connection active; // current backend connection for this logical connection
-    String activeLabel; // label of active backend
+    private Connection active;
+    private String activeLabel;
     private boolean autoCommit = true;
     private boolean closed;
 
@@ -168,16 +162,40 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     private String sticky() {
-      String v = cfg.extraProps.get("sticky");
+      String v = cfg.props.get("sticky");
       return v == null ? "tx" : v;
     }
 
-    // Acquire a backend connection by label lazily
+    private int verbosity() {
+      String v = cfg.props.get("verbosity");
+      try {
+        return v == null ? 0 : Integer.parseInt(v);
+      } catch (NumberFormatException e) {
+        return 0;
+      }
+    }
+
+    private void logRoute(String stage, String label, String sql) {
+      // Always log; RichLogback's verbosity decides what actually appears.
+      if (log.isDebugEnabled()) {
+        String active = (activeLabel == null ? "-" : activeLabel);
+        log.debug("{} sticky={} active={} -> ds={}", stage, sticky(), active, label);
+        if (log.isTraceEnabled() && sql != null) {
+          // Full SQL (hint stripped) only at TRACE to avoid noise
+          log.trace("sql={}", stripHint(sql));
+        }
+      }
+    }
+
+    private static String truncate(String s, int n) {
+      return s.length() <= n ? s : s.substring(0, n) + "...";
+    }
+
     private Connection backend(String label) throws SQLException {
+      log.trace("");
       String jdbcUrl = cfg.labelToUrl.get(label);
       if (jdbcUrl == null)
         throw new SQLException("Unknown backend label: " + label);
-      // ensure vendor driver is loaded when called by URL
       if (jdbcUrl.startsWith("jdbc:postgresql:")) {
         try {
           Class.forName("org.postgresql.Driver");
@@ -189,22 +207,20 @@ public final class MjdbcDriver implements java.sql.Driver {
         } catch (Throwable ignore) {
         }
       }
-      return DriverManager.getConnection(jdbcUrl);
-    }
-
-    Connection openBackendForStatement(String label) throws SQLException {
-      return backend(label);
+      Connection c = DriverManager.getConnection(jdbcUrl);
+      if (!autoCommit)
+        c.setAutoCommit(false);
+      return c;
     }
 
     private void ensureBackendForTx(String label) throws SQLException {
       String mode = sticky();
-      if ("statement".equalsIgnoreCase(mode)) {
-        // handled per-statement by callers
-        return;
-      }
+      if ("statement".equalsIgnoreCase(mode))
+        return; // per-statement handled outside
       if (active == null) {
         active = backend(label);
         activeLabel = label;
+        logRoute("open-backend", label, "/*open*/");
         return;
       }
       if (Objects.equals(activeLabel, label))
@@ -217,10 +233,11 @@ public final class MjdbcDriver implements java.sql.Driver {
         }
         active = backend(label);
         activeLabel = label;
+        logRoute("switch-backend(session)", label, "/*switch*/");
         return;
       }
 
-      // tx mode
+      // sticky=tx
       if (autoCommit) {
         try {
           active.close();
@@ -228,12 +245,20 @@ public final class MjdbcDriver implements java.sql.Driver {
         }
         active = backend(label);
         activeLabel = label;
+        logRoute("switch-backend(autocommit)", label, "/*switch*/");
       } else {
         throw new SQLException(
-            "Cannot switch backend within an open transaction. sticky=tx. Use COMMIT or set sticky=session or sticky=statement.");
+            "Cannot switch backend within an open transaction (sticky=tx). COMMIT/ROLLBACK or set sticky=session/statement.");
       }
     }
 
+    Connection openBackendForStatement(String label) throws SQLException {
+      Connection c = backend(label);
+      logRoute("open-backend(stmt)", label, "/*stmt-open*/");
+      return c;
+    }
+
+    // ----- hint helpers -----
     static String parseHintLabel(String sql, String def) throws SQLException {
       String s = sql.trim();
       if (s.startsWith("/*ds:")) {
@@ -258,7 +283,7 @@ public final class MjdbcDriver implements java.sql.Driver {
       return sql;
     }
 
-    // ---------- Statement factories ----------
+    // ----- Statement factories -----
     @Override
     public Statement createStatement() throws SQLException {
       return new RoutedStatement(this);
@@ -275,120 +300,126 @@ public final class MjdbcDriver implements java.sql.Driver {
       return new RoutedStatement(this, resultSetType, resultSetConcurrency, resultSetHoldability);
     }
 
-    // ---------- PreparedStatement factories ----------
+    // ----- PreparedStatement factories -----
     @Override
     public PreparedStatement prepareStatement(String sql) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
-      if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareStatement(body), c);
-      }
-      ensureBackendForTx(label);
-      return active.prepareStatement(body);
+      return ps(sql, (c, body) -> c.prepareStatement(body));
     }
 
     @Override
     public PreparedStatement prepareStatement(String sql, int autoGeneratedKeys) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
-      if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareStatement(body, autoGeneratedKeys), c);
-      }
-      ensureBackendForTx(label);
-      return active.prepareStatement(body, autoGeneratedKeys);
+      return ps(sql, (c, body) -> c.prepareStatement(body, autoGeneratedKeys));
     }
 
     @Override
     public PreparedStatement prepareStatement(String sql, int[] columnIndexes) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
-      if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareStatement(body, columnIndexes), c);
-      }
-      ensureBackendForTx(label);
-      return active.prepareStatement(body, columnIndexes);
+      return ps(sql, (c, body) -> c.prepareStatement(body, columnIndexes));
     }
 
     @Override
     public PreparedStatement prepareStatement(String sql, String[] columnNames) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
-      if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareStatement(body, columnNames), c);
-      }
-      ensureBackendForTx(label);
-      return active.prepareStatement(body, columnNames);
+      return ps(sql, (c, body) -> c.prepareStatement(body, columnNames));
     }
 
     @Override
     public PreparedStatement prepareStatement(String sql, int resultSetType, int resultSetConcurrency)
         throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
-      if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareStatement(body, resultSetType, resultSetConcurrency), c);
-      }
-      ensureBackendForTx(label);
-      return active.prepareStatement(body, resultSetType, resultSetConcurrency);
+      return ps(sql, (c, body) -> c.prepareStatement(body, resultSetType, resultSetConcurrency));
     }
 
     @Override
     public PreparedStatement prepareStatement(String sql, int resultSetType, int resultSetConcurrency,
         int resultSetHoldability) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
-      if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareStatement(body, resultSetType, resultSetConcurrency, resultSetHoldability), c);
-      }
-      ensureBackendForTx(label);
-      return active.prepareStatement(body, resultSetType, resultSetConcurrency, resultSetHoldability);
+      return ps(sql, (c, body) -> c.prepareStatement(body, resultSetType, resultSetConcurrency, resultSetHoldability));
     }
 
-    // ---------- CallableStatement factories ----------
+    // ----- CallableStatement factories -----
     @Override
     public CallableStatement prepareCall(String sql) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
-      if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareCall(body), c);
-      }
-      ensureBackendForTx(label);
-      return active.prepareCall(body);
+      return cs(sql, (c, body) -> c.prepareCall(body));
     }
 
     @Override
     public CallableStatement prepareCall(String sql, int resultSetType, int resultSetConcurrency) throws SQLException {
-      String label = parseHintLabel(sql, cfg.defaultLabel);
-      String body = stripHint(sql);
-      if ("statement".equalsIgnoreCase(sticky())) {
-        Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareCall(body, resultSetType, resultSetConcurrency), c);
-      }
-      ensureBackendForTx(label);
-      return active.prepareCall(body, resultSetType, resultSetConcurrency);
+      return cs(sql, (c, body) -> c.prepareCall(body, resultSetType, resultSetConcurrency));
     }
 
     @Override
     public CallableStatement prepareCall(String sql, int resultSetType, int resultSetConcurrency,
         int resultSetHoldability) throws SQLException {
+      return cs(sql, (c, body) -> c.prepareCall(body, resultSetType, resultSetConcurrency, resultSetHoldability));
+    }
+
+    // ----- shared factory helpers -----
+    private interface PSFactory {
+      PreparedStatement make(Connection c, String body) throws SQLException;
+    }
+
+    private PreparedStatement ps(String sql, PSFactory f) throws SQLException {
       String label = parseHintLabel(sql, cfg.defaultLabel);
       String body = stripHint(sql);
       if ("statement".equalsIgnoreCase(sticky())) {
         Connection c = openBackendForStatement(label);
-        return autoClose(c.prepareCall(body, resultSetType, resultSetConcurrency, resultSetHoldability), c);
+        logRoute("prepareStatement(stmt)", label, body);
+        return autoClose(f.make(c, body), c);
       }
       ensureBackendForTx(label);
-      return active.prepareCall(body, resultSetType, resultSetConcurrency, resultSetHoldability);
+      logRoute("prepareStatement", label, body);
+      return f.make(active, body);
     }
 
-    // ---------- Transaction control ----------
+    private interface CSFactory {
+      CallableStatement make(Connection c, String body) throws SQLException;
+    }
+
+    private CallableStatement cs(String sql, CSFactory f) throws SQLException {
+      String label = parseHintLabel(sql, cfg.defaultLabel);
+      String body = stripHint(sql);
+      if ("statement".equalsIgnoreCase(sticky())) {
+        Connection c = openBackendForStatement(label);
+        logRoute("prepareCall(stmt)", label, body);
+        return autoClose(f.make(c, body), c);
+      }
+      ensureBackendForTx(label);
+      logRoute("prepareCall", label, body);
+      return f.make(active, body);
+    }
+
+    private PreparedStatement autoClose(PreparedStatement d, Connection c) {
+      return (PreparedStatement) Proxy.newProxyInstance(d.getClass().getClassLoader(),
+          new Class<?>[] { PreparedStatement.class }, (proxy, method, args) -> {
+            if ("close".equals(method.getName())) {
+              try {
+                return method.invoke(d, args);
+              } finally {
+                try {
+                  c.close();
+                } catch (Throwable ignore) {
+                }
+              }
+            }
+            return method.invoke(d, args);
+          });
+    }
+
+    private CallableStatement autoClose(CallableStatement d, Connection c) {
+      return (CallableStatement) Proxy.newProxyInstance(d.getClass().getClassLoader(),
+          new Class<?>[] { CallableStatement.class }, (proxy, method, args) -> {
+            if ("close".equals(method.getName())) {
+              try {
+                return method.invoke(d, args);
+              } finally {
+                try {
+                  c.close();
+                } catch (Throwable ignore) {
+                }
+              }
+            }
+            return method.invoke(d, args);
+          });
+    }
+
+    // ----- Tx / meta / boilerplate -----
     @Override
     public void setAutoCommit(boolean ac) throws SQLException {
       this.autoCommit = ac;
@@ -413,7 +444,6 @@ public final class MjdbcDriver implements java.sql.Driver {
         active.rollback();
     }
 
-    // ---------- Close ----------
     @Override
     public void close() throws SQLException {
       if (active != null)
@@ -426,44 +456,13 @@ public final class MjdbcDriver implements java.sql.Driver {
       return closed;
     }
 
-    // ---------- Metadata delegation ----------
     private Connection metaConn() throws SQLException {
       if (active != null)
         return active;
-
-      // Always open a real backend for metadata, even in sticky=statement.
-      // Use the default label so DBeaver can introspect schemas/tables.
-      String def = cfg.defaultLabel;
-      active = backend(def);
-      activeLabel = def;
-      if (!autoCommit)
-        active.setAutoCommit(false);
-
-      // optional debug
-      logRoute("open-backend(meta)", def, "/*meta*/");
-
+      active = backend(cfg.defaultLabel);
+      activeLabel = cfg.defaultLabel;
+      logRoute("open-backend(meta)", activeLabel, "/*meta*/");
       return active;
-    }
-
-    private void logRoute(String stage, String label, String sql) {
-      if (!debug())
-        return;
-      String msg = "[mjdbc] " + stage + " sticky=" + sticky() + " active=" + (activeLabel == null ? "-" : activeLabel)
-          + " -> ds=" + label + " sql=\"" + truncate(stripHint(sql), 160).replace("\n", " ") + "\"";
-      if ("jul".equalsIgnoreCase(cfg.extraProps.get("log"))) {
-        Logger.getLogger("mjdbc").info(msg);
-      } else {
-        System.err.println(msg);
-      }
-    }
-
-    private static String truncate(String s, int n) {
-      return s.length() <= n ? s : s.substring(0, n) + "...";
-    }
-
-    private boolean debug() {
-      String d = cfg.extraProps.get("debug");
-      return d != null && (d.equalsIgnoreCase("true") || d.equalsIgnoreCase("1") || d.equalsIgnoreCase("yes"));
     }
 
     @Override
@@ -471,7 +470,6 @@ public final class MjdbcDriver implements java.sql.Driver {
       return metaConn().getMetaData();
     }
 
-    // ---------- Boilerplate delegation ----------
     @Override
     public void setReadOnly(boolean readOnly) throws SQLException {
       metaConn().setReadOnly(readOnly);
@@ -649,49 +647,20 @@ public final class MjdbcDriver implements java.sql.Driver {
     public Savepoint setSavepoint(String name) throws SQLException {
       return metaConn().setSavepoint(name);
     }
-
-    // ---------- small helpers to autoclose backend on statement close in
-    // sticky=statement ----------
-    private PreparedStatement autoClose(PreparedStatement d, Connection c) {
-      return (PreparedStatement) Proxy.newProxyInstance(d.getClass().getClassLoader(),
-          new Class<?>[] { PreparedStatement.class }, (proxy, method, args) -> {
-            if ("close".equals(method.getName())) {
-              try {
-                return method.invoke(d, args);
-              } finally {
-                try {
-                  c.close();
-                } catch (Throwable ignore) {
-                }
-              }
-            }
-            return method.invoke(d, args);
-          });
-    }
-
-    private CallableStatement autoClose(CallableStatement d, Connection c) {
-      return (CallableStatement) Proxy.newProxyInstance(d.getClass().getClassLoader(),
-          new Class<?>[] { CallableStatement.class }, (proxy, method, args) -> {
-            if ("close".equals(method.getName())) {
-              try {
-                return method.invoke(d, args);
-              } finally {
-                try {
-                  c.close();
-                } catch (Throwable ignore) {
-                }
-              }
-            }
-            return method.invoke(d, args);
-          });
-    }
   }
 
+  // ---------- Statement ----------
   static final class RoutedStatement implements Statement {
     private final RoutedConnection parent;
     private final int rsType;
     private final int rsConcurrency;
     private final int rsHoldability;
+
+    // delegate state for DBeaver execute()/getResultSet() flow
+    private Statement delegateStmt;
+    private Connection delegateConn; // only for sticky=statement
+    private ResultSet lastResultSet;
+    private int lastUpdateCount = -1;
 
     RoutedStatement(RoutedConnection p) {
       this(p, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY, ResultSet.CLOSE_CURSORS_AT_COMMIT);
@@ -704,64 +673,152 @@ public final class MjdbcDriver implements java.sql.Driver {
       this.rsHoldability = holdability;
     }
 
+    private Statement createStmtSafe(Connection c) throws SQLException {
+      // Try full signature; on driver complaints (e.g., Oracle holdability), fall
+      // back progressively.
+      try {
+        return c.createStatement(rsType, rsConcurrency, rsHoldability);
+      } catch (SQLFeatureNotSupportedException | SQLSyntaxErrorException | SQLDataException e) {
+        try {
+          return c.createStatement(rsType, rsConcurrency);
+        } catch (SQLFeatureNotSupportedException e2) {
+          return c.createStatement();
+        }
+      }
+    }
+
+    private void clearLast() {
+      try {
+        if (lastResultSet != null)
+          lastResultSet.close();
+      } catch (SQLException ignore) {
+      }
+      lastResultSet = null;
+      lastUpdateCount = -1;
+    }
+
+    private void closeDelegate() {
+      clearLast();
+      try {
+        if (delegateStmt != null)
+          delegateStmt.close();
+      } catch (SQLException ignore) {
+      }
+      delegateStmt = null;
+      try {
+        if (delegateConn != null)
+          delegateConn.close();
+      } catch (SQLException ignore) {
+      }
+      delegateConn = null;
+    }
+
     private Connection routeOpen(String sql) throws SQLException {
-      String label = RoutedConnection.parseHintLabel(sql, parent.cfg.defaultLabel);
+      String label = MjdbcDriver.RoutedConnection.parseHintLabel(sql, parent.cfg.defaultLabel);
       if ("statement".equalsIgnoreCase(parent.sticky())) {
-        return parent.openBackendForStatement(label);
+        parent.logRoute("stmt-open(stmt)", label, sql);
+        Connection c = parent.openBackendForStatement(label);
+        delegateConn = c;
+        return c;
       }
       parent.ensureBackendForTx(label);
+      parent.logRoute("stmt-open", label, sql);
       return parent.active;
     }
 
-    private void routeClose(Connection c) {
-      try {
-        if (c != null && "statement".equalsIgnoreCase(parent.sticky()))
-          c.close();
-      } catch (SQLException ignore) {
-      }
+    private String body(String sql) {
+      return MjdbcDriver.RoutedConnection.stripHint(sql);
     }
 
     @Override
     public boolean execute(String sql) throws SQLException {
+      closeDelegate(); // new execution invalidates previous delegate
       Connection c = routeOpen(sql);
-      try (Statement s = c.createStatement(rsType, rsConcurrency, rsHoldability)) {
-        return s.execute(RoutedConnection.stripHint(sql));
-      } finally {
-        routeClose(c);
+      delegateStmt = createStmtSafe(c);
+      boolean hasRS = delegateStmt.execute(body(sql));
+      if (hasRS) {
+        lastResultSet = delegateStmt.getResultSet();
+        lastUpdateCount = -1;
+      } else {
+        lastResultSet = null;
+        lastUpdateCount = delegateStmt.getUpdateCount();
       }
+      return hasRS;
     }
 
     @Override
     public ResultSet executeQuery(String sql) throws SQLException {
+      closeDelegate();
       Connection c = routeOpen(sql);
-      Statement s = c.createStatement(rsType, rsConcurrency, rsHoldability);
-      try {
-        return s.executeQuery(RoutedConnection.stripHint(sql));
-      } catch (SQLException e) {
-        try {
-          s.close();
-        } catch (SQLException ignore) {
-        }
-        routeClose(c);
-        throw e;
-      }
+      delegateStmt = createStmtSafe(c);
+      lastResultSet = delegateStmt.executeQuery(body(sql));
+      lastUpdateCount = -1;
+      return lastResultSet;
     }
 
     @Override
     public int executeUpdate(String sql) throws SQLException {
+      closeDelegate();
       Connection c = routeOpen(sql);
-      try (Statement s = c.createStatement(rsType, rsConcurrency, rsHoldability)) {
-        return s.executeUpdate(RoutedConnection.stripHint(sql));
-      } finally {
-        routeClose(c);
-      }
+      delegateStmt = createStmtSafe(c);
+      lastUpdateCount = delegateStmt.executeUpdate(body(sql));
+      lastResultSet = null;
+      return lastUpdateCount;
     }
 
-    // -------- Minimal passthroughs / stubs --------
+    // ---- DBeaver relies on these after execute() ----
+    @Override
+    public ResultSet getResultSet() {
+      return lastResultSet;
+    }
+
+    @Override
+    public int getUpdateCount() {
+      return lastUpdateCount;
+    }
+
+    @Override
+    public boolean getMoreResults() throws SQLException {
+      if (delegateStmt == null)
+        return false;
+      boolean more = delegateStmt.getMoreResults();
+      if (more) {
+        lastResultSet = delegateStmt.getResultSet();
+        lastUpdateCount = -1;
+      } else {
+        lastResultSet = null;
+        lastUpdateCount = delegateStmt.getUpdateCount();
+      }
+      return more;
+    }
+
+    @Override
+    public boolean getMoreResults(int current) throws SQLException {
+      if (delegateStmt == null)
+        return false;
+      boolean more = delegateStmt.getMoreResults(current);
+      if (more) {
+        lastResultSet = delegateStmt.getResultSet();
+        lastUpdateCount = -1;
+      } else {
+        lastResultSet = null;
+        lastUpdateCount = delegateStmt.getUpdateCount();
+      }
+      return more;
+    }
+
+    @Override
+    public ResultSet getGeneratedKeys() throws SQLException {
+      return delegateStmt == null ? null : delegateStmt.getGeneratedKeys();
+    }
+
+    // ---- lifecycle ----
     @Override
     public void close() {
+      closeDelegate();
     }
 
+    // ---- Minimal passthroughs / stubs ----
     @Override
     public int getMaxFieldSize() {
       return 0;
@@ -795,6 +852,11 @@ public final class MjdbcDriver implements java.sql.Driver {
 
     @Override
     public void cancel() {
+      try {
+        if (delegateStmt != null)
+          delegateStmt.cancel();
+      } catch (SQLException ignore) {
+      }
     }
 
     @Override
@@ -811,18 +873,8 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     @Override
-    public ResultSet getResultSet() {
-      return null;
-    }
-
-    @Override
-    public int getUpdateCount() {
-      return -1;
-    }
-
-    @Override
-    public boolean getMoreResults() {
-      return false;
+    public int getFetchDirection() {
+      return ResultSet.FETCH_FORWARD;
     }
 
     @Override
@@ -830,17 +882,12 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     @Override
-    public int getFetchDirection() {
-      return ResultSet.FETCH_FORWARD;
+    public int getFetchSize() {
+      return 0;
     }
 
     @Override
     public void setFetchSize(int rows) {
-    }
-
-    @Override
-    public int getFetchSize() {
-      return 0;
     }
 
     @Override
@@ -873,53 +920,13 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     @Override
-    public boolean getMoreResults(int current) {
-      return false;
-    }
-
-    @Override
-    public ResultSet getGeneratedKeys() {
-      return null;
-    }
-
-    @Override
-    public int executeUpdate(String sql, int autoGeneratedKeys) throws SQLException {
-      return executeUpdate(sql);
-    }
-
-    @Override
-    public int executeUpdate(String sql, int[] columnIndexes) throws SQLException {
-      return executeUpdate(sql);
-    }
-
-    @Override
-    public int executeUpdate(String sql, String[] columnNames) throws SQLException {
-      return executeUpdate(sql);
-    }
-
-    @Override
-    public boolean execute(String sql, int autoGeneratedKeys) throws SQLException {
-      return execute(sql);
-    }
-
-    @Override
-    public boolean execute(String sql, int[] columnIndexes) throws SQLException {
-      return execute(sql);
-    }
-
-    @Override
-    public boolean execute(String sql, String[] columnNames) throws SQLException {
-      return execute(sql);
-    }
-
-    @Override
     public int getResultSetHoldability() {
       return rsHoldability;
     }
 
     @Override
     public boolean isClosed() {
-      return false;
+      return delegateStmt == null;
     }
 
     @Override
@@ -948,6 +955,39 @@ public final class MjdbcDriver implements java.sql.Driver {
     @Override
     public boolean isWrapperFor(Class<?> iface) {
       return false;
+    }
+
+    @Override
+    public boolean execute(String sql, int autoGeneratedKeys) throws SQLException {
+      boolean b = execute(sql);
+      return b;
+    }
+
+    @Override
+    public boolean execute(String sql, int[] columnIndexes) throws SQLException {
+      boolean b = execute(sql);
+      return b;
+    }
+
+    @Override
+    public boolean execute(String sql, String[] columnNames) throws SQLException {
+      boolean b = execute(sql);
+      return b;
+    }
+
+    @Override
+    public int executeUpdate(String sql, int autoGeneratedKeys) throws SQLException {
+      return executeUpdate(sql);
+    }
+
+    @Override
+    public int executeUpdate(String sql, int[] columnIndexes) throws SQLException {
+      return executeUpdate(sql);
+    }
+
+    @Override
+    public int executeUpdate(String sql, String[] columnNames) throws SQLException {
+      return executeUpdate(sql);
     }
   }
 }
