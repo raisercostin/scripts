@@ -3,6 +3,7 @@
 //DEPS ch.qos.logback:logback-classic:1.5.6
 //DEPS org.postgresql:postgresql:42.7.3
 //DEPS com.oracle.database.jdbc:ojdbc11:23.4.0.24.05
+//DEPS io.trino:trino-jdbc:476
 package org.raisercostin.mjdbc;
 
 import org.slf4j.Logger;
