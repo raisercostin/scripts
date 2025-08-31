@@ -1,9 +1,14 @@
 ///usr/bin/env jbang "$0" "$@" & exit /b %ERRORLEVEL%
+//DESCRIPTION A multiplexer jdbc driver. Can be used as proxy and gradual migrate tables to other datasource.
+//DOCS guide=./MjdbcDriver-README.md
+//JAVA 17+
 //DEPS org.slf4j:slf4j-api:2.0.13
 //DEPS ch.qos.logback:logback-classic:1.5.6
 //DEPS org.postgresql:postgresql:42.7.3
 //DEPS com.oracle.database.jdbc:ojdbc11:23.4.0.24.05
 //DEPS io.trino:trino-jdbc:476
+//DEPS com.zaxxer:HikariCP:5.1.0
+//SOURCES com/namekis/utils/RichLogback.java
 package org.raisercostin.mjdbc;
 
 import org.slf4j.Logger;
@@ -13,18 +18,35 @@ import java.lang.reflect.Proxy;
 import java.sql.*;
 import java.util.*;
 import java.util.regex.Pattern;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
 /*
-JDBC URL format:
+JDBC URL spec (all segments are ';' separated key=value):
   jdbc:mjdbc:
     default=<dsKey>;
     sticky=tx|session|statement;
     verbosity=0..5;
     route=hint,regex,default;
-    drivers=<fqcn1>,<fqcn2>,...;
+    drivers=<fqcn1>,<fqcn2>,...;        // optional: preload specific driver classes
     <dsKey>=<jdbc-url>;
     <dsKey>=<jdbc-url>;
-    ...
+    route.regex.N=<dsKey>:<regex>;      // optional regex routing rules
+  Pool config (global or per key with prefix pool.<key>.):
+    pool.maxSize=10; pool.minIdle=2; pool.idleTimeoutMs=600000; pool.maxLifetimeMs=1800000; pool.connectionTimeoutMs=30000; pool.autoCommit=true
+    pool.<key>.maxSize=... ; pool.<key>.driverClass=... ; etc.
+  Pass-through datasource properties (Hikari dataSourceProperties):
+    dsprop.<name>=value
+    dsprop.<key>.<name>=value
+
+Routing strategies (in order):
+- hint   : leading comment / * ds:<dsKey> * / picks the datasource key and is stripped.
+- regex  : config-driven regex rules route by SQL content (see route.regex.N below).
+- default: fallback to `default=<dsKey>`.
+
+Regex rules:
+  route.regex.1=pg:/\\bFROM\\s+pg_\\w+/i
+  route.regex.2=ora:/\\bFROM\\s+DUAL\\b/
 
 Examples:
   jdbc:mjdbc:
@@ -36,17 +58,9 @@ Examples:
     pg=jdbc:postgresql://localhost:5432/postgres?user=postgres&password=secret;
     ora=jdbc:oracle:thin:@//host:1521/XEPDB1?user=u&password=p
 
-Routing strategies (in order):
-- hint   : leading comment / * ds:<dsKey> * / picks the datasource key and is stripped.
-- regex  : config-driven regex rules route by SQL content (see route.regex.N below).
-- default: fallback to `default=<dsKey>`.
-
-Regex rules:
-  route.regex.1=pg:/\\bFROM\\s+pg_\\w+/i
-  route.regex.2=ora:/\\bFROM\\s+DUAL\\b/
 */
-public final class MjdbcDriver implements java.sql.Driver {
-  private static final Logger LOG = LoggerFactory.getLogger("mjdbc");
+public class MjdbcDriver implements java.sql.Driver {
+  private static final Logger LOG = LoggerFactory.getLogger(MjdbcDriver.class);
 
   static {
     try {
@@ -60,7 +74,8 @@ public final class MjdbcDriver implements java.sql.Driver {
     if (args.length == 0) {
       LOG.info("mjdbc driver loaded.");
       LOG.info("Usage: test <jdbc-url> <sql1> <sql2> ...");
-      LOG.info("Example URL: jdbc:mjdbc:default=pg;sticky=statement;verbosity=3;route=hint,regex,default;drivers=org.postgresql.Driver,oracle.jdbc.OracleDriver;pg=jdbc:postgresql://...;ora=jdbc:oracle:thin:@//...?");
+      LOG.info(
+          "Example URL: jdbc:mjdbc:default=pg;sticky=statement;verbosity=3;route=hint,regex,default;drivers=org.postgresql.Driver,oracle.jdbc.OracleDriver;pg=jdbc:postgresql://...;ora=jdbc:oracle:thin:@//...?");
       return;
     }
 
@@ -71,8 +86,7 @@ public final class MjdbcDriver implements java.sql.Driver {
       }
       String jdbcUrl = args[1];
       Class.forName("org.raisercostin.mjdbc.MjdbcDriver");
-      try (Connection conn = DriverManager.getConnection(jdbcUrl);
-           Statement st = conn.createStatement()) {
+      try (Connection conn = DriverManager.getConnection(jdbcUrl); Statement st = conn.createStatement()) {
         for (int i = 2; i < args.length; i++) {
           String sql = args[i];
           LOG.info("Executing: {}", sql);
@@ -83,7 +97,8 @@ public final class MjdbcDriver implements java.sql.Driver {
               // Print header
               StringBuilder header = new StringBuilder();
               for (int c = 1; c <= cols; c++) {
-                if (c > 1) header.append(" | ");
+                if (c > 1)
+                  header.append(" | ");
                 header.append(rs.getMetaData().getColumnLabel(c));
               }
               LOG.info("Header: {}", header);
@@ -92,7 +107,8 @@ public final class MjdbcDriver implements java.sql.Driver {
               while (rs.next()) {
                 StringBuilder row = new StringBuilder();
                 for (int c = 1; c <= cols; c++) {
-                  if (c > 1) row.append(" | ");
+                  if (c > 1)
+                    row.append(" | ");
                   row.append(rs.getString(c));
                 }
                 LOG.info("Row: {}", row);
@@ -110,27 +126,36 @@ public final class MjdbcDriver implements java.sql.Driver {
     LOG.info("Unknown command: {}. Exiting.", args[0]);
   }
 
-
-
+  private String lastUrl = null;
   @Override
   public Connection connect(String url, Properties info) throws SQLException {
     if (!acceptsURL(url))
       return null;
     Parsed p = Parsed.parse(url);
-
+    
+    if(!url.equals(lastUrl)) {
+      lastUrl = url;
     // Optional: configure global logback via your helper if present.
-    try {
-      int verbosity = Integer.parseInt(p.props.getOrDefault("verbosity", "0"));
-      Class<?> cls = Class.forName("com.namekis.utils.RichLogback");
-      cls.getMethod("configureLogbackByVerbosity", int.class, boolean.class, boolean.class).invoke(null, verbosity,
-          false, true);
-      LOG.info("mjdbc logging configured via RichLogback (verbosity={})", verbosity);
-    } catch (Throwable ignore) {
-      // Helper not present or already configured elsewhere. Proceed.
+    reconfigureOptionalLogback(p);
     }
-
+    LOG.info("Create connection via url {} and properties {}", url.replaceAll("password=[^;&]+","password=***masked***"), info);
     return new RoutedConnection(p);
   }
+
+private static void reconfigureOptionalLogback(Parsed p) {
+	try {
+      int verbosity = Integer.parseInt(p.props.getOrDefault("verbosity", "0"));
+      boolean debug = p.props.getOrDefault("debug", "false").equalsIgnoreCase("true");
+      String categories = p.props.getOrDefault("categories", "org.raisercostin.mjdbc,com.zaxxer.hikari,com.namekis.utils");
+      Class<?> cls = Class.forName("com.namekis.utils.RichLogback");
+      boolean color = false;
+      cls.getMethod("configureLogbackByVerbosity", String.class, int.class, boolean.class, boolean.class, boolean.class).invoke(null, categories, verbosity, false, color,
+          debug);
+      LOG.info("mjdbc logging configured via RichLogback (verbosity={})", verbosity);
+    } catch (Throwable e) {
+      LOG.debug("RichLogback not found or failed to configure logging. Proceeding with defaults.", e);
+    }
+}
 
   @Override
   public boolean acceptsURL(String url) {
@@ -196,7 +221,7 @@ public final class MjdbcDriver implements java.sql.Driver {
         }
       }
       if (def == null || !map.containsKey(def))
-        throw new SQLException("default key ["+def+"] missing or unknown. Available ones: "+map.keySet());
+        throw new SQLException("default key [" + def + "] missing or unknown. Available ones: " + map.keySet());
       props.putIfAbsent("sticky", "tx"); // tx|session|statement
       props.putIfAbsent("verbosity", "0"); // 0..5
       props.putIfAbsent("route", "hint,regex,default");
@@ -305,6 +330,7 @@ public final class MjdbcDriver implements java.sql.Driver {
     private final Logger connLog;
     private final String connId;
     private boolean driverClassesLoaded = false;
+    private final Map<String, HikariDataSource> pools = new HashMap<>();
 
     RoutedConnection(Parsed p) {
       this.cfg = p;
@@ -330,6 +356,38 @@ public final class MjdbcDriver implements java.sql.Driver {
         strategies.add(new DefaultRoutingStrategy());
     }
 
+    private int intProp(String key, int def) {
+      try {
+        return Integer.parseInt(cfg.props.getOrDefault(key, String.valueOf(def)));
+      } catch (NumberFormatException e) {
+        return def;
+      }
+    }
+
+    /**
+     * global-or-per-key property lookup: pool.<key>.<name> first, then pool.<name>
+     */
+    private int poolInt(String key, String name, int def) {
+      String perKey = "pool." + key + "." + name;
+      String global = "pool." + name;
+      if (cfg.props.containsKey(perKey))
+        return intProp(perKey, def);
+      return intProp(global, def);
+    }
+
+    private HikariDataSource initPool(String key, String jdbcUrl) {
+      HikariConfig hc = new HikariConfig();
+      hc.setJdbcUrl(jdbcUrl);
+      hc.setPoolName("mjdbc-" + connId + "-" + key);
+      hc.setMaximumPoolSize(poolInt(key, "maxSize", 10));
+      hc.setMinimumIdle(poolInt(key, "minIdle", 1));
+      hc.setIdleTimeout(poolInt(key, "idleTimeoutMs", 60_000));
+      hc.setMaxLifetime(poolInt(key, "maxLifetimeMs", 1_800_000));
+      hc.setConnectionTimeout(poolInt(key, "connectionTimeoutMs", 30_000));
+      // Driver detection is automatic via jdbcUrl; we still try to pre-load classes.
+      return new HikariDataSource(hc);
+    }
+
     private void setPerConnectionLevelFromVerbosity() {
       int v;
       try {
@@ -339,8 +397,7 @@ public final class MjdbcDriver implements java.sql.Driver {
       }
       // Map 0..5 to a level for this connection logger only
       ch.qos.logback.classic.Level level = (v >= 4) ? ch.qos.logback.classic.Level.TRACE
-          : (v == 3) ? ch.qos.logback.classic.Level.DEBUG
-              : (v >= 1) ? ch.qos.logback.classic.Level.INFO : ch.qos.logback.classic.Level.WARN;
+          : (v == 3) ? ch.qos.logback.classic.Level.DEBUG : (v >= 1) ? ch.qos.logback.classic.Level.INFO : ch.qos.logback.classic.Level.WARN;
       if (connLog instanceof ch.qos.logback.classic.Logger lb) {
         lb.setLevel(level);
         lb.setAdditive(true); // keep global appenders configured by RichLogback
@@ -373,14 +430,30 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     private Connection backend(String key) throws SQLException {
-      ensureDriverClassesLoadedOnce();
+      HikariDataSource ds = pool(key);
+      Connection c = ds.getConnection();
+      if (!autoCommit) {
+        try {
+          c.setAutoCommit(false);
+        } catch (SQLException ignore) {
+          // some drivers disallow toggling here, safe to proceed
+        }
+      }
+      return c;
+    }
+
+    private synchronized HikariDataSource pool(String key) throws SQLException {
+      HikariDataSource ds = pools.get(key);
+      if (ds != null)
+        return ds;
       String jdbcUrl = cfg.keyToUrl.get(key);
       if (jdbcUrl == null)
         throw new SQLException("Unknown datasource key: " + key);
-      Connection c = DriverManager.getConnection(jdbcUrl);
-      if (!autoCommit)
-        c.setAutoCommit(false);
-      return c;
+      ensureDriverClassesLoadedOnce();
+      HikariDataSource created = initPool(key, jdbcUrl);
+      pools.put(key, created);
+      connLog.debug("Initialized Hikari pool for key={}", key);
+      return created;
     }
 
     private record Choice(String key, String sql) {
@@ -443,8 +516,7 @@ public final class MjdbcDriver implements java.sql.Driver {
         activeKey = key;
         logRoute("switch-backend(autocommit)", key, "/*switch*/");
       } else {
-        throw new SQLException(
-            "Cannot switch datasource within an open transaction (sticky=tx). COMMIT/ROLLBACK or set sticky=session/statement.");
+        throw new SQLException("Cannot switch datasource within an open transaction (sticky=tx). COMMIT/ROLLBACK or set sticky=session/statement.");
       }
     }
 
@@ -466,8 +538,7 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     @Override
-    public Statement createStatement(int resultSetType, int resultSetConcurrency, int resultSetHoldability)
-        throws SQLException {
+    public Statement createStatement(int resultSetType, int resultSetConcurrency, int resultSetHoldability) throws SQLException {
       return new RoutedStatement(this, resultSetType, resultSetConcurrency, resultSetHoldability);
     }
 
@@ -493,14 +564,12 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     @Override
-    public PreparedStatement prepareStatement(String sql, int resultSetType, int resultSetConcurrency)
-        throws SQLException {
+    public PreparedStatement prepareStatement(String sql, int resultSetType, int resultSetConcurrency) throws SQLException {
       return ps(sql, (c, body) -> c.prepareStatement(body, resultSetType, resultSetConcurrency));
     }
 
     @Override
-    public PreparedStatement prepareStatement(String sql, int resultSetType, int resultSetConcurrency,
-        int resultSetHoldability) throws SQLException {
+    public PreparedStatement prepareStatement(String sql, int resultSetType, int resultSetConcurrency, int resultSetHoldability) throws SQLException {
       return ps(sql, (c, body) -> c.prepareStatement(body, resultSetType, resultSetConcurrency, resultSetHoldability));
     }
 
@@ -516,8 +585,7 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     @Override
-    public CallableStatement prepareCall(String sql, int resultSetType, int resultSetConcurrency,
-        int resultSetHoldability) throws SQLException {
+    public CallableStatement prepareCall(String sql, int resultSetType, int resultSetConcurrency, int resultSetHoldability) throws SQLException {
       return cs(sql, (c, body) -> c.prepareCall(body, resultSetType, resultSetConcurrency, resultSetHoldability));
     }
 
@@ -555,8 +623,8 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     private PreparedStatement autoClose(PreparedStatement d, Connection c) {
-      return (PreparedStatement) Proxy.newProxyInstance(d.getClass().getClassLoader(),
-          new Class<?>[] { PreparedStatement.class }, (proxy, method, args) -> {
+      return (PreparedStatement) Proxy.newProxyInstance(d.getClass().getClassLoader(), new Class<?>[] { PreparedStatement.class },
+          (proxy, method, args) -> {
             if ("close".equals(method.getName())) {
               try {
                 return method.invoke(d, args);
@@ -572,8 +640,8 @@ public final class MjdbcDriver implements java.sql.Driver {
     }
 
     private CallableStatement autoClose(CallableStatement d, Connection c) {
-      return (CallableStatement) Proxy.newProxyInstance(d.getClass().getClassLoader(),
-          new Class<?>[] { CallableStatement.class }, (proxy, method, args) -> {
+      return (CallableStatement) Proxy.newProxyInstance(d.getClass().getClassLoader(), new Class<?>[] { CallableStatement.class },
+          (proxy, method, args) -> {
             if ("close".equals(method.getName())) {
               try {
                 return method.invoke(d, args);
@@ -615,8 +683,21 @@ public final class MjdbcDriver implements java.sql.Driver {
 
     @Override
     public void close() throws SQLException {
-      if (active != null)
-        active.close();
+      if (active != null) {
+        try {
+          active.close();
+        } catch (SQLException ignore) {
+        }
+        active = null;
+      }
+      // close all pools created by this RoutedConnection
+      for (HikariDataSource ds : pools.values()) {
+        try {
+          ds.close();
+        } catch (Throwable ignore) {
+        }
+      }
+      pools.clear();
       closed = true;
     }
 

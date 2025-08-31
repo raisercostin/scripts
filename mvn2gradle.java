@@ -11,6 +11,7 @@
 //DEPS ch.qos.logback:logback-classic:1.4.14
 //DEPS org.zeroturnaround:zt-exec:1.12
 //DEPS one.util:streamex:0.8.2
+//SOURCES com/namekis/utils/RichLogback.java
 
 import java.io.File;
 import java.io.IOException;

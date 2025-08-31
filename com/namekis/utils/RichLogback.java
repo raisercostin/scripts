@@ -32,10 +32,10 @@ public class RichLogback {
 	private static final int LEVEL3_DEBUG = 3;
 	private static final int LEVEL2_INFO = 2;
 	private static final int LEVEL1_NORMAL_DETAILED = 1;
-	private static final int LEVEL0_NORMAL = 0;
+	private static final int LEVEL0_NORMAL = 0; // nothing from logs
 	private static final Logger log = LoggerFactory.getLogger(RichLogback.class);
 
-	public static void configureLogbackByVerbosity(int verbosity, boolean quiet, boolean color) {
+	public static void configureLogbackByVerbosity(String categories, int verbosity, boolean quiet, boolean color, boolean debug) {
 		LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
 		context.reset();
 
@@ -44,8 +44,8 @@ public class RichLogback {
 				? "%-10r/%d{yyyy-MM-dd HH:mm:ss.SSS} %highlight(%-5level) [%-15thread] %-40logger{36} - %msg - %C.%M\\(%F:%L\\)%n"
 				: "%-10r/%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%-15thread] %-40logger{36} - %msg - %C.%M\\(%F:%L\\)%n";
 
-		// Pattern selection by verbosity
-		String pattern = verbosity == LEVEL0_NORMAL ? simplePattern : detailedPattern;
+		// Pattern selection by verbosity: verbosity == LEVEL0_NORMAL ? simplePattern : detailedPattern;
+		String pattern = debug ? detailedPattern : simplePattern;
 
 		// STDOUT appender: INFO/DEBUG/TRACE (but not WARN/ERROR)
 		PatternLayoutEncoder outEncoder = new PatternLayoutEncoder();
@@ -127,13 +127,18 @@ public class RichLogback {
 			logLevel = Level.ERROR;
 		else
 			logLevel = Level.INFO;
-
-		ch.qos.logback.classic.Logger rootLogger = context.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
-		rootLogger.detachAndStopAllAppenders();
-		rootLogger.setLevel(logLevel);
-		rootLogger.addAppender(outAppender);
-		rootLogger.addAppender(errAppender);
-		log.debug("Logback configured with verbosity level: {}", verbosity);
+		
+		categories = (categories == null || categories.isEmpty()) ? org.slf4j.Logger.ROOT_LOGGER_NAME : categories;
+		//foreach
+		for (String category : categories.split(",")) {
+			category = category.trim();
+			ch.qos.logback.classic.Logger logger = context.getLogger(category);
+			logger.setLevel(logLevel);
+			logger.setAdditive(false); // avoid double logging
+			logger.addAppender(outAppender);
+			logger.addAppender(errAppender);
+			log.debug("Logback configured with category {} with verbosity {}", category, verbosity);
+		}
 		if (verbosity >= LEVEL5_LOGDEBUG) {
 			log.trace("test trace");
 			log.debug("test debug");

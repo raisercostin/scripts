@@ -154,13 +154,13 @@ Then use as a normal dependency in local projects.
 
 ## Version History
 
-| Version | Date       | Notes                                  |
-| - | - | -- |
-| 1.0.0   | 2025-08-29 | Initial release with routing & logging |
+- 2024-07-10 - Initial release with routing & logging
+- 2024-07-11 - Added routing strategy
+- 2024-07-11 - Connection pool integration (HikariCP)
 
 ## Future Ideas
 
-- Connection pool integration (HikariCP)
+- Add DataSource for simpler integration
 - More routing strategies (e.g., JSON rules)
 - Built-in metrics for routed queries
 - Optional tracing via OpenTelemetry
