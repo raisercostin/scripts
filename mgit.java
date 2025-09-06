@@ -16,9 +16,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -153,7 +155,7 @@ public class mgit {
     public boolean dryRun;
   }
 
-  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.2", description = description, subcommands = { MgitCheckout.class,
+  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = { MgitCheckout.class,
       Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class, PrMerged.class }, sortOptions = false)
   public static class MgitRoot extends MGitCommon implements Runnable {
     static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
@@ -180,6 +182,10 @@ public class mgit {
 
     static final Logger log = LoggerFactory.getLogger(MgitCheckout.class);
 
+    enum CheckoutResult {
+      UNCHANGED, UNCHANGED2, CHANGED, WARNED
+    }
+
     @Override
     public Integer call() throws Exception {
       RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
@@ -189,31 +195,29 @@ public class mgit {
         log.warn("No repos found.");
         return 1;
       }
-      int changed = 0, warned = 0;
+      var changes = new EnumMap<CheckoutResult, AtomicInteger>(CheckoutResult.class);
       for (File repo : repoDirs) {
-        boolean ok = checkout(repo, newBranch, from);
-        if (ok)
-          changed++;
-        else
-          warned++;
+        CheckoutResult ok = checkout(repo, newBranch, from);
+        changes.computeIfAbsent(ok, k -> new AtomicInteger(0)).incrementAndGet();
       }
-      log.info("Processed repos. Changed: {}, Warnings: {}", changed, warned);
-      return (changed == 0 && warned > 0) ? 1 : 0;
+      var all = StreamEx.of(changes.entrySet()).filter(x -> x.getValue().get() > 0).joining(",");
+      log.info("Processed repos. {}", all);
+      return changes.size() == 1 && changes.get(CheckoutResult.UNCHANGED) != null ? 0 : 1;
     }
 
-    private boolean checkout(File repo, String localBranch, String from) {
+    private CheckoutResult checkout(File repo, String localBranch, String from) {
       String effectiveFrom = DEFAULT_BRANCH.equalsIgnoreCase(from) ? getRemoteDefaultBranch(repo) : from;
       String currentBranch = getCurrentBranch(repo);
       if (currentBranch != null && currentBranch.equals(effectiveFrom) && (localBranch == null || localBranch.isBlank())) {
         log.info("[{}] Already on '{}', nothing to do.", repo.getName(), effectiveFrom);
-        return true;
+        return CheckoutResult.UNCHANGED;
       }
 
       if (localBranch != null && !localBranch.isBlank()) {
         // Create new local branch from source
         if (localBranchExists(repo, localBranch)) {
           log.warn("[{}] Local branch '{}' already exists. Skipping.", repo.getName(), localBranch);
-          return false;
+          return CheckoutResult.UNCHANGED2;
         }
         // prefer remote tracking ref if present locally (optionally fetch it if --force-fetch)
         String sourceRef;
@@ -231,11 +235,11 @@ public class mgit {
             runGitExitCode("set-upstream", repo, "branch", "--set-upstream-to", sourceRef, localBranch);
           }
           log.info("[{}] created branch '{}' from '{}' and set upstream", repo.getName(), localBranch, sourceRef);
-          return true;
+          return CheckoutResult.CHANGED;
         } else {
           log.warn("[{}] Could not create branch '{}' from '{}'. Try: mgit checkout -b {} {} --repos={}", repo.getName(), localBranch, sourceRef,
               localBranch, DEFAULT_BRANCH, repo.getName());
-          return false;
+          return CheckoutResult.WARNED;
         }
       } else {
         // Switch semantics
@@ -243,27 +247,27 @@ public class mgit {
           int exit = runGitExitCode("checkout-local", repo, "checkout", effectiveFrom);
           if (exit == 0) {
             log.info("[{}] switched to '{}'", repo.getName(), effectiveFrom);
-            return true;
+            return CheckoutResult.CHANGED;
           } else {
             log.warn("[{}] Failed to switch to '{}'. Remain on '{}'", repo.getName(), effectiveFrom, currentBranch);
-            return false;
+            return CheckoutResult.WARNED;
           }
         }
         if (ensureLocalRemoteTracking(repo, effectiveFrom)) {
           int exit = runGitExitCode("checkout-track", repo, "checkout", "--track", "origin/" + effectiveFrom);
           if (exit == 0) {
             log.info("[{}] tracking 'origin/{}'", repo.getName(), effectiveFrom);
-            return true;
+            return CheckoutResult.CHANGED;
           } else {
             log.warn("[{}] Unable to track remote 'origin/{}'. Remain on `{}`. Try: mgit checkout -b {} {} --repos={}", repo.getName(), currentBranch,
                 effectiveFrom, effectiveFrom, DEFAULT_BRANCH, repo.getName());
-            return false;
+            return CheckoutResult.WARNED;
           }
         }
         // Neither local nor remote exists
         log.warn("[{}] Branch '{}' does not exist. Remain on '{}'. To create from default: mgit checkout -b {} {} --repos={}", repo.getName(),
             effectiveFrom, currentBranch, effectiveFrom, DEFAULT_BRANCH, repo.getName());
-        return false;
+        return CheckoutResult.WARNED;
       }
     }
 
@@ -278,9 +282,14 @@ public class mgit {
     }
 
     private static boolean fetchRemoteBranch(File repo, String branch) {
-      // targeted fetch: origin/<branch> -> refs/remotes/origin/<branch>
+      // Targeted fetch: origin <branch> into local remote-tracking ref
       int exit = runGitExitCode("fetch-branch", repo, "fetch", "origin", branch + ":refs/remotes/origin/" + branch);
-      return exit == 0;
+      if (exit == 0) {
+        return true;
+      }
+      // 128: couldn't find remote ref; 1/2: generic failure. Treat as "not available" and continue.
+      log.debug("[{}] fetch-branch for '{}' returned exit {} (likely missing on remote).", repo.getName(), branch, exit);
+      return false;
     }
 
     private static boolean localBranchExists(File repo, String branch) {
@@ -728,7 +737,7 @@ public class mgit {
   }
 
   private static int runGitExitCode(String operation, File repo, String... cmd) {
-    List<String> cmdList = new ArrayList<>();
+    java.util.List<String> cmdList = new java.util.ArrayList<>();
     cmdList.add("git");
     cmdList.add("-C");
     cmdList.add(repo.getAbsolutePath());
@@ -737,15 +746,18 @@ public class mgit {
     String printableCmd = String.join(" ", cmdList);
     log.debug("run {}: {}", operation, printableCmd);
     try {
-      org.zeroturnaround.exec.ProcessExecutor proc = new org.zeroturnaround.exec.ProcessExecutor().command(cmdList).readOutput(true).exitValues(0, 1,
-          2); // allow not-found codes for probes
-      org.zeroturnaround.exec.ProcessResult result = proc.execute();
-      int exit = result.getExitValue();
-      String output = result.outputUTF8().trim();
-      log.debug("output {} (exit {}):\n{}", operation, exit, output);
-      return exit;
+      org.zeroturnaround.exec.ProcessResult r = new org.zeroturnaround.exec.ProcessExecutor().command(cmdList).redirectErrorStream(true)
+          .readOutput(true)
+          // NOTE: no .exitValues(...) — we never throw on exit code
+          .execute();
+      String out = r.outputUTF8().trim();
+      if (!out.isEmpty()) {
+        log.debug("output {}:\n{}", operation, out);
+      }
+      return r.getExitValue();
     } catch (Exception e) {
-      throw new RuntimeException("Failed on %s: [%s] %s".formatted(operation, printableCmd, e.getMessage()), e);
+      // Genuine execution failure (git missing, IO issue). Do not use for flow control.
+      throw new RuntimeException("Failed exec on %s: [%s] %s".formatted(operation, printableCmd, e.getMessage()), e);
     }
   }
 
