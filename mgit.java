@@ -37,33 +37,35 @@ import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
 public class mgit {
+  private static final String DEFAULT_BRANCH = "~DEFAULT";
   static final String description = """
-       mgit - Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
+      mgit - Multi-repo Git Tool - Allow to change multiple repos in the same way:  status, branch, commit messages, push, prs.
 
-       HISTORY:
-         2024-06: Initial version (multi-repo status, commit, push, checkout).
-         2024-08: Adds PR link detection, default branch tracking, metadata in git config.
-         2025-08: Unified --repos/--exclude filtering, status color legend, rich logging.
+      HISTORY:
+        2024-06: Initial version (multi-repo status, commit, push, checkout).
+        2024-08: Adds PR link detection, default branch tracking, metadata in git config.
+        2025-08: Unified --repos/--exclude filtering, status color legend, rich logging.
 
-       EXAMPLES:
-         scoop install jbang                                                            # Install jbang via scoop
-         jbang https://github.com/raisercostin/scripts/blob/main/mgit.java -h           # run the script from GitHub without installing
-         jbang app install https://github.com/raisercostin/scripts/blob/main/mgit.java  # install mgit app
+      EXAMPLES:
+        scoop install jbang                                                            # Install jbang via scoop
+        jbang https://github.com/raisercostin/scripts/blob/main/mgit.java -h           # run the script from GitHub without installing
+        jbang app install https://github.com/raisercostin/scripts/blob/main/mgit.java  # install mgit app
 
-         mgit status --repos=foo,bar           # Show status for foo and bar only
-         mgit checkout -b feature/foo DEFAULT  # New branch from default remote branch
-         mgit push --force-with-lease          # Push with force protection
-         mgit uprebase                         # Rebase local branch on remote default
+        mgit status --repos=foo,bar            # Show status for foo and bar only
+        mgit checkout -b feature/foo """ + DEFAULT_BRANCH + """
+      # New branch from default remote branch
+               mgit push --force-with-lease           # Push with force protection
+               mgit uprebase                          # Rebase local branch on remote default
 
-       NOTES:
-         - All commands support --repos and --exclude (comma-separated).
-         - PR creation and merge states tracked in git config (mgit.pr.<branch>.link/state).
-         - Output is always ASCII only. Colors follow Picocli conventions.
-         - Run 'mgit status --show-legend' to display status legend.
+             NOTES:
+               - All commands support --repos and --exclude (comma-separated).
+               - PR creation and merge states tracked in git config (mgit.pr.<branch>.link/state).
+               - Output is always ASCII only. Colors follow Picocli conventions.
+               - Run 'mgit status --show-legend' to display status legend.
 
-       Full docs: https://github.com/yourrepo/mgit
-       Report bugs: https://github.com/yourrepo/mgit/issues
-      """;
+             Full docs: https://github.com/yourrepo/mgit
+             Report bugs: https://github.com/yourrepo/mgit/issues
+            """;
 
   static final Logger log = LoggerFactory.getLogger(mgit.class);
 
@@ -151,7 +153,7 @@ public class mgit {
     public boolean dryRun;
   }
 
-  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = { MgitCheckout.class,
+  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.2", description = description, subcommands = { MgitCheckout.class,
       Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class, PrMerged.class }, sortOptions = false)
   public static class MgitRoot extends MGitCommon implements Runnable {
     static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
@@ -163,15 +165,20 @@ public class mgit {
     }
   }
 
-  @Command(name = "checkout", description = "Switch or create a branch in all repos. Use -b for new branch. 'DEFAULT' source uses remote default branch.")
+  @Command(name = "checkout", description = "Switch or create a branch in all repos. Use -b for new branch. '" + DEFAULT_BRANCH
+      + "' source uses remote default branch.")
   public static class MgitCheckout extends MGitWritableCommon implements Callable<Integer> {
+
     @Option(names = "-b", description = "Branch name to create and checkout (will track source).")
     String newBranch;
 
-    @Parameters(index = "0", description = "Source branch/ref/commit. Use 'DEFAULT' for remote default branch.")
+    @Parameters(index = "0", description = "Source branch/ref/commit. Use '" + DEFAULT_BRANCH + "' for remote default branch.")
     String from;
 
-    final Logger log = LoggerFactory.getLogger(MgitCheckout.class);
+    @Option(names = "--force-fetch", description = "If remote tracking ref is missing, fetch that branch before checkout.")
+    boolean forceFetch;
+
+    static final Logger log = LoggerFactory.getLogger(MgitCheckout.class);
 
     @Override
     public Integer call() throws Exception {
@@ -195,7 +202,12 @@ public class mgit {
     }
 
     private boolean checkout(File repo, String localBranch, String from) {
-      String effectiveFrom = "default".equalsIgnoreCase(from) ? getRemoteDefaultBranch(repo) : from;
+      String effectiveFrom = DEFAULT_BRANCH.equalsIgnoreCase(from) ? getRemoteDefaultBranch(repo) : from;
+      String currentBranch = getCurrentBranch(repo);
+      if (currentBranch != null && currentBranch.equals(effectiveFrom) && (localBranch == null || localBranch.isBlank())) {
+        log.info("[{}] Already on '{}', nothing to do.", repo.getName(), effectiveFrom);
+        return true;
+      }
 
       if (localBranch != null && !localBranch.isBlank()) {
         // Create new local branch from source
@@ -203,21 +215,26 @@ public class mgit {
           log.warn("[{}] Local branch '{}' already exists. Skipping.", repo.getName(), localBranch);
           return false;
         }
-        String sourceRef = remoteBranchExists(repo, effectiveFrom) ? "origin/" + effectiveFrom : effectiveFrom;
-        if (sourceRef.startsWith("origin/")) {
-          ensureRemoteTrackingRef(repo, effectiveFrom);
+        // prefer remote tracking ref if present locally (optionally fetch it if --force-fetch)
+        String sourceRef;
+        if (ensureLocalRemoteTracking(repo, effectiveFrom)) {
+          sourceRef = "origin/" + effectiveFrom;
+        } else {
+          // fall back to local ref/commit name (could be tag/sha/branch)
+          sourceRef = effectiveFrom;
         }
+
         int exit = runGitExitCode("checkout-new", repo, "checkout", "-b", localBranch, sourceRef);
         if (exit == 0) {
-          // set upstream to the same source
-          runGitExitCode("set-upstream", repo, "branch", "--set-upstream-to", sourceRef, localBranch);
-          stdoutf("@|green [%s] created branch '%s' from '%s' and set upstream%n", repo.getName(), localBranch, sourceRef);
-          stdoutf("@|green [%s] created branch '%s' from '%s' and set upstream|@", repo.getName(), localBranch, sourceRef);
-
+          // set upstream to the same source when it is remote
+          if (sourceRef.startsWith("origin/")) {
+            runGitExitCode("set-upstream", repo, "branch", "--set-upstream-to", sourceRef, localBranch);
+          }
+          log.info("[{}] created branch '{}' from '{}' and set upstream", repo.getName(), localBranch, sourceRef);
           return true;
         } else {
-          log.warn("[{}] Could not create branch '{}' from '{}'. Try: mgit checkout -b {} DEFAULT --repos={}", repo.getName(), localBranch, sourceRef,
-              localBranch, repo.getName());
+          log.warn("[{}] Could not create branch '{}' from '{}'. Try: mgit checkout -b {} {} --repos={}", repo.getName(), localBranch, sourceRef,
+              localBranch, DEFAULT_BRANCH, repo.getName());
           return false;
         }
       } else {
@@ -225,56 +242,49 @@ public class mgit {
         if (localBranchExists(repo, effectiveFrom)) {
           int exit = runGitExitCode("checkout-local", repo, "checkout", effectiveFrom);
           if (exit == 0) {
-            stdoutf("@|green [%s] switched to '%s'%n", repo.getName(), effectiveFrom);
+            log.info("[{}] switched to '{}'", repo.getName(), effectiveFrom);
             return true;
           } else {
-            log.warn("[{}] Failed to switch to '{}'.", repo.getName(), effectiveFrom);
+            log.warn("[{}] Failed to switch to '{}'. Remain on '{}'", repo.getName(), effectiveFrom, currentBranch);
             return false;
           }
         }
-        if (remoteBranchExists(repo, effectiveFrom)) {
-          ensureRemoteTrackingRef(repo, effectiveFrom);
+        if (ensureLocalRemoteTracking(repo, effectiveFrom)) {
           int exit = runGitExitCode("checkout-track", repo, "checkout", "--track", "origin/" + effectiveFrom);
           if (exit == 0) {
-            stdoutf("@|green [%s] tracking 'origin/%s'%n", repo.getName(), effectiveFrom);
+            log.info("[{}] tracking 'origin/{}'", repo.getName(), effectiveFrom);
             return true;
           } else {
-            log.warn("[{}] Unable to track remote 'origin/{}'. Try: mgit checkout -b {} DEFAULT --repos={}", repo.getName(), effectiveFrom,
-                effectiveFrom, repo.getName());
+            log.warn("[{}] Unable to track remote 'origin/{}'. Remain on `{}`. Try: mgit checkout -b {} {} --repos={}", repo.getName(), currentBranch,
+                effectiveFrom, effectiveFrom, DEFAULT_BRANCH, repo.getName());
             return false;
           }
         }
         // Neither local nor remote exists
-        log.warn("[{}] Branch '{}' does not exist. To create from default: mgit checkout -b {} DEFAULT --repos={}", repo.getName(), effectiveFrom,
-            effectiveFrom, repo.getName());
+        log.warn("[{}] Branch '{}' does not exist. Remain on '{}'. To create from default: mgit checkout -b {} {} --repos={}", repo.getName(),
+            effectiveFrom, currentBranch, effectiveFrom, DEFAULT_BRANCH, repo.getName());
         return false;
       }
     }
 
-    private static boolean remoteTrackingRefPresent(File repo, String branch) {
-      // 0 if refs/remotes/origin/<branch> exists
-      int exit = runGitExitCode("remote-tracking-present", repo, "show-ref", "--verify", "--quiet", "refs/remotes/origin/" + branch);
-      return exit == 0;
+    private boolean ensureLocalRemoteTracking(File repo, String branch) {
+      // Check local remote-tracking ref; do NOT hit network unless user asked
+      if (remoteBranchExists(repo, branch))
+        return true;
+      if (this.forceFetch) {
+        return fetchRemoteBranch(repo, branch) && remoteBranchExists(repo, branch);
+      }
+      return false;
     }
 
-    private static void ensureRemoteTrackingRef(File repo, String branch) {
-      if (remoteTrackingRefPresent(repo, branch))
-        return;
-      // targeted fetch for that branch only; non-throwing is OK (we probe with exit code)
+    private static boolean fetchRemoteBranch(File repo, String branch) {
+      // targeted fetch: origin/<branch> -> refs/remotes/origin/<branch>
       int exit = runGitExitCode("fetch-branch", repo, "fetch", "origin", branch + ":refs/remotes/origin/" + branch);
-      if (exit != 0) {
-        // Do NOT throw; let caller decide next step (warn + suggest -b ...)
-        // This keeps behavior explicit and avoids exceptions for flow control.
-      }
+      return exit == 0;
     }
 
     private static boolean localBranchExists(File repo, String branch) {
       int exit = runGitExitCode("branch-local-exists", repo, "show-ref", "--verify", "--quiet", "refs/heads/" + branch);
-      return exit == 0;
-    }
-
-    private static boolean remoteBranchExists(File repo, String branch) {
-      int exit = runGitExitCode("branch-remote-exists", repo, "ls-remote", "--exit-code", "--heads", "origin", branch);
       return exit == 0;
     }
 
@@ -725,7 +735,7 @@ public class mgit {
     for (String s : cmd)
       cmdList.add(s);
     String printableCmd = String.join(" ", cmdList);
-    log.info("run {}: {}", operation, printableCmd);
+    log.debug("run {}: {}", operation, printableCmd);
     try {
       org.zeroturnaround.exec.ProcessExecutor proc = new org.zeroturnaround.exec.ProcessExecutor().command(cmdList).readOutput(true).exitValues(0, 1,
           2); // allow not-found codes for probes
@@ -747,7 +757,7 @@ public class mgit {
     for (String s : cmd)
       cmdList.add(s);
     String printableCmd = String.join(" ", cmdList);
-    log.info("run {}: {}", operation, printableCmd);
+    log.debug("run {}: {}", operation, printableCmd);
     try {
       org.zeroturnaround.exec.ProcessExecutor proc = new org.zeroturnaround.exec.ProcessExecutor().command(cmdList).readOutput(true)
           .exitValueNormal();
@@ -876,7 +886,7 @@ public class mgit {
           rebased++;
         } catch (Exception ex) {
           log.error("Rebase failed in '{}': {}", repo.getName(), ex.getMessage());
-          stdoutf("@|red [%s] rebase FAILED. Resolve manually|@", repo.getName());
+          stdoutf("@|magenta [%s] rebase FAILED. Resolve manually|@", repo.getName());
           failed++;
         }
       }
@@ -1000,15 +1010,6 @@ public class mgit {
     }
   }
 
-  private static boolean remoteBranchExists(File repo, String branch) {
-    String remoteBranch = branch;
-    if (!branch.startsWith("origin/")) {
-      remoteBranch = "origin/" + branch;
-    }
-    String out = runGitCommand("ls-remote", repo, "ls-remote", "--heads", "origin", remoteBranch);
-    return out != null && !out.isBlank();
-  }
-
   @Command(name = "fetch", description = "Fetch all remotes for repos, and auto-merge PR state if remote branch is deleted")
   private static class Fetch extends MGitCommon implements Callable<Integer> {
 
@@ -1066,5 +1067,11 @@ public class mgit {
       log.info("Fetched: {}, Errors: {}", fetched, errors);
       return errors > 0 ? 1 : 0;
     }
+  }
+
+  private static boolean remoteBranchExists(File repo, String branch) {
+    // Local-only probe (no network). Requires a prior fetch/pull to be up-to-date.
+    int exit = runGitExitCode("remote-tracking-present", repo, "show-ref", "--verify", "--quiet", "refs/remotes/origin/" + branch);
+    return exit == 0;
   }
 }
