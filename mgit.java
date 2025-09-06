@@ -180,7 +180,8 @@ public class mgit {
     @Option(names = "--force-fetch", description = "If remote tracking ref is missing, fetch that branch before checkout.")
     boolean forceFetch;
 
-    static final Logger log = LoggerFactory.getLogger(MgitCheckout.class);
+    @Option(names = "--autostash", description = "Temporarily stash local changes before switching/creating, then reapply.")
+    boolean autostash;
 
     enum CheckoutResult {
       UNCHANGED, UNCHANGED2, CHANGED, WARNED
@@ -227,40 +228,42 @@ public class mgit {
           // fall back to local ref/commit name (could be tag/sha/branch)
           sourceRef = effectiveFrom;
         }
-
-        int exit = runGitExitCode("checkout-new", repo, "checkout", "-b", localBranch, sourceRef);
-        if (exit == 0) {
-          // set upstream to the same source when it is remote
+        // int exit = runGitExitCode("checkout-new", repo, "checkout", "-b", localBranch, sourceRef);
+        boolean ok = attemptCheckoutWithAutostash(repo, "checkout-new", "checkout", "-b", localBranch, sourceRef);
+        if (ok) {
           if (sourceRef.startsWith("origin/")) {
             runGitExitCode("set-upstream", repo, "branch", "--set-upstream-to", sourceRef, localBranch);
           }
           log.info("[{}] created branch '{}' from '{}' and set upstream", repo.getName(), localBranch, sourceRef);
           return CheckoutResult.CHANGED;
         } else {
-          log.warn("[{}] Could not create branch '{}' from '{}'. Try: mgit checkout -b {} {} --repos={}", repo.getName(), localBranch, sourceRef,
-              localBranch, DEFAULT_BRANCH, repo.getName());
+          log.warn("[{}] Could not create branch '{}' from '{}'. Try: mgit checkout -b {} {} --repos={}{}", repo.getName(), localBranch, sourceRef,
+              localBranch, DEFAULT_BRANCH, repo.getName(), autostash ? "" : "  or add --autostash");
           return CheckoutResult.WARNED;
         }
       } else {
         // Switch semantics
         if (localBranchExists(repo, effectiveFrom)) {
-          int exit = runGitExitCode("checkout-local", repo, "checkout", effectiveFrom);
-          if (exit == 0) {
+          // int exit = runGitExitCode("checkout-local", repo, "checkout", effectiveFrom);
+          boolean ok = attemptCheckoutWithAutostash(repo, "checkout-local", "checkout", effectiveFrom);
+          if (ok) {
             log.info("[{}] switched to '{}'", repo.getName(), effectiveFrom);
             return CheckoutResult.CHANGED;
           } else {
-            log.warn("[{}] Failed to switch to '{}'. Remain on '{}'", repo.getName(), effectiveFrom, currentBranch);
+            log.warn("[{}] Failed to switch to '{}'. Remain on '{}'.{}", repo.getName(), effectiveFrom, currentBranch,
+                autostash ? "" : " Consider --autostash");
             return CheckoutResult.WARNED;
           }
         }
         if (ensureLocalRemoteTracking(repo, effectiveFrom)) {
-          int exit = runGitExitCode("checkout-track", repo, "checkout", "--track", "origin/" + effectiveFrom);
-          if (exit == 0) {
+          // int exit = runGitExitCode("checkout-track", repo, "checkout", "--track", "origin/" + effectiveFrom);
+          boolean ok = attemptCheckoutWithAutostash(repo, "checkout-track", "checkout", "--track", "origin/" + effectiveFrom);
+          if (ok) {
             log.info("[{}] tracking 'origin/{}'", repo.getName(), effectiveFrom);
             return CheckoutResult.CHANGED;
           } else {
-            log.warn("[{}] Unable to track remote 'origin/{}'. Remain on `{}`. Try: mgit checkout -b {} {} --repos={}", repo.getName(), currentBranch,
-                effectiveFrom, effectiveFrom, DEFAULT_BRANCH, repo.getName());
+            log.warn("[{}] Unable to track remote 'origin/{}'. Remain on `{}`. Try: mgit checkout -b {} {} --repos={}{}", repo.getName(),
+                effectiveFrom, currentBranch, effectiveFrom, DEFAULT_BRANCH, repo.getName(), autostash ? "" : "  or add --autostash");
             return CheckoutResult.WARNED;
           }
         }
@@ -302,6 +305,49 @@ public class mgit {
       final String prefix = "refs/remotes/origin/";
       return out.startsWith(prefix) ? out.substring(prefix.length()) : out;
     }
+
+    private static boolean hasLocalChanges(File repo) {
+      String out = runGitCommand("status-porcelain", repo, "status", "--porcelain");
+      return out != null && !out.isBlank();
+    }
+
+    private static boolean gitStashPush(File repo, String msg) {
+      int exit = runGitExitCode("stash-push", repo, "stash", "push", "-u", "-m", msg);
+      return exit == 0;
+    }
+
+    private static boolean gitStashPop(File repo) {
+      int exit = runGitExitCode("stash-pop", repo, "stash", "pop");
+      return exit == 0;
+    }
+
+    /** Try checkout; if it fails and --autostash is set and there are local changes, stash -> retry -> pop. */
+    private boolean attemptCheckoutWithAutostash(File repo, String opName, String... args) {
+      int exit = runGitExitCode(opName, repo, args);
+      if (exit == 0)
+        return true;
+
+      if (!autostash || !hasLocalChanges(repo))
+        return false;
+
+      String stamp = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH-mm-ss").format(new java.util.Date());
+      String msg = "mgit-autostash " + stamp;
+      if (!gitStashPush(repo, msg))
+        return false;
+
+      int exit2 = runGitExitCode(opName + "-retry", repo, args);
+      if (exit2 == 0) {
+        boolean popped = gitStashPop(repo);
+        if (!popped) {
+          log.warn("[{}] Autostash applied with conflicts. Resolve and 'git stash drop' if needed.", repo.getName());
+        }
+        return true;
+      }
+      // checkout still failed; keep the stash to avoid data loss
+      log.warn("[{}] Checkout failed even after autostash. Stashed changes kept (use 'git stash list').", repo.getName());
+      return false;
+    }
+
   }
 
   static class StatusCounts {
@@ -971,7 +1017,7 @@ public class mgit {
     for (String s : args)
       if (s != null)
         cmd.add(s);
-    log.info("run git-config: {}", String.join(" ", cmd));
+    log.debug("run git-config: {}", String.join(" ", cmd));
     try {
       org.zeroturnaround.exec.ProcessExecutor proc = new org.zeroturnaround.exec.ProcessExecutor().command(cmd).readOutput(true).exitValues(0, 1);
       // exit 1 for unset/get if key not present
