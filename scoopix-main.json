@@ -7,12 +7,14 @@
     "type": "bin",
     "arch": {
       "x86_64": {
-        "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-x86_64-unknown-linux-gnu",
-        "bin": "fd"
+        "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-x86_64-unknown-linux-gnu.tar.gz",
+        "extract": "tar.gz",
+        "bin": "fd-v10.2.0-x86_64-unknown-linux-gnu/fd"
       },
       "aarch64": {
-        "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-aarch64-unknown-linux-gnu",
-        "bin": "fd"
+        "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-aarch64-unknown-linux-gnu.tar.gz",
+        "extract": "tar.gz",
+        "bin": "fd-v10.2.0-aarch64-unknown-linux-gnu/fd"
       }
     }
   },
