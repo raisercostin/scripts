@@ -1,13 +1,15 @@
 #!/usr/bin/env -S deno run --allow-net --allow-read --allow-write --allow-env --allow-run
-import { Command } from "https://deno.land/x/cliffy@v1.0.0-rc.4/command/mod.ts";
 import { ensureDir } from "https://deno.land/std@0.224.0/fs/ensure_dir.ts";
 import { exists } from "https://deno.land/std@0.224.0/fs/exists.ts";
-import { join } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { join, dirname, basename } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { Command } from "https://deno.land/x/cliffy@v1.0.0-rc.4/command/mod.ts";
 
 const LADLE_HOME = join(Deno.env.get("HOME") ?? ".", ".ladle");
 const APPS_DIR = join(LADLE_HOME, "apps");
 const BIN_DIR = join(LADLE_HOME, "bin");
 const DEFAULT_BIN_DIR = join(Deno.env.get("HOME") ?? ".", "bin");
+const CACHE_DIR = join(LADLE_HOME, "cache");
+const TEMP_DIR = join(LADLE_HOME, "temp");
 
 let VERBOSITY = 1
 let QUIET = 0
@@ -60,8 +62,8 @@ export interface LadleArchEntry {
   url: string;
   extract?: "zip" | "tar.gz" | "tgz";
   bin: LadleBinary;
+  man?: string; // optional path to a man page inside archive
 }
-
 export interface LadleDocker {
   image: string;
   commands: string[];
@@ -202,31 +204,93 @@ async function findApp(app: string): Promise<{ bucket: string; info: any } | nul
 
   return null;
 }
+async function downloadAndInstall(
+  url: string,
+  dest: string,
+  extract?: "zip" | "tar.gz" | "tgz",
+  bin?: string,
+  opts: { keepTemp?: boolean; man?: string; appName?: string } = {}
+) {
+  const appName = opts.appName ?? basename(dest);
+  const versionPart = dest.split("/").slice(-3, -2)[0];
+  const ext = extract === "zip" ? "zip" : "tar.gz";
+  const cacheFile = join(CACHE_DIR, `${appName}#${versionPart}.${ext}`);
+  const tempDir = join(TEMP_DIR, appName);
 
-async function downloadAndInstall(url: string, dest: string) {
-  info(`downloadAndInstall called with url=${url}, dest=${dest}`);
-  await ensureDir(DEFAULT_BIN_DIR);
+  info(`downloadAndInstall: preparing cache at ${cacheFile}`);
+  await ensureDir(CACHE_DIR);
+  await ensureDir(TEMP_DIR);
 
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    if (resp.status === 404) {
-      error(`downloadAndInstall: server responded 404 ${resp.statusText} for ${url}`);
-      Deno.exit(1);
+  // download if not cached
+  try {
+    await Deno.stat(cacheFile);
+    info(`downloadAndInstall: using cached file ${cacheFile}`);
+  } catch {
+    info(`downloadAndInstall: downloading ${url} -> ${cacheFile}`);
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      throw new Error(`Failed to download: ${resp.status} ${resp.statusText}`);
     }
-    throw new Error(`Failed to download from ${url}: ${resp.status} ${resp.statusText}`);
+    const file = await Deno.open(cacheFile, {
+      write: true,
+      create: true,
+      truncate: true,
+    });
+    await resp.body?.pipeTo(file.writable);
   }
 
-  const tmp = `${dest}.part`;
-  const file = await Deno.open(tmp, { write: true, create: true, truncate: true });
-  await resp.body?.pipeTo(file.writable);
+  if (extract) {
+    info(`downloadAndInstall: extracting ${extract} archive into ${tempDir}`);
+    await Deno.remove(tempDir, { recursive: true }).catch(() => {});
+    await ensureDir(tempDir);
 
-  await Deno.chmod(tmp, 0o755);
-  await Deno.rename(tmp, dest);
+    if (extract === "tar.gz" || extract === "tgz") {
+      const cmd = new Deno.Command("tar", {
+        args: ["-xzf", cacheFile, "-C", tempDir],
+      });
+      const { code } = await cmd.output();
+      if (code !== 0) throw new Error(`tar extraction failed for ${url}`);
+    } else if (extract === "zip") {
+      const cmd = new Deno.Command("unzip", {
+        args: ["-o", cacheFile, "-d", tempDir],
+      });
+      const { code } = await cmd.output();
+      if (code !== 0) throw new Error(`unzip extraction failed for ${url}`);
+    }
 
+    if (!bin) throw new Error(`Archive from ${url} requires a 'bin' field`);
+    const src = join(tempDir, bin);
+    await ensureDir(dirname(dest));
+    await Deno.copyFile(src, dest);
+
+    if (opts.man) {
+      const manTargetDir = join(LADLE_HOME, "share", "man", "man1");
+      await ensureDir(manTargetDir);
+      const manDest = join(manTargetDir, `${appName}.1`);
+      await Deno.copyFile(join(tempDir, opts.man), manDest);
+      info(`downloadAndInstall: installed man page -> ${manDest}`);
+    }
+
+    if (!opts.keepTemp) {
+      await Deno.remove(tempDir, { recursive: true }).catch(() => {});
+      info(`downloadAndInstall: cleaned temp dir ${tempDir}`);
+    } else {
+      warn(`downloadAndInstall: kept temp dir for debugging: ${tempDir}`);
+    }
+  } else {
+    info(`downloadAndInstall: copying cached binary ${cacheFile} -> ${dest}`);
+    await ensureDir(dirname(dest));
+    await Deno.copyFile(cacheFile, dest);
+  }
+
+  await Deno.chmod(dest, 0o755);
   info(`downloadAndInstall: saved to ${dest}`);
 }
 
-async function installApp(app: string, opts: { ignoreBuildCache?: boolean; ignoreDownloadCache?: boolean } = {}) {
+async function installApp(
+  app: string,
+  opts: { ignoreBuildCache?: boolean; ignoreDownloadCache?: boolean, keepTemp?: boolean } = {}
+) {
   info(`installApp called with app='${app}'`);
 
   const found = await findApp(app);
@@ -240,6 +304,21 @@ async function installApp(app: string, opts: { ignoreBuildCache?: boolean; ignor
   const appName = app.includes("/") ? app.split("/").pop()! : app;
   const version = appInfo.version ?? "unknown";
 
+  const archKey = await detectArch();
+  info(`installApp: detected architecture '${archKey}'`);
+
+  const resolvedInfo = appInfo.arch
+    ? appInfo.arch[archKey] ?? null
+    : appInfo;
+
+  if (!resolvedInfo || !resolvedInfo.url) {
+    error(
+      `installApp: no URL found for '${app}' (arch=${archKey}, expected key='${archKey}')`
+    );
+    Deno.exit(1);
+  }
+  // --- END NEW ---
+
   const appDir = join(APPS_DIR, appName, version, "bin");
   await ensureDir(appDir);
   const dest = join(appDir, appName);
@@ -248,8 +327,16 @@ async function installApp(app: string, opts: { ignoreBuildCache?: boolean; ignor
     info(`installApp: source build requested for '${appName}'`);
     await buildFromSource(appName, appInfo, dest, opts);
   } else {
-    info(`installApp: downloading binary from ${appInfo.url} -> ${dest}`);
-    await downloadAndInstall(appInfo.url, dest);
+    info(
+      `installApp: downloading binary from ${resolvedInfo.url} -> ${dest}`
+    );
+    await downloadAndInstall(
+      resolvedInfo.url,
+      dest,
+      resolvedInfo.extract,
+      resolvedInfo.bin,
+      { keepTemp: opts.keepTemp, man: resolvedInfo.man, appName }
+    );
   }
 
   // symlink current version
@@ -257,7 +344,9 @@ async function installApp(app: string, opts: { ignoreBuildCache?: boolean; ignor
   try {
     await Deno.remove(currentLink, { recursive: true });
   } catch (_) { }
-  await Deno.symlink(join(APPS_DIR, appName, version), currentLink, { type: "dir" });
+  await Deno.symlink(join(APPS_DIR, appName, version), currentLink, {
+    type: "dir",
+  });
 
   // create symlink shim
   await ensureDir(BIN_DIR);
@@ -269,7 +358,9 @@ async function installApp(app: string, opts: { ignoreBuildCache?: boolean; ignor
   await Deno.symlink(shimTarget, binPath, { type: "file" });
 
   info(`installApp: completed installation of '${appName}'`);
-  console.log(`Installed '${appName}' -> ${binPath} (-> ${shimTarget})`);
+  console.log(
+    `Installed '${appName}' -> ${binPath} (-> ${shimTarget})`
+  );
 
   // check if ~/.ladle/bin is in PATH
   const currentPath = Deno.env.get("PATH") ?? "";
@@ -284,37 +375,45 @@ async function installApp(app: string, opts: { ignoreBuildCache?: boolean; ignor
       `Option 1 (manual): add this line to your shell profile:\n\n` +
       `  export PATH="$HOME/.ladle/bin:$PATH"\n\n` +
       `Then restart your shell or run 'source <file>'.\n\n` +
-      `Option 2: let Ladle set it up automatically:\n\n${lines.join("\n")}\n`
+      `Option 2: let Ladle set it up automatically:\n\n${lines.join(
+        "\n"
+      )}\n`
+    );
+  }
+  const currentManpath = Deno.env.get("MANPATH") ?? "";
+  const ladleMan = join(LADLE_HOME, "share", "man");
+  if (!currentManpath.split(":").includes(ladleMan)) {
+    warn(`${ladleMan} is not in your MANPATH.`);
+    console.error(
+      `To use 'man <app>', add this line to your shell profile:\n\n` +
+      `  export MANPATH="$HOME/.ladle/share/man:$MANPATH"\n`
     );
   }
 }
 
-async function suggestShellInits(): Promise<string[]> {
-  const home = Deno.env.get("HOME") ?? ".";
-  const suggestions: string[] = [];
-
-  for (const [shell, files] of Object.entries(SHELL_RC_MAP)) {
-    const existing: string[] = [];
-    for (const rel of files) {
-      if (await exists(join(home, rel))) {
-        existing.push(rel);
-      }
+async function detectArch(): Promise<string> {
+  const sysArch = Deno.build.arch; // coarse value
+  try {
+    const p = Deno.run({ cmd: ["uname", "-m"], stdout: "piped" });
+    const raw = new TextDecoder().decode(await p.output()).trim();
+    await p.status();
+    switch (raw) {
+      case "x86_64":
+      case "amd64":
+        return "x86_64";
+      case "aarch64":
+      case "arm64":
+        return "aarch64";
+      case "armv7l":
+      case "armhf":
+      case "arm":
+        return "armv7";
+      default:
+        return sysArch; // fallback to Deno's
     }
-    if (existing.length > 0) {
-      const recommended = existing.find(f => f.includes("rc")) ?? existing[0];
-      const alternates = existing.filter(f => f !== recommended);
-      const note = alternates.length > 0
-        ? `recommended (${recommended}), other candidates: ${alternates.join(", ")}`
-        : `recommended (${recommended})`;
-      suggestions.push(`  ladle init ${shell}   # ${note}`);
-    }
+  } catch {
+    return sysArch;
   }
-
-  if (suggestions.length === 0) {
-    suggestions.push(`  ladle init sh   # no rc/profile file found, will create ~/.profile`);
-  }
-
-  return suggestions;
 }
 
 async function uninstallApp(app: string) {
@@ -490,7 +589,7 @@ async function initShell(shellArg?: string) {
     info(`initShell: shell argument provided: '${shell}'`);
   }
 
-  const exportLine = `export PATH="$HOME/.ladle/bin:$PATH"`;
+  const exportLine = `export PATH="$HOME/.ladle/bin:$PATH"\nexport MANPATH="$HOME/.ladle/share/man:$MANPATH"`;
   const home = Deno.env.get("HOME") ?? ".";
   const suggestions = await detectShellInits();
   const found = suggestions.find(s => s.shell === shell);
@@ -527,12 +626,6 @@ async function initShell(shellArg?: string) {
   }
 }
 
-
-interface ListOptions {
-  full: boolean;
-  verbosity: number;
-}
-
 await new Command()
   .name("ladle")
   .version("0.1.0")
@@ -542,11 +635,13 @@ await new Command()
   .globalOption("-q, --quiet", "Decrease verbosity", { collect: true, value: () => { QUIET++; return QUIET; } })
   .command("install <app:string>", "Install an app from all buckets")
   .option("--ignore-build-cache", "Force rebuild from source, ignoring cached Docker image")
-  .option("--ignore-download-cache", "Force re-download of source tarball, ignoring cache")
+  .option("--ignore-download-cache", "Force re-download even if cached")
+  .option("--keep-temp", "Keep extracted files in ~/.ladle/temp/<app>")
   .action(async (opts, app) => {
     await installApp(app, {
       ignoreBuildCache: opts.ignoreBuildCache,
       ignoreDownloadCache: opts.ignoreDownloadCache,
+      keepTemp: opts.keepTemp,
     });
   })
   .command("uninstall <app:string>", "Uninstall an app")
@@ -564,10 +659,7 @@ await new Command()
   .command("list", "List all apps in all buckets")
   .option("--full", "Show full bucket path")
   .action(async (cliOpts) => {
-    await listApps({
-      full: cliOpts.full ?? false,
-      verbosity: VERBOSITY,
-    });
+    await listApps(cliOpts.full ?? false);
   })
   .command("init [shell:string]", "Configure PATH in shell rc file")
   .action(async (_opts, shell) => {
