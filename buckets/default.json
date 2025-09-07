@@ -1,0 +1,10 @@
+{
+  "fd": {
+    "version": "10.2.0",
+    "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-x86_64-unknown-linux-gnu"
+  },
+  "rhash": {
+    "version": "1.4.4",
+    "url": "https://github.com/rhash/RHash/releases/download/v1.4.4/rhash-1.4.4-linux-x64.tar.gz"
+  }
+}
