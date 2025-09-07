@@ -4,7 +4,7 @@ import { exists } from "https://deno.land/std@0.224.0/fs/exists.ts";
 import { join, dirname, basename } from "https://deno.land/std@0.224.0/path/mod.ts";
 import { Command } from "https://deno.land/x/cliffy@v1.0.0-rc.4/command/mod.ts";
 
-const SCOOPIX_HOME = join(Deno.env.get("HOME") ?? ".", ".scopix");
+const SCOOPIX_HOME = join(Deno.env.get("HOME") ?? ".", ".scoopix");
 const APPS_DIR = join(SCOOPIX_HOME, "apps");
 const BIN_DIR = join(SCOOPIX_HOME, "bin");
 const DEFAULT_BIN_DIR = join(Deno.env.get("HOME") ?? ".", "bin");
@@ -22,9 +22,9 @@ function trace(msg: string) { log(4, msg); }
 function log(level: number, msg: string) {
   if (firstTime) {
     firstTime = false;
-    info(`Scopix home directory: ${SCOOPIX_HOME}`);
-    info(`Scopix default bin directory: ${DEFAULT_BIN_DIR}`);
-    debug(`Scopix verbosity level: ${VERBOSITY - QUIET}`);
+    info(`Scoopix home directory: ${SCOOPIX_HOME}`);
+    info(`Scoopix default bin directory: ${DEFAULT_BIN_DIR}`);
+    debug(`Scoopix verbosity level: ${VERBOSITY - QUIET}`);
   }
   if (level <= VERBOSITY - QUIET) {
     const prefix = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE", "TRACE5"][level] ?? "LOG";
@@ -56,21 +56,21 @@ type BucketManifest = {
   [app: string]: BucketApp;
 };
 
-export type ScopixBinary = string | string[];
+export type ScoopixBinary = string | string[];
 
-export interface ScopixArchEntry {
+export interface ScoopixArchEntry {
   url: string;
   extract?: "zip" | "tar.gz" | "tgz";
-  bin: ScopixBinary;
+  bin: ScoopixBinary;
   man?: string; // optional path to a man page inside archive
 }
-export interface ScopixDocker {
+export interface ScoopixDocker {
   image: string;
   commands: string[];
   output: string;
 }
 
-export interface ScopixApp {
+export interface ScoopixApp {
   version: string;
   description?: string;
   homepage?: string;
@@ -78,12 +78,12 @@ export interface ScopixApp {
   type?: "bin" | "src";
   url?: string;
   extract?: "zip" | "tar.gz" | "tgz";
-  bin?: ScopixBinary;
-  arch?: Record<string, ScopixArchEntry>;
-  docker?: ScopixDocker;
+  bin?: ScoopixBinary;
+  arch?: Record<string, ScoopixArchEntry>;
+  docker?: ScoopixDocker;
 }
 
-export type ScopixManifest = Record<string, ScopixApp>;
+export type ScoopixManifest = Record<string, ScoopixApp>;
 
 async function listBuckets(): Promise<{ name: string, path: string }[]> {
   info(`Listing buckets from ${SCOOPIX_HOME}`);
@@ -286,7 +286,6 @@ async function downloadAndInstall(
   await Deno.chmod(dest, 0o755);
   info(`downloadAndInstall: saved to ${dest}`);
 }
-
 async function installApp(
   app: string,
   opts: { ignoreBuildCache?: boolean; ignoreDownloadCache?: boolean; keepTemp?: boolean } = {}
@@ -373,9 +372,9 @@ async function installApp(
 
   // MANPATH check
   const currentManpath = Deno.env.get("MANPATH") ?? "";
-  const scopixMan = join(SCOOPIX_HOME, "share", "man");
-  if (!currentManpath.split(":").includes(scopixMan)) {
-    warn(`${scopixMan} is not in your MANPATH.`);
+  const scoopixMan = join(SCOOPIX_HOME, "share", "man");
+  if (!currentManpath.split(":").includes(scoopixMan)) {
+    warn(`${scoopixMan} is not in your MANPATH.`);
     console.error(
       `To use 'man <app>', add this line to your shell profile:\n\n` +
       `  export MANPATH="$HOME/.scoopix/share/man:$MANPATH"\n`
@@ -574,7 +573,7 @@ function formatShellInits(suggestions: ShellInitSuggestion[]): string[] {
     const note = s.alternates.length > 0
       ? `recommended (${s.recommended}), other candidates: ${s.alternates.join(", ")}`
       : `recommended (${s.recommended})`;
-    return `  scopix init ${s.shell}   # ${note}`;
+    return `  scoopix init ${s.shell}   # ${note}`;
   });
 }
 async function initShell(shellArg?: string) {
@@ -593,7 +592,7 @@ async function initShell(shellArg?: string) {
     info(`initShell: shell argument provided: '${shell}'`);
   }
 
-  const exportLine = `export PATH="$HOME/.scopix/bin:$PATH"\nexport MANPATH="$HOME/.scopix/share/man:$MANPATH"`;
+  const exportLine = `export PATH="$HOME/.scoopix/bin:$PATH"\nexport MANPATH="$HOME/.scoopix/share/man:$MANPATH"`;
   const home = Deno.env.get("HOME") ?? ".";
   const suggestions = await detectShellInits();
   const found = suggestions.find(s => s.shell === shell);
@@ -618,11 +617,11 @@ async function initShell(shellArg?: string) {
 
   if (already) {
     info(`PATH already configured in ${rcFile}`);
-    console.log(`Scopix is already initialized for ${shell} (see ${rcFile})`);
+    console.log(`Scoopix is already initialized for ${shell} (see ${rcFile})`);
   } else {
-    await Deno.writeTextFile(rcFile, `\n# Added by Scopix\n${exportLine}\n`, { append: true });
+    await Deno.writeTextFile(rcFile, `\n# Added by Scoopix\n${exportLine}\n`, { append: true });
     info(`Appended PATH export to ${rcFile}`);
-    console.log(`Configured Scopix for ${shell}. Modified ${rcFile}:\n  ${exportLine}`);
+    console.log(`Configured Scoopix for ${shell}. Modified ${rcFile}:\n  ${exportLine}`);
     if (found.alternates.length > 0) {
       console.log(`Note: other candidate files also exist: ${found.alternates.join(", ")}`);
     }
@@ -631,7 +630,7 @@ async function initShell(shellArg?: string) {
 }
 
 await new Command()
-  .name("scopix")
+  .name("scoopix")
   .version("0.1.0")
   .description("Scoop like installer for Linux - user space, buckets, user light contributions")
   .action(function () { this.showHelp(); })
@@ -640,7 +639,7 @@ await new Command()
   .command("install <app:string>", "Install an app from all buckets")
   .option("--ignore-build-cache", "Force rebuild from source, ignoring cached Docker image")
   .option("--ignore-download-cache", "Force re-download even if cached")
-  .option("--keep-temp", "Keep extracted files in ~/.scopix/temp/<app>")
+  .option("--keep-temp", "Keep extracted files in ~/.scoopix/temp/<app>")
   .action(async (opts, app) => {
     await installApp(app, {
       ignoreBuildCache: opts.ignoreBuildCache,
