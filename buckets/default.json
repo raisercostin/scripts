@@ -4,7 +4,20 @@
     "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-x86_64-unknown-linux-gnu"
   },
   "rhash": {
-    "version": "1.4.4",
-    "url": "https://github.com/rhash/RHash/releases/download/v1.4.4/rhash-1.4.4-linux-x64.tar.gz"
+    "version": "1.4.6",
+    "type": "src",
+    "url": "https://github.com/rhash/RHash/archive/refs/tags/v1.4.6.tar.gz",
+    "docker": {
+      "image": "alpine:edge",
+      "commands": [
+        "apk add --no-cache build-base wget tar",
+        "wget {url}",
+        "tar xf v{version}.tar.gz",
+        "cd RHash-{version}",
+        "CC='gcc -static' ./configure --prefix=/out --enable-static --disable-openssl",
+        "make && make install"
+      ],
+      "output": "/out/bin/rhash"
+    }
   }
 }
