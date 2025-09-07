@@ -54,6 +54,35 @@ type BucketManifest = {
   [app: string]: BucketApp;
 };
 
+export type LadleBinary = string | string[];
+
+export interface LadleArchEntry {
+  url: string;
+  extract?: "zip" | "tar.gz" | "tgz";
+  bin: LadleBinary;
+}
+
+export interface LadleDocker {
+  image: string;
+  commands: string[];
+  output: string;
+}
+
+export interface LadleApp {
+  version: string;
+  description?: string;
+  homepage?: string;
+  license?: string;
+  type?: "bin" | "src";
+  url?: string;
+  extract?: "zip" | "tar.gz" | "tgz";
+  bin?: LadleBinary;
+  arch?: Record<string, LadleArchEntry>;
+  docker?: LadleDocker;
+}
+
+export type LadleManifest = Record<string, LadleApp>;
+
 async function listBuckets(): Promise<{ name: string, path: string }[]> {
   info(`Listing buckets from ${LADLE_HOME}`);
   const cfgPath = join(LADLE_HOME, "config.json");
@@ -80,8 +109,8 @@ async function addBucket(url: string, name?: string) {
   console.log(`Added bucket '${bucketName}' -> ${absPath}`);
 }
 
-async function listApps(opts: ListOptions) {
-  info(`listApps called with full=${opts.full}, verbosity=${opts.verbosity}`);
+async function listApps(full: boolean) {
+  info(`listApps called with full=${full}`);
 
   const buckets = await loadAllBuckets();
   if (buckets.size === 0) {
@@ -89,21 +118,18 @@ async function listApps(opts: ListOptions) {
     console.log("No apps available");
     return;
   }
-
-  // cache entries once
-  const entries = await listBuckets();
-
-  for (const [bucketName, manifest] of buckets) {
-    for (const app of Object.keys(manifest)) {
-      if (opts.full) {
-        const bucketEntry = entries.find(e => e.name === bucketName);
-        const base = bucketEntry ? bucketEntry.path : bucketName;
-        console.log(`${base}/${app}`);
+  for (const [bucket, manifest] of buckets) {
+    for (const [app, meta] of Object.entries(manifest)) {
+      const appName = full ? `${bucket}/${app}` : `${bucket}/${app}`;
+      const description = meta.description ?? "";
+      if (description) {
+        console.log(`${appName} - ${description}`);
       } else {
-        console.log(`${bucketName}/${app}`);
+        console.log(appName);
       }
     }
   }
+
   info("listApps completed");
 }
 
@@ -249,44 +275,46 @@ async function installApp(app: string, opts: { ignoreBuildCache?: boolean; ignor
   const currentPath = Deno.env.get("PATH") ?? "";
   if (!currentPath.split(":").includes(BIN_DIR)) {
     warn(`${BIN_DIR} is not in your PATH.`);
-    const home = Deno.env.get("HOME") ?? ".";
-    const detected: string[] = [];
+    const suggestions = await detectShellInits();
+    const lines = formatShellInits(suggestions);
 
-    for (const [shell, files] of Object.entries(SHELL_RC_MAP)) {
-      const existing: string[] = [];
-      for (const rel of files) {
-        if (await exists(join(home, rel))) {
-          existing.push(rel);
-        }
-      }
-      if (existing.length > 0) {
-        // prefer rc files when present
-        const recommended = existing.find(f => f.includes("rc"));
-        const note = recommended
-          ? `recommended (${recommended})` +
-          (existing.length > 1
-            ? `, other candidates: ${existing.filter(f => f !== recommended).join(", ")}`
-            : "")
-          : `fallback (${existing.join(", ")})`;
-        detected.push(`  ladle init ${shell}   # ${note}`);
-      }
-    }
-
-    let suggestion = "";
-    if (detected.length > 0) {
-      suggestion = detected.join("\n");
-    } else {
-      suggestion =
-        `  ladle init sh   # no rc/profile file found, will create ~/.profile`;
-    }
+    warn(`${BIN_DIR} is not in your PATH.`);
     console.error(
       `You won’t be able to run installed tools until you update PATH.\n\n` +
       `Option 1 (manual): add this line to your shell profile:\n\n` +
       `  export PATH="$HOME/.ladle/bin:$PATH"\n\n` +
       `Then restart your shell or run 'source <file>'.\n\n` +
-      `Option 2: let Ladle set it up automatically:\n\n${suggestion}\n`
+      `Option 2: let Ladle set it up automatically:\n\n${lines.join("\n")}\n`
     );
   }
+}
+
+async function suggestShellInits(): Promise<string[]> {
+  const home = Deno.env.get("HOME") ?? ".";
+  const suggestions: string[] = [];
+
+  for (const [shell, files] of Object.entries(SHELL_RC_MAP)) {
+    const existing: string[] = [];
+    for (const rel of files) {
+      if (await exists(join(home, rel))) {
+        existing.push(rel);
+      }
+    }
+    if (existing.length > 0) {
+      const recommended = existing.find(f => f.includes("rc")) ?? existing[0];
+      const alternates = existing.filter(f => f !== recommended);
+      const note = alternates.length > 0
+        ? `recommended (${recommended}), other candidates: ${alternates.join(", ")}`
+        : `recommended (${recommended})`;
+      suggestions.push(`  ladle init ${shell}   # ${note}`);
+    }
+  }
+
+  if (suggestions.length === 0) {
+    suggestions.push(`  ladle init sh   # no rc/profile file found, will create ~/.profile`);
+  }
+
+  return suggestions;
 }
 
 async function uninstallApp(app: string) {
@@ -408,28 +436,72 @@ const SHELL_RC_MAP: Record<string, string[]> = {
   tcsh: [".tcshrc"],
   fish: [".config/fish/config.fish"],
 };
+type ShellInitSuggestion = {
+  shell: string;
+  recommended: string;
+  alternates: string[];
+};
 
-async function initShell(shell: string) {
-  info(`initShell called for '${shell}'`);
+async function detectShellInits(): Promise<ShellInitSuggestion[]> {
+  const home = Deno.env.get("HOME") ?? ".";
+  const results: ShellInitSuggestion[] = [];
+
+  for (const [shell, files] of Object.entries(SHELL_RC_MAP)) {
+    const existing: string[] = [];
+    for (const rel of files) {
+      if (await exists(join(home, rel))) {
+        existing.push(rel);
+      }
+    }
+    if (existing.length > 0) {
+      const recommended = existing.find(f => f.includes("rc")) ?? existing[0];
+      const alternates = existing.filter(f => f !== recommended);
+      results.push({ shell, recommended, alternates });
+    }
+  }
+
+  if (results.length === 0) {
+    results.push({ shell: "sh", recommended: ".profile", alternates: [] });
+  }
+
+  return results;
+}
+function formatShellInits(suggestions: ShellInitSuggestion[]): string[] {
+  return suggestions.map(s => {
+    const note = s.alternates.length > 0
+      ? `recommended (${s.recommended}), other candidates: ${s.alternates.join(", ")}`
+      : `recommended (${s.recommended})`;
+    return `  ladle init ${s.shell}   # ${note}`;
+  });
+}
+async function initShell(shellArg?: string) {
+  let shell = shellArg;
+  if (!shell) {
+    // fallback to current shell from $SHELL
+    const envShell = Deno.env.get("SHELL");
+    if (envShell) {
+      shell = envShell.split("/").pop() ?? "sh";
+      info(`initShell: auto-detected current shell as '${shell}' from SHELL=${envShell}`);
+    } else {
+      shell = "sh"; // final fallback
+      warn("initShell: could not detect current shell, defaulting to 'sh'");
+    }
+  } else {
+    info(`initShell: shell argument provided: '${shell}'`);
+  }
+
   const exportLine = `export PATH="$HOME/.ladle/bin:$PATH"`;
   const home = Deno.env.get("HOME") ?? ".";
+  const suggestions = await detectShellInits();
+  const found = suggestions.find(s => s.shell === shell);
 
-  const candidates = SHELL_RC_MAP[shell];
-  if (!candidates) {
-    error(`Unsupported shell: ${shell}`);
+  if (!found) {
+    error(`Unsupported or undetected shell: ${shell}`);
     console.error(`Supported shells: ${Object.keys(SHELL_RC_MAP).join(", ")}`);
     Deno.exit(1);
   }
 
-  // pick first existing rc file, otherwise fallback to first candidate
-  let rcFile: string | null = null;
-  for (const rel of candidates) {
-    if (await exists(join(home, rel))) {
-      rcFile = join(home, rel);
-      break;
-    }
-  }
-  if (!rcFile) rcFile = join(home, candidates[0]);
+  const rcFile = join(home, found.recommended);
 
   await ensureDir(join(rcFile, ".."));
 
@@ -437,8 +509,8 @@ async function initShell(shell: string) {
   try {
     const contents = await Deno.readTextFile(rcFile);
     if (contents.includes(exportLine)) already = true;
-  } catch (_) {
-    // file may not exist
+  } catch {
+    // file may not exist yet
   }
 
   if (already) {
@@ -447,10 +519,14 @@ async function initShell(shell: string) {
   } else {
     await Deno.writeTextFile(rcFile, `\n# Added by Ladle\n${exportLine}\n`, { append: true });
     info(`Appended PATH export to ${rcFile}`);
-    console.log(`Configured Ladle for ${shell}. Added to ${rcFile}:\n  ${exportLine}`);
+    console.log(`Configured Ladle for ${shell}. Modified ${rcFile}:\n  ${exportLine}`);
+    if (found.alternates.length > 0) {
+      console.log(`Note: other candidate files also exist: ${found.alternates.join(", ")}`);
+    }
     console.log(`Run 'source ${rcFile}' or restart your shell to activate.`);
   }
 }
+
 
 interface ListOptions {
   full: boolean;
@@ -493,7 +569,7 @@ await new Command()
       verbosity: VERBOSITY,
     });
   })
-  .command("init <shell:string>", "Configure PATH in shell rc file")
+  .command("init [shell:string]", "Configure PATH in shell rc file")
   .action(async (_opts, shell) => {
     await initShell(shell);
   })

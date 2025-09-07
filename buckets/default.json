@@ -1,23 +1,62 @@
 {
   "fd": {
     "version": "10.2.0",
-    "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-x86_64-unknown-linux-gnu"
+    "description": "A simple, fast and user-friendly alternative to 'find'",
+    "homepage": "https://github.com/sharkdp/fd",
+    "license": "MIT",
+    "type": "bin",
+    "arch": {
+      "x86_64": {
+        "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-x86_64-unknown-linux-gnu",
+        "bin": "fd"
+      },
+      "aarch64": {
+        "url": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-aarch64-unknown-linux-gnu",
+        "bin": "fd"
+      }
+    }
   },
   "rhash": {
     "version": "1.4.6",
+    "description": "Utility for computing and verifying hash sums",
+    "homepage": "https://github.com/rhash/RHash",
+    "license": "BSD",
     "type": "src",
-    "url": "https://github.com/rhash/RHash/archive/refs/tags/v1.4.6.tar.gz",
     "docker": {
       "image": "alpine:edge",
       "commands": [
         "apk add --no-cache build-base wget tar",
-        "wget {url}",
-        "tar xf v{version}.tar.gz",
+        "wget {url} -O rhash-{version}.tar.gz",
+        "tar xf rhash-{version}.tar.gz",
         "cd RHash-{version}",
         "CC='gcc -static' ./configure --prefix=/out --enable-static --disable-openssl",
         "make && make install"
       ],
       "output": "/out/bin/rhash"
+    }
+  },
+  "micro": {
+    "version": "2.0.13",
+    "description": "A terminal-based text editor that feels like a modern IDE",
+    "homepage": "https://micro-editor.github.io/",
+    "license": "MIT",
+    "type": "bin",
+    "arch": {
+      "x86_64": {
+        "url": "https://github.com/zyedidia/micro/releases/download/v2.0.13/micro-2.0.13-linux64.tar.gz",
+        "extract": "tar.gz",
+        "bin": "micro-2.0.13/micro"
+      },
+      "armv7": {
+        "url": "https://github.com/zyedidia/micro/releases/download/v2.0.13/micro-2.0.13-linux-arm.tar.gz",
+        "extract": "tar.gz",
+        "bin": "micro-2.0.13/micro"
+      },
+      "aarch64": {
+        "url": "https://github.com/zyedidia/micro/releases/download/v2.0.13/micro-2.0.13-linux-arm64.tar.gz",
+        "extract": "tar.gz",
+        "bin": "micro-2.0.13/micro"
+      }
     }
   }
 }
