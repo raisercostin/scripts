@@ -22,17 +22,22 @@
     "homepage": "https://github.com/rhash/RHash",
     "license": "BSD",
     "type": "src",
-    "docker": {
-      "image": "alpine:edge",
-      "commands": [
-        "apk add --no-cache build-base wget tar",
-        "wget {url} -O rhash-{version}.tar.gz",
-        "tar xf rhash-{version}.tar.gz",
-        "cd RHash-{version}",
-        "CC='gcc -static' ./configure --prefix=/out --enable-static --disable-openssl",
-        "make && make install"
-      ],
-      "output": "/out/bin/rhash"
+    "arch": {
+      "x86_64": {
+        "url": "https://github.com/rhash/RHash/archive/refs/tags/v1.4.6.tar.gz",
+        "docker": {
+          "image": "alpine:edge",
+          "commands": [
+            "apk add --no-cache build-base wget tar",
+            "wget {url} -O rhash-{version}.tar.gz",
+            "tar xf rhash-{version}.tar.gz",
+            "cd RHash-{version}",
+            "CC='gcc -static' ./configure --prefix=/out --enable-static --disable-openssl",
+            "make && make install"
+          ],
+          "output": "/out/bin/rhash"
+        }
+      }
     }
   },
   "micro": {

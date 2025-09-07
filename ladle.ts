@@ -4,12 +4,12 @@ import { exists } from "https://deno.land/std@0.224.0/fs/exists.ts";
 import { join, dirname, basename } from "https://deno.land/std@0.224.0/path/mod.ts";
 import { Command } from "https://deno.land/x/cliffy@v1.0.0-rc.4/command/mod.ts";
 
-const LADLE_HOME = join(Deno.env.get("HOME") ?? ".", ".ladle");
-const APPS_DIR = join(LADLE_HOME, "apps");
-const BIN_DIR = join(LADLE_HOME, "bin");
+const SCOOPIX_HOME = join(Deno.env.get("HOME") ?? ".", ".scopix");
+const APPS_DIR = join(SCOOPIX_HOME, "apps");
+const BIN_DIR = join(SCOOPIX_HOME, "bin");
 const DEFAULT_BIN_DIR = join(Deno.env.get("HOME") ?? ".", "bin");
-const CACHE_DIR = join(LADLE_HOME, "cache");
-const TEMP_DIR = join(LADLE_HOME, "temp");
+const CACHE_DIR = join(SCOOPIX_HOME, "cache");
+const TEMP_DIR = join(SCOOPIX_HOME, "temp");
 
 let VERBOSITY = 1
 let QUIET = 0
@@ -22,9 +22,9 @@ function trace(msg: string) { log(4, msg); }
 function log(level: number, msg: string) {
   if (firstTime) {
     firstTime = false;
-    info(`Ladle home directory: ${LADLE_HOME}`);
-    info(`Ladle default bin directory: ${DEFAULT_BIN_DIR}`);
-    debug(`Ladle verbosity level: ${VERBOSITY - QUIET}`);
+    info(`Scopix home directory: ${SCOOPIX_HOME}`);
+    info(`Scopix default bin directory: ${DEFAULT_BIN_DIR}`);
+    debug(`Scopix verbosity level: ${VERBOSITY - QUIET}`);
   }
   if (level <= VERBOSITY - QUIET) {
     const prefix = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE", "TRACE5"][level] ?? "LOG";
@@ -56,21 +56,21 @@ type BucketManifest = {
   [app: string]: BucketApp;
 };
 
-export type LadleBinary = string | string[];
+export type ScopixBinary = string | string[];
 
-export interface LadleArchEntry {
+export interface ScopixArchEntry {
   url: string;
   extract?: "zip" | "tar.gz" | "tgz";
-  bin: LadleBinary;
+  bin: ScopixBinary;
   man?: string; // optional path to a man page inside archive
 }
-export interface LadleDocker {
+export interface ScopixDocker {
   image: string;
   commands: string[];
   output: string;
 }
 
-export interface LadleApp {
+export interface ScopixApp {
   version: string;
   description?: string;
   homepage?: string;
@@ -78,24 +78,24 @@ export interface LadleApp {
   type?: "bin" | "src";
   url?: string;
   extract?: "zip" | "tar.gz" | "tgz";
-  bin?: LadleBinary;
-  arch?: Record<string, LadleArchEntry>;
-  docker?: LadleDocker;
+  bin?: ScopixBinary;
+  arch?: Record<string, ScopixArchEntry>;
+  docker?: ScopixDocker;
 }
 
-export type LadleManifest = Record<string, LadleApp>;
+export type ScopixManifest = Record<string, ScopixApp>;
 
 async function listBuckets(): Promise<{ name: string, path: string }[]> {
-  info(`Listing buckets from ${LADLE_HOME}`);
-  const cfgPath = join(LADLE_HOME, "config.json");
+  info(`Listing buckets from ${SCOOPIX_HOME}`);
+  const cfgPath = join(SCOOPIX_HOME, "config.json");
   if (!(await exists(cfgPath))) return [];
   const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
   return Object.entries(cfg.buckets ?? {}).map(([name, path]) => ({ name, path }));
 }
 
 async function addBucket(url: string, name?: string) {
-  await ensureDir(LADLE_HOME);
-  const cfgPath = join(LADLE_HOME, "config.json");
+  await ensureDir(SCOOPIX_HOME);
+  const cfgPath = join(SCOOPIX_HOME, "config.json");
   let cfg = { buckets: {} as Record<string, string> };
   if (await exists(cfgPath)) {
     cfg = JSON.parse(await Deno.readTextFile(cfgPath));
@@ -136,7 +136,7 @@ async function listApps(full: boolean) {
 }
 
 async function loadAllBuckets(): Promise<Map<string, BucketManifest>> {
-  info(`Loading buckets from config in ${LADLE_HOME}`);
+  info(`Loading buckets from config in ${SCOOPIX_HOME}`);
   const buckets = new Map<string, BucketManifest>();
   const entries = await listBuckets();
 
@@ -241,7 +241,7 @@ async function downloadAndInstall(
 
   if (extract) {
     info(`downloadAndInstall: extracting ${extract} archive into ${tempDir}`);
-    await Deno.remove(tempDir, { recursive: true }).catch(() => {});
+    await Deno.remove(tempDir, { recursive: true }).catch(() => { });
     await ensureDir(tempDir);
 
     if (extract === "tar.gz" || extract === "tgz") {
@@ -264,7 +264,7 @@ async function downloadAndInstall(
     await Deno.copyFile(src, dest);
 
     if (opts.man) {
-      const manTargetDir = join(LADLE_HOME, "share", "man", "man1");
+      const manTargetDir = join(SCOOPIX_HOME, "share", "man", "man1");
       await ensureDir(manTargetDir);
       const manDest = join(manTargetDir, `${appName}.1`);
       await Deno.copyFile(join(tempDir, opts.man), manDest);
@@ -272,7 +272,7 @@ async function downloadAndInstall(
     }
 
     if (!opts.keepTemp) {
-      await Deno.remove(tempDir, { recursive: true }).catch(() => {});
+      await Deno.remove(tempDir, { recursive: true }).catch(() => { });
       info(`downloadAndInstall: cleaned temp dir ${tempDir}`);
     } else {
       warn(`downloadAndInstall: kept temp dir for debugging: ${tempDir}`);
@@ -289,7 +289,7 @@ async function downloadAndInstall(
 
 async function installApp(
   app: string,
-  opts: { ignoreBuildCache?: boolean; ignoreDownloadCache?: boolean, keepTemp?: boolean } = {}
+  opts: { ignoreBuildCache?: boolean; ignoreDownloadCache?: boolean; keepTemp?: boolean } = {}
 ) {
   info(`installApp called with app='${app}'`);
 
@@ -304,89 +304,81 @@ async function installApp(
   const appName = app.includes("/") ? app.split("/").pop()! : app;
   const version = appInfo.version ?? "unknown";
 
-  const archKey = await detectArch();
-  info(`installApp: detected architecture '${archKey}'`);
+  const arch = await detectArch();
+  info(`installApp: detected architecture '${arch}'`);
 
-  const resolvedInfo = appInfo.arch
-    ? appInfo.arch[archKey] ?? null
-    : appInfo;
+  // Merge parent-level and arch-specific fields
+  const archObj = appInfo.arch?.[arch];
+  const infoObj = { ...appInfo, ...(archObj ?? {}) };
 
-  if (!resolvedInfo || !resolvedInfo.url) {
-    error(
-      `installApp: no URL found for '${app}' (arch=${archKey}, expected key='${archKey}')`
-    );
+  if (appInfo.type !== "src" && !infoObj.url) {
+    error(`installApp: no URL found for '${appName}' (arch=${arch})`);
     Deno.exit(1);
   }
-  // --- END NEW ---
 
   const appDir = join(APPS_DIR, appName, version, "bin");
   await ensureDir(appDir);
-  const dest = join(appDir, appName);
 
-  if (appInfo.type === "src") {
+  // Use manifest’s `bin` path if defined, otherwise default to appName
+  const binName = infoObj.bin ?? appName;
+  const dest = join(appDir, binName);
+
+  if (infoObj.type === "src") {
     info(`installApp: source build requested for '${appName}'`);
-    await buildFromSource(appName, appInfo, dest, opts);
+    await buildFromSource(appName, infoObj, dest, opts);
   } else {
-    info(
-      `installApp: downloading binary from ${resolvedInfo.url} -> ${dest}`
-    );
+    info(`installApp: downloading binary from ${infoObj.url} -> ${dest}`);
     await downloadAndInstall(
-      resolvedInfo.url,
+      infoObj.url!,
       dest,
-      resolvedInfo.extract,
-      resolvedInfo.bin,
-      { keepTemp: opts.keepTemp, man: resolvedInfo.man, appName }
+      infoObj.extract,
+      infoObj.bin,
+      { keepTemp: opts.keepTemp, man: infoObj.man, appName }
     );
   }
 
-  // symlink current version
+  // Symlink "current"
   const currentLink = join(APPS_DIR, appName, "current");
   try {
     await Deno.remove(currentLink, { recursive: true });
-  } catch (_) { }
-  await Deno.symlink(join(APPS_DIR, appName, version), currentLink, {
-    type: "dir",
-  });
+  } catch {}
+  await Deno.symlink(join(APPS_DIR, appName, version), currentLink, { type: "dir" });
 
-  // create symlink shim
+  // Symlink into ~/.scoopix/bin
   await ensureDir(BIN_DIR);
   const binPath = join(BIN_DIR, appName);
   try {
     await Deno.remove(binPath);
-  } catch (_) { }
-  const shimTarget = join(currentLink, "bin", appName);
+  } catch {}
+  const shimTarget = join(currentLink, "bin", binName);
   await Deno.symlink(shimTarget, binPath, { type: "file" });
 
   info(`installApp: completed installation of '${appName}'`);
-  console.log(
-    `Installed '${appName}' -> ${binPath} (-> ${shimTarget})`
-  );
+  console.log(`Installed '${appName}' -> ${binPath} (-> ${shimTarget})`);
 
-  // check if ~/.ladle/bin is in PATH
+  // PATH check
   const currentPath = Deno.env.get("PATH") ?? "";
   if (!currentPath.split(":").includes(BIN_DIR)) {
-    warn(`${BIN_DIR} is not in your PATH.`);
     const suggestions = await detectShellInits();
     const lines = formatShellInits(suggestions);
-
     warn(`${BIN_DIR} is not in your PATH.`);
     console.error(
       `You won’t be able to run installed tools until you update PATH.\n\n` +
       `Option 1 (manual): add this line to your shell profile:\n\n` +
-      `  export PATH="$HOME/.ladle/bin:$PATH"\n\n` +
+      `  export PATH="$HOME/.scoopix/bin:$PATH"\n\n` +
       `Then restart your shell or run 'source <file>'.\n\n` +
-      `Option 2: let Ladle set it up automatically:\n\n${lines.join(
-        "\n"
-      )}\n`
+      `Option 2: let Scoopix set it up automatically:\n\n${lines.join("\n")}\n`
     );
   }
+
+  // MANPATH check
   const currentManpath = Deno.env.get("MANPATH") ?? "";
-  const ladleMan = join(LADLE_HOME, "share", "man");
-  if (!currentManpath.split(":").includes(ladleMan)) {
-    warn(`${ladleMan} is not in your MANPATH.`);
+  const scopixMan = join(SCOOPIX_HOME, "share", "man");
+  if (!currentManpath.split(":").includes(scopixMan)) {
+    warn(`${scopixMan} is not in your MANPATH.`);
     console.error(
       `To use 'man <app>', add this line to your shell profile:\n\n` +
-      `  export MANPATH="$HOME/.ladle/share/man:$MANPATH"\n`
+      `  export MANPATH="$HOME/.scoopix/share/man:$MANPATH"\n`
     );
   }
 }
@@ -425,7 +417,6 @@ async function uninstallApp(app: string) {
     console.error(`'${app}' is not installed.`);
   }
 }
-
 async function buildFromSource(
   app: string,
   infoObj: BucketAppSource,
@@ -434,25 +425,31 @@ async function buildFromSource(
 ) {
   info(`buildFromSource called for '${app}'`);
 
-  const version = infoObj.version;
-  const imageTag = `ladle/${app}:${version}`;
-  const cacheDir = join(LADLE_HOME, "cache");
+  const version = infoObj.version ?? "unknown";
+  const imageTag = `scoopix/${app}:${version}`;
+  const cacheDir = join(SCOOPIX_HOME, "cache");
   await ensureDir(cacheDir);
 
-  // Download tarball into cache (if referenced in commands)
-  const tarName = `${app}#${version}.tar.gz`;
-  const tarPath = join(cacheDir, tarName);
-  if (opts.ignoreDownloadCache || !(await exists(tarPath))) {
-    info(`downloading source tarball into cache: ${tarPath}`);
-    const resp = await fetch(infoObj.url);
-    if (!resp.ok) throw new Error(`Failed to download source: ${resp.status} ${resp.statusText}`);
-    const file = await Deno.open(tarPath, { write: true, create: true, truncate: true });
-    await resp.body?.pipeTo(file.writable);
-  } else {
-    info(`using cached source tarball: ${tarPath}`);
+  // Optional tarball caching (only if url is present)
+  let tarName: string | undefined;
+  let tarPath: string | undefined;
+  if (infoObj.url) {
+    tarName = `${app}#${version}.tar.gz`;
+    tarPath = join(cacheDir, tarName);
+    if (opts.ignoreDownloadCache || !(await exists(tarPath))) {
+      info(`downloading source tarball into cache: ${tarPath}`);
+      const resp = await fetch(infoObj.url);
+      if (!resp.ok) {
+        throw new Error(`Failed to download source: ${resp.status} ${resp.statusText}`);
+      }
+      const file = await Deno.open(tarPath, { write: true, create: true, truncate: true });
+      await resp.body?.pipeTo(file.writable);
+    } else {
+      info(`using cached source tarball: ${tarPath}`);
+    }
   }
 
-  // Check if we can reuse existing docker image
+  // Check if we can reuse docker image
   let reuseImage = !opts.ignoreBuildCache;
   if (reuseImage) {
     const check = new Deno.Command("docker", {
@@ -468,22 +465,29 @@ async function buildFromSource(
     info(`reusing existing docker image ${imageTag}`);
   } else {
     info(`building new docker image ${imageTag}`);
+
     const runSteps = infoObj.docker.commands
-      .map(c => c.replace("{url}", infoObj.url).replace("{version}", version))
+      .map(c =>
+        c
+          .replace("{url}", infoObj.url ?? "")
+          .replace("{version}", version)
+          .replace("{app}", app)
+      )
       .join(" && ");
 
-    const dockerfile = `
-  FROM ${infoObj.docker.image}
-  WORKDIR /build
-  COPY ${tarName} /build/
-  RUN ${runSteps}
-  CMD ["cp", "-r", "/out/.", "/out-final/"]
-  `;
-
+    const dockerfile = [
+      `FROM ${infoObj.docker.image}`,
+      `WORKDIR /build`,
+      tarName ? `COPY ${tarName} /build/` : "",
+      `RUN ${runSteps}`,
+      `CMD ["cp", "-r", "/out/.", "/out-final/"]`,
+    ].filter(Boolean).join("\n");
 
     const tmpDir = await Deno.makeTempDir();
     await Deno.writeTextFile(join(tmpDir, "Dockerfile"), dockerfile);
-    await Deno.copyFile(tarPath, join(tmpDir, tarName));
+    if (tarPath) {
+      await Deno.copyFile(tarPath, join(tmpDir, tarName!));
+    }
 
     const build = new Deno.Command("docker", {
       args: ["build", "-t", imageTag, tmpDir],
@@ -510,7 +514,7 @@ async function buildFromSource(
     Deno.exit(1);
   }
 
-  // Copy built binary into Ladle apps dir
+  // Copy built binary into Scoopix apps dir
   const builtBin = join(tmpOut, infoObj.docker.output.replace("/out/", ""));
   if (!(await exists(builtBin))) {
     error(`Expected binary not found at ${builtBin}`);
@@ -570,7 +574,7 @@ function formatShellInits(suggestions: ShellInitSuggestion[]): string[] {
     const note = s.alternates.length > 0
       ? `recommended (${s.recommended}), other candidates: ${s.alternates.join(", ")}`
       : `recommended (${s.recommended})`;
-    return `  ladle init ${s.shell}   # ${note}`;
+    return `  scopix init ${s.shell}   # ${note}`;
   });
 }
 async function initShell(shellArg?: string) {
@@ -589,7 +593,7 @@ async function initShell(shellArg?: string) {
     info(`initShell: shell argument provided: '${shell}'`);
   }
 
-  const exportLine = `export PATH="$HOME/.ladle/bin:$PATH"\nexport MANPATH="$HOME/.ladle/share/man:$MANPATH"`;
+  const exportLine = `export PATH="$HOME/.scopix/bin:$PATH"\nexport MANPATH="$HOME/.scopix/share/man:$MANPATH"`;
   const home = Deno.env.get("HOME") ?? ".";
   const suggestions = await detectShellInits();
   const found = suggestions.find(s => s.shell === shell);
@@ -614,11 +618,11 @@ async function initShell(shellArg?: string) {
 
   if (already) {
     info(`PATH already configured in ${rcFile}`);
-    console.log(`Ladle is already initialized for ${shell} (see ${rcFile})`);
+    console.log(`Scopix is already initialized for ${shell} (see ${rcFile})`);
   } else {
-    await Deno.writeTextFile(rcFile, `\n# Added by Ladle\n${exportLine}\n`, { append: true });
+    await Deno.writeTextFile(rcFile, `\n# Added by Scopix\n${exportLine}\n`, { append: true });
     info(`Appended PATH export to ${rcFile}`);
-    console.log(`Configured Ladle for ${shell}. Modified ${rcFile}:\n  ${exportLine}`);
+    console.log(`Configured Scopix for ${shell}. Modified ${rcFile}:\n  ${exportLine}`);
     if (found.alternates.length > 0) {
       console.log(`Note: other candidate files also exist: ${found.alternates.join(", ")}`);
     }
@@ -627,7 +631,7 @@ async function initShell(shellArg?: string) {
 }
 
 await new Command()
-  .name("ladle")
+  .name("scopix")
   .version("0.1.0")
   .description("Scoop like installer for Linux - user space, buckets, user light contributions")
   .action(function () { this.showHelp(); })
@@ -636,7 +640,7 @@ await new Command()
   .command("install <app:string>", "Install an app from all buckets")
   .option("--ignore-build-cache", "Force rebuild from source, ignoring cached Docker image")
   .option("--ignore-download-cache", "Force re-download even if cached")
-  .option("--keep-temp", "Keep extracted files in ~/.ladle/temp/<app>")
+  .option("--keep-temp", "Keep extracted files in ~/.scopix/temp/<app>")
   .action(async (opts, app) => {
     await installApp(app, {
       ignoreBuildCache: opts.ignoreBuildCache,
@@ -648,6 +652,7 @@ await new Command()
   .action(async (_opts, app) => { await uninstallApp(app); })
   .command("bucket", new Command()
     .description("Manage buckets")
+    .action(function () { this.showHelp(); })
     .command("add <url:string> [name:string]", "Add a bucket manifest from url")
     .action(async (_opts, url, name) => { await addBucket(url, name); })
     .command("list", "List available buckets")
