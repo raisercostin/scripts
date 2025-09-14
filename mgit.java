@@ -12,15 +12,23 @@
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.PathMatcher;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -82,6 +90,18 @@ public class mgit {
 
   public static void stdoutf(String format, Object... args) {
     System.out.println(Ansi.AUTO.string(format.formatted(args)));
+  }
+
+  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = { MgitCheckout.class,
+      Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class, PrMerged.class, Resolve.class }, sortOptions = false)
+  public static class MgitRoot extends MGitCommon implements Runnable {
+    static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
+
+    @Override
+    public void run() {
+      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
+      new CommandLine(this).usage(System.out);
+    }
   }
 
   public abstract static class CommonOptions {
@@ -153,18 +173,6 @@ public class mgit {
   public abstract static class MGitWritableCommon extends MGitCommon {
     @Option(names = "--dry-run", description = "Show what would be done, but don't make changes.")
     public boolean dryRun;
-  }
-
-  @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = { MgitCheckout.class,
-      Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class, PrMerged.class }, sortOptions = false)
-  public static class MgitRoot extends MGitCommon implements Runnable {
-    static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
-
-    @Override
-    public void run() {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
-      new CommandLine(this).usage(System.out);
-    }
   }
 
   @Command(name = "checkout", description = "Switch or create a branch in all repos. Use -b for new branch. '" + DEFAULT_BRANCH
@@ -827,6 +835,10 @@ public class mgit {
   }
 
   static String runGitCommand(String operation, File repo, String... cmd) {
+    return runGitCommand(false, operation, repo, cmd);
+  }
+
+  static String runGitCommand(boolean showCmd, String operation, File repo, String... cmd) {
     List<String> cmdList = new ArrayList<>();
     cmdList.add("git");
     cmdList.add("-C");
@@ -834,7 +846,11 @@ public class mgit {
     for (String s : cmd)
       cmdList.add(s);
     String printableCmd = String.join(" ", cmdList);
-    log.debug("run {}: {}", operation, printableCmd);
+    if (showCmd) {
+      stdoutf("@|cyan # %s|@", printableCmd);
+    } else {
+      log.debug("run {}: {}", operation, printableCmd);
+    }
     try {
       org.zeroturnaround.exec.ProcessExecutor proc = new org.zeroturnaround.exec.ProcessExecutor().command(cmdList).readOutput(true)
           .exitValueNormal();
@@ -866,11 +882,10 @@ public class mgit {
     RepoStatus rs = new RepoStatus();
 
     // Run "git status --branch --porcelain"
-    String statusOutput = runGitCommand("status", repo, "status", "--branch", "--porcelain");
+    String statusOutput = runGitCommand(true, "status", repo, "status", "--branch", "--porcelain");
     String[] lines = statusOutput.split("\\r?\\n");
     rs.dirty = lines.length > 1;
-    rs.dirtyFiles = rs.dirty ? StreamEx.of(lines).skip(1).map(l -> "  " + l.trim()).joining("\n") : "";
-
+    rs.dirtyFiles = rs.dirty ? StreamEx.of(lines).skip(1).joining("\n") : "";
     // Detect conflicts from porcelain codes
     rs.conflicted = StreamEx.of(lines).skip(1).anyMatch(line -> {
       if (line.isBlank())
@@ -951,11 +966,18 @@ public class mgit {
         log.warn("No repos found.");
         return 1;
       }
-      int rebased = 0, failed = 0;
+      int rebased = 0, skipped = 0, failed = 0;
       for (File repo : repoDirs) {
         String branch = getCurrentBranch(repo);
         if (branch == null) {
-          log.warn("Repo '{}' is in detached HEAD, skipping.", repo.getName());
+          stdoutf("@|yellow [%s] skipped (detached HEAD)|@", repo.getName());
+          skipped++;
+          continue;
+        }
+        RepoStatus rs = computeRepoStatus(repo);
+        if (rs.conflicted) {
+          stdoutf("@|yellow [%s] skipped (unresolved conflicts)|@", repo.getName());
+          skipped++;
           continue;
         }
         try {
@@ -976,7 +998,7 @@ public class mgit {
           failed++;
         }
       }
-      log.info("Rebased: {}, Failed: {}", rebased, failed);
+      log.info("Rebased: {}, Skipped: {}, Failed: {}", rebased, skipped, failed);
       return failed > 0 ? 1 : 0;
     }
   }
@@ -1160,4 +1182,270 @@ public class mgit {
     int exit = runGitExitCode("remote-tracking-present", repo, "show-ref", "--verify", "--quiet", "refs/remotes/origin/" + branch);
     return exit == 0;
   }
+
+  enum ResolveStrategy {
+    WORKTREE,  // trust current filesystem content (present -> add, absent -> rm). Current dir/work/worktree content.
+    INDEX,     // trust what was staged before the conflict. Current staged/index intended to be committed.
+    LOCAL,     // trust the commit/branch you are rebasing or merging from. Current branch with committed stuff.
+    UPSTREAM   // trust the branch/commit you are applying onto. The other branch with committed stuff.
+  }
+
+  static class ResolutionStep {
+    final List<String> cmds;
+    final String description;
+
+    ResolutionStep(List<String> cmds, String description) {
+      this.cmds = cmds;
+      this.description = description;
+    }
+  }
+
+  @Command(name = "resolve", description = "Resolve merge conflicts", subcommands = { Resolve.ResolveLegend.class })
+  private static class Resolve extends MGitCommon implements Callable<Integer> {
+
+    @Parameters(index = "0", arity = "0..1", description = "Resolution strategy")
+    ResolveStrategy strategy;
+
+    @Option(names = "--files", split = ",", description = "Restrict to matching files (comma-separated glob patterns)")
+    List<String> files;
+
+    @Option(names = "--conflicts", split = ",", description = "Restrict to specific conflict codes (comma-separated, e.g. UD,D?,UU)")
+    List<String> conflicts;
+
+    @Option(names = "--execute", description = "Actually run git commands")
+    boolean execute;
+
+    @Override
+    public Integer call() {
+      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
+
+      PathMatcher fileMatcher = null;
+      if (files != null && !files.isEmpty()) {
+        // support comma-separated globs
+        List<PathMatcher> matchers = files.stream().map(glob -> FileSystems.getDefault().getPathMatcher("glob:" + glob)).toList();
+        fileMatcher = path -> matchers.stream().anyMatch(m -> m.matches(path));
+      }
+
+      Set<String> conflictFilter = conflicts != null ? new HashSet<>(conflicts) : null;
+
+      int totalConflicts = 0;
+      int totalResolved = 0;
+      int totalSkipped = 0;
+      int totalSuggested = 0;
+
+      for (File repo : findRepos()) {
+        String status = runGitCommand("status", repo, "status", "--porcelain", "--branch");
+        if (status.isBlank())
+          continue;
+
+        stdoutf("[%s] conflicts:", repo.getName());
+        stdoutf("  # git -C %s status --branch --porcelain", repo.getAbsolutePath());
+
+        // --- Group codes by file ---
+        Map<String, List<String>> codesByFile = new LinkedHashMap<>();
+        for (String line : status.split("\n")) {
+          if (line.isBlank() || line.startsWith("##"))
+            continue; // skip branch header
+          String code = line.substring(0, 2).trim();
+          String file = line.substring(2).trim();
+          codesByFile.computeIfAbsent(file, f -> new ArrayList<>()).add(code);
+        }
+
+        // --- Process merged codes per file ---
+        for (var entry : codesByFile.entrySet()) {
+          String file = entry.getKey();
+          List<String> codes = entry.getValue();
+
+          // join codes like ["D","?"] -> "D?"
+          // normalize codes before joining
+          List<String> normalized = codes.stream().map(c -> c.equals("??") ? "?" : c) // collapse ?? to single ?
+              .toList();
+          String combined = String.join("", normalized);
+
+          if (fileMatcher != null && !fileMatcher.matches(Paths.get(file)))
+            continue;
+          if (conflictFilter != null && !conflictFilter.contains(combined))
+            continue;
+
+          Map<ResolveStrategy, List<ResolutionStep>> options = mapConflictToCommands(repo, combined, file);
+
+          totalConflicts++;
+
+          if (strategy == null) {
+            // === Advisor mode ===
+            stdoutf("  %s %s", combined, file);
+            for (var opt : options.entrySet()) {
+              ResolveStrategy s = opt.getKey();
+              List<ResolutionStep> steps = opt.getValue();
+              if (steps.isEmpty())
+                continue;
+
+              if (steps.get(0).cmds.isEmpty()) {
+                stdoutf("    %s -> %s", s, steps.get(0).description);
+                totalSkipped++;
+              } else {
+                stdoutf("    %s -> %s", s, steps.get(0).description);
+                for (ResolutionStep step : steps) {
+                  stdoutf("      git %s", String.join(" ", step.cmds));
+                }
+                totalSuggested++;
+              }
+            }
+          } else {
+            // === Executor mode ===
+            List<ResolutionStep> steps = options.getOrDefault(strategy, List.of());
+            boolean ran = false;
+            for (ResolutionStep step : steps) {
+              if (step.cmds.isEmpty()) {
+                stdoutf("   [SKIP] %s (%s)", file, step.description);
+                totalSkipped++;
+                continue;
+              }
+              if (!ran) {
+                stdoutf("   [RESOLVE %s -> %s] %s", combined, strategy, file);
+                ran = true;
+              }
+              stdoutf("     # %s", step.description);
+              stdoutf("     git -C %s %s", repo.getAbsolutePath(), String.join(" ", step.cmds));
+              if (execute) {
+                runGitCommand("resolve", repo, step.cmds.toArray(new String[0]));
+                totalResolved++;
+              } else {
+                totalSuggested++;
+              }
+            }
+            if (ran && !execute) {
+              stdoutf("     # (use --execute to apply this resolution)");
+            }
+          }
+        }
+      }
+
+      // --- Final summary ---
+      if (totalConflicts == 0) {
+        stdoutf("[mgit] No conflicts found in selected repos");
+      } else if (strategy == null) {
+        stdoutf("[mgit] Summary: Conflicts=%d, Suggested=%d, Skipped=%d", totalConflicts, totalSuggested, totalSkipped);
+      } else {
+        stdoutf("[mgit] Summary: Conflicts=%d, Resolved=%d, Skipped=%d", totalConflicts, totalResolved, totalSkipped);
+      }
+
+      return 0;
+    }
+
+    private Map<ResolveStrategy, List<ResolutionStep>> mapConflictToCommands(File repo, String code, String file) {
+      Map<ResolveStrategy, List<ResolutionStep>> result = new LinkedHashMap<>();
+
+      // helper: invalid strategy
+      BiConsumer<ResolveStrategy, String> skip = (s, msg) -> result.put(s, List.of(new ResolutionStep(Collections.emptyList(), "SKIP: " + msg)));
+
+      switch (code) {
+      case "UU": // modified on both sides
+        result.put(ResolveStrategy.WORKTREE,
+            List.of(new ResolutionStep(List.of("add", file), "file modified on both sides -> accept worktree content")));
+        result.put(ResolveStrategy.INDEX,
+            List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file modified on both sides -> keep index state"),
+                new ResolutionStep(List.of("add", file), "stage index version as resolved")));
+        result.put(ResolveStrategy.LOCAL,
+            List.of(new ResolutionStep(List.of("checkout", "--theirs", "--", file), "file modified on both sides -> restore one side of index"),
+                new ResolutionStep(List.of("add", file), "stage local side as resolved")));
+        result.put(ResolveStrategy.UPSTREAM,
+            List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file modified on both sides -> restore other side of index"),
+                new ResolutionStep(List.of("add", file), "stage other side as resolved")));
+        break;
+
+      case "UD": // index says deleted, worktree has file
+        result.put(ResolveStrategy.WORKTREE,
+            List.of(new ResolutionStep(List.of("add", file), "index says deleted, worktree has file -> accept worktree content")));
+        result.put(ResolveStrategy.INDEX,
+            List.of(new ResolutionStep(List.of("rm", "--", file), "index says deleted, worktree has file -> accept staged delete")));
+        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for UD");
+        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for UD");
+        break;
+
+      case "DU": // index deleted, worktree unmerged
+        result.put(ResolveStrategy.WORKTREE,
+            List.of(new ResolutionStep(List.of("add", file), "index deleted, worktree has unmerged content -> accept worktree content")));
+        result.put(ResolveStrategy.INDEX,
+            List.of(new ResolutionStep(List.of("rm", "--", file), "index deleted, worktree has unmerged content -> accept staged delete")));
+        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for DU");
+        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for DU");
+        break;
+
+      case "AA": // file added twice
+        result.put(ResolveStrategy.WORKTREE, List.of(new ResolutionStep(List.of("add", file), "file added twice -> accept worktree content")));
+        result.put(ResolveStrategy.INDEX,
+            List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file added twice -> keep index state"),
+                new ResolutionStep(List.of("add", file), "stage index version as resolved")));
+        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for AA");
+        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for AA");
+        break;
+
+      case "DD": // file deleted twice
+        result.put(ResolveStrategy.INDEX, List.of(new ResolutionStep(List.of("rm", "--", file), "file deleted twice -> accept staged delete")));
+        skip.accept(ResolveStrategy.WORKTREE, "WORKTREE not valid for DD");
+        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for DD");
+        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for DD");
+        break;
+
+      case "UA":
+      case "AU": // addition vs unmerged
+        result.put(ResolveStrategy.WORKTREE,
+            List.of(new ResolutionStep(List.of("add", file), "file addition vs unmerged entry -> accept worktree content")));
+        result.put(ResolveStrategy.INDEX,
+            List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file addition vs unmerged entry -> keep index state"),
+                new ResolutionStep(List.of("add", file), "stage index version as resolved")));
+        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for " + code);
+        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for " + code);
+        break;
+      case "D?": // staged delete + untracked file
+        result.put(ResolveStrategy.WORKTREE,
+            List.of(new ResolutionStep(List.of("add", file), "file present in worktree, staged as delete -> keep file")));
+        result.put(ResolveStrategy.INDEX,
+            List.of(new ResolutionStep(List.of("rm", "--", file), "file present in worktree, staged as delete -> accept staged delete")));
+        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for D?");
+        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for D?");
+        break;
+      default:
+        // unknown code
+        for (ResolveStrategy s : ResolveStrategy.values()) {
+          skip.accept(s, "no strategy for code " + code);
+        }
+        break;
+      }
+
+      return result;
+    }
+
+    // Legend subcommand
+    @Command(name = "legend", description = "Show conflict code and strategy mapping")
+    public static class ResolveLegend implements Callable<Integer> {
+      @Override
+      public Integer call() {
+        System.out.println("Conflict strategies:");
+        System.out.println("  WORKTREE   trust current filesystem content (present -> add, absent -> rm)");
+        System.out.println("  INDEX      trust staged state in index");
+        System.out.println("  LOCAL      restore one side of index (only valid for UU)");
+        System.out.println("  UPSTREAM   restore the other side of index (only valid for UU)");
+        System.out.println();
+        System.out.println("Conflict codes and valid strategies:");
+        System.out.println("  UU   file modified on both sides (index unmerged)");
+        System.out.println("       valid: WORKTREE, INDEX, LOCAL, UPSTREAM");
+        System.out.println("  UD   index says deleted, worktree has file");
+        System.out.println("       valid: WORKTREE, INDEX");
+        System.out.println("  DU   index deleted, worktree has unmerged content");
+        System.out.println("       valid: WORKTREE, INDEX");
+        System.out.println("  AA   file added twice");
+        System.out.println("       valid: WORKTREE, INDEX");
+        System.out.println("  DD   file deleted twice");
+        System.out.println("       valid: INDEX");
+        System.out.println("  UA   file addition vs unmerged entry");
+        System.out.println("       valid: WORKTREE, INDEX");
+        System.out.println("  AU   file addition vs unmerged entry");
+        System.out.println("       valid: WORKTREE, INDEX");
+        return 0;
+      }
+    }
+  }
+
 }
