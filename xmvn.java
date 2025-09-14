@@ -129,6 +129,61 @@ public class xmvn {
       return 0;
     }
 
+    public static class GraphData {
+      public List<Node> nodes = new ArrayList<>();
+      public List<Edge> edges = new ArrayList<>();
+    }
+
+    public static class Node {
+      public String key;
+      public String type; // project, lib, bom, parent
+      public Attributes attributes = new Attributes();
+      public Map<String, String> meta = new LinkedHashMap<>();
+
+      public Node(String key, String type, String label, String color) {
+        this.key = key;
+        this.type = type;
+        this.attributes.label = label;
+        this.attributes.color = color;
+        this.attributes.size = 5;
+        this.attributes.x = Math.random() * 10;
+        this.attributes.y = Math.random() * 10;
+      }
+
+      public static class Attributes {
+        public String label;
+        public String color;
+        public double x;
+        public double y;
+        public int size;
+      }
+    }
+
+    public static class Edge {
+      public String key;
+      public String source;
+      public String target;
+      public String type; // lib, bom, parent
+      public Attributes attributes = new Attributes();
+      public Map<String, String> meta = new LinkedHashMap<>();
+
+      public Edge(String key, String source, String target, String type, String label, String color) {
+        this.key = key;
+        this.source = source;
+        this.target = target;
+        this.type = type;
+        this.attributes.label = label;
+        this.attributes.color = color;
+        this.attributes.size = 1;
+      }
+
+      public static class Attributes {
+        public String label;
+        public String color;
+        public int size;
+      }
+    }
+
     private void generateGraphFiles(xmvn.Project rootPom) throws IOException {
       Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
         if (p.modules != null && p.modules.module != null) {
@@ -137,21 +192,13 @@ public class xmvn {
         }
         return List.of();
       });
-
-      List<Map<String, Object>> nodes = new ArrayList<>();
-      List<Map<String, Object>> edges = new ArrayList<>();
+      GraphData graph = new GraphData();
       Set<String> nodeKeys = new HashSet<>();
       Set<String> edgeKeys = new HashSet<>();
-
-      traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, nodes, edges, nodeKeys, edgeKeys));
-
-      // Graph JSON
-      Map<String, Object> json = new LinkedHashMap<>();
-      json.put("nodes", nodes);
-      json.put("edges", edges);
+      traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, graph.nodes, graph.edges, nodeKeys, edgeKeys));
 
       com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
-      String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(json);
+      String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(graph);
 
       File htmlFile = new File(projectDir, "graph.html");
 
@@ -217,7 +264,7 @@ public class xmvn {
                 //graph.forEachNode((node, attributes) =>
                 //  graph.setNodeAttribute(node, "color", COLORS[attributes.nodeType as string]),
                 //);
-          
+
                 // 5. Use degrees for node sizes:
                 const degrees = graph.nodes().map((node) => graph.degree(node));
                 const minDegree = Math.min(...degrees);
@@ -232,7 +279,7 @@ public class xmvn {
                     minSize + ((degree - minDegree) / (maxDegree - minDegree)) * (maxSize - minSize),
                   );
                 });
-                
+
               // Poziții inițiale random
               graph.nodes().forEach(node => {
                 graph.setNodeAttribute(node, "x", Math.random() * 200 - 100);
@@ -245,7 +292,7 @@ public class xmvn {
                 //    proper graph layout:
                 //circular.assign(graph);
                 const settings = forceAtlas2.inferSettings(graph);
-                forceAtlas2.assign(graph, { settings, iterations: 600 });
+                forceAtlas2.assign(graph, { settings, iterations: 1000 });
 
               // Renderer Sigma
               new Sigma(graph, container, {
@@ -262,40 +309,106 @@ public class xmvn {
       log.info("Self-contained Sigma.js v3 HTML written to {}", htmlFile.getAbsolutePath());
     }
 
-    private void emitProjectAndDeps(xmvn.Project project, List<Map<String, Object>> nodes, List<Map<String, Object>> edges, Set<String> nodeKeys,
-        Set<String> edgeKeys) {
+    private void emitProjectAndDeps(xmvn.Project project, List<Node> nodes, List<Edge> edges, Set<String> nodeKeys, Set<String> edgeKeys) {
+
+      project = project.effectivePomOrThis();
       String projKey = (project.groupId + "_" + project.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
 
-      addNode(nodes, nodeKeys, projKey, project.groupId + ":" + project.artifactId, "blue");
+      // Project node
+      Node projNode = addNode(nodes, nodeKeys, projKey, project.groupId + ":" + project.artifactId, "#1f77b4", "project");
+      if (projNode != null) {
+        projNode.meta.put("groupId", project.groupId);
+        projNode.meta.put("artifactId", project.artifactId);
+        projNode.meta.put("version", project.version);
+      }
 
+      // Dependencies
       if (project.dependencies != null && project.dependencies.dependency != null) {
         for (var dep : project.dependencies.dependency) {
           String depKey = (dep.groupId + "_" + dep.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
 
-          addNode(nodes, nodeKeys, depKey, dep.groupId + ":" + dep.artifactId, "red");
-          addEdge(edges, edgeKeys, projKey + "_" + depKey, projKey, depKey);
+          if ("pom".equals(dep.type) && "import".equals(dep.scope)) {
+            Node bomNode = addNode(nodes, nodeKeys, depKey, dep.groupId + ":" + dep.artifactId, "#e377c2", "bom");
+            if (bomNode != null) {
+              bomNode.meta.put("groupId", dep.groupId);
+              bomNode.meta.put("artifactId", dep.artifactId);
+              if (dep.version != null)
+                bomNode.meta.put("version", dep.version);
+            }
+
+            Edge bomEdge = addEdge(edges, edgeKeys, projKey + "_" + depKey, projKey, depKey, "bom-import", "#e377c2", "bom");
+            if (bomEdge != null)
+              bomEdge.meta.put("scope", "import");
+          } else {
+            Node libNode = addNode(nodes, nodeKeys, depKey, dep.groupId + ":" + dep.artifactId, "#d62728", "lib");
+            if (libNode != null) {
+              libNode.meta.put("groupId", dep.groupId);
+              libNode.meta.put("artifactId", dep.artifactId);
+              if (dep.version != null)
+                libNode.meta.put("version", dep.version);
+            }
+
+            String scope = dep.scope != null ? dep.scope : "compile";
+            String color = scopeColor(scope);
+
+            Edge depEdge = addEdge(edges, edgeKeys, projKey + "_" + depKey, projKey, depKey, scope, color, "lib");
+            if (depEdge != null) {
+              depEdge.meta.put("scope", scope);
+              if (dep.classifier != null)
+                depEdge.meta.put("classifier", dep.classifier);
+              if (dep.type != null)
+                depEdge.meta.put("type", dep.type);
+            }
+          }
         }
       }
+
+      // Parent
+      if (project.parentPom != null) {
+        var parent = project.parentPom.effectivePomOrThis();
+        String parentKey = (parent.groupId + "_" + parent.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
+
+        Node parentNode = addNode(nodes, nodeKeys, parentKey, parent.groupId + ":" + parent.artifactId, "#7f7f7f", "parent");
+        if (parentNode != null) {
+          parentNode.meta.put("groupId", parent.groupId);
+          parentNode.meta.put("artifactId", parent.artifactId);
+          parentNode.meta.put("version", parent.version);
+        }
+
+        Edge parentEdge = addEdge(edges, edgeKeys, projKey + "_parent_" + parentKey, projKey, parentKey, "parent", "#7f7f7f", "parent");
+        if (parentEdge != null)
+          parentEdge.meta.put("relation", "parent");
+      }
     }
 
-    private void addNode(List<Map<String, Object>> nodes, Set<String> nodeKeys, String key, String label, String color) {
+    private String scopeColor(String scope) {
+      return switch (scope) {
+      case "compile" -> "#1f77b4";   // blue
+      case "provided" -> "#17becf";  // cyan
+      case "runtime" -> "#2ca02c";   // green
+      case "test" -> "#ff7f0e";      // orange
+      case "system" -> "#9467bd";    // purple
+      case "import" -> "#8c564b";    // brown
+      default -> "#7f7f7f";          // grey
+      };
+    }
+
+    private Node addNode(List<Node> nodes, Set<String> nodeKeys, String key, String label, String color, String type) {
       if (nodeKeys.add(key)) {
-        Map<String, Object> node = new LinkedHashMap<>();
-        node.put("key", key);
-        node.put("attributes", Map.of("label", label, "x", Math.random() * 10, "y", Math.random() * 10, "size", 5, "color", color));
-        nodes.add(node);
+        Node n = new Node(key, type, label, color);
+        nodes.add(n);
+        return n;
       }
+      return nodes.stream().filter(n -> n.key.equals(key)).findFirst().orElse(null);
     }
 
-    private void addEdge(List<Map<String, Object>> edges, Set<String> edgeKeys, String key, String source, String target) {
+    private Edge addEdge(List<Edge> edges, Set<String> edgeKeys, String key, String source, String target, String label, String color, String type) {
       if (edgeKeys.add(key)) {
-        Map<String, Object> edge = new LinkedHashMap<>();
-        edge.put("key", key);
-        edge.put("source", source);
-        edge.put("target", target);
-        edge.put("attributes", Map.of("size", 2, "color", "grey"));
-        edges.add(edge);
+        Edge e = new Edge(key, source, target, type, label, color);
+        edges.add(e);
+        return e;
       }
+      return edges.stream().filter(e -> e.key.equals(key)).findFirst().orElse(null);
     }
   }
 
@@ -2742,21 +2855,21 @@ public class xmvn {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-                         * .xsd") } outputDir =
-                         * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-                         * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-                         * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-                         * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-                         * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-                         * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-                         * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-                         * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-                         * Ant classpath for the XJC task ant.withGroovyBuilder {
-                         * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-                         * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-                         * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-                         * "generated-sources/jaxb"))
-                         */
+                                   * .xsd") } outputDir =
+                                   * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+                                   * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+                                   * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+                                   * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+                                   * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+                                   * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+                                   * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+                                   * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+                                   * Ant classpath for the XJC task ant.withGroovyBuilder {
+                                   * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+                                   * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+                                   * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+                                   * "generated-sources/jaxb"))
+                                   */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {

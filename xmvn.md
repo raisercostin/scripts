@@ -1,4 +1,4 @@
-# mvn2gradle
+# xmvn
 
 A pragmatic tool for converting large Maven multi-module projects to Gradle (Kotlin DSL). Designed for reproducibility and deterministic builds for large JVM codebases.
 
@@ -30,17 +30,17 @@ A pragmatic tool for converting large Maven multi-module projects to Gradle (Kot
 
 ## Install
 
-`jbang app install --force https://github.com/raisercostin/scripts/blob/main/mvn2gradle.java`
+`jbang app install --force https://github.com/raisercostin/scripts/blob/main/xmvn.java`
 
 To run without install
-`jbang https://github.com/raisercostin/scripts/blob/main/mvn2gradle.java <params>`
+`jbang https://github.com/raisercostin/scripts/blob/main/xmvn.java <params>`
 
 ## Usage
 
 ```
-mvn2gradle
+xmvn
 
-Usage: mvn2gradle [-hV] [--debug-repositories] [--force-generate-effective-pom]
+Usage: xmvn [-hV] [--debug-repositories] [--force-generate-effective-pom]
                   [--ignore-unknown] [--ignore-unknown-java-version]
                   [--ignore-unknown-versions] [--inline-versions]
                   [--maven-compatible] [--use-api-dependencies]
@@ -89,14 +89,14 @@ Usage: mvn2gradle [-hV] [--debug-repositories] [--force-generate-effective-pom]
 
 ### Simple use
 
-`mvn2gradle .`
+`xmvn .`
 
 
 ### Advanced usage
 
 The maven test dependencies are not transitively passed when dependency is on test-jars. So these libraries (specific to your build) you will expose as compileOnly too.
 
-`mvn2gradle --force-provided-for-tests=:org.apache.maven:maven-compat:,:org.infinispan:infinispan-core:,:com.oracle:ojdbc8:,:org.gwtproject:gwt-user:,:org.apache.spark:spark-sql-api_2.12:,:org.apache.spark:spark-catalyst_2.12:,:org.apache.spark:spark-sql_2.12:,`
+`xmvn --force-provided-for-tests=:org.apache.maven:maven-compat:,:org.infinispan:infinispan-core:,:com.oracle:ojdbc8:,:org.gwtproject:gwt-user:,:org.apache.spark:spark-sql-api_2.12:,:org.apache.spark:spark-catalyst_2.12:,:org.apache.spark:spark-sql_2.12:,`
 
 ## TODO
 
