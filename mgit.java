@@ -93,7 +93,7 @@ public class mgit {
   }
 
   @Command(name = "mgit", mixinStandardHelpOptions = true, version = "mgit 0.1", description = description, subcommands = { MgitCheckout.class,
-      Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class, PrMerged.class, Resolve.class }, sortOptions = false)
+      Status.class, Commit.class, Push.class, Uprebase.class, PrCreated.class, PrMerged.class, Resolve.class, Fetch.class }, sortOptions = false)
   public static class MgitRoot extends MGitCommon implements Runnable {
     static final Logger log = LoggerFactory.getLogger(MgitRoot.class);
 
@@ -957,6 +957,8 @@ public class mgit {
     private final Logger log = LoggerFactory.getLogger(Uprebase.class);
     @Option(names = "--force-rebase", description = "Force rebase all commits (--no-ff). Rewrites all commit hashes.")
     private boolean forceRebase;
+    @Option(names = "--fetch", description = "Fetch remote refs before rebase (slower)")
+    boolean fetch;
 
     @Override
     public Integer call() throws Exception {
@@ -980,18 +982,39 @@ public class mgit {
           skipped++;
           continue;
         }
+
         try {
-          runGitCommand("fetch", repo, "fetch", "origin");
+          if (fetch) {
+            try {
+              doFetch(repo); // same as mgit fetch
+            } catch (Exception ex) {
+              log.error("Fetch failed in '{}': {}", repo.getName(), ex.getMessage());
+              skipped++;
+              continue;
+            }
+          }
           String defaultBranch = getRemoteDefaultBranch(repo);
           List<String> rebaseCmd = new ArrayList<>(List.of("rebase", "--autostash"));
           if (forceRebase) {
             rebaseCmd.add("--force-rebase");
           }
           rebaseCmd.add("origin/" + defaultBranch);
-          runGitCommand("rebase", repo, rebaseCmd.toArray(new String[0]));
-          String pushCmd = "git -C " + repo.getAbsolutePath() + " push --force-with-lease";
-          stdoutf("@|green [%s] rebase OK. To push: %s|@", repo.getName(), pushCmd);
-          rebased++;
+          try {
+            runGitCommand("rebase", repo, rebaseCmd.toArray(new String[0]));
+            String pushCmd = "git -C " + repo.getAbsolutePath() + " push --force-with-lease";
+            stdoutf("@|green [%s] rebase OK. To push: %s|@", repo.getName(), pushCmd);
+            rebased++;
+          } catch (Exception ex) {
+            String msg = ex.getMessage();
+            if (msg != null && msg.contains("rebase-merge")) {
+              stdoutf("@|yellow [%s] rebase already in progress. Use 'git rebase --continue' or '--abort'.|@", repo.getName());
+              skipped++;
+            } else {
+              log.error("Rebase failed in '{}': {}", repo.getName(), msg);
+              stdoutf("@|magenta [%s] rebase FAILED. Use 'mgit resolve --repos=%s' to fix conflicts|@", repo.getName(), repo.getName());
+              failed++;
+            }
+          }
         } catch (Exception ex) {
           log.error("Rebase failed in '{}': {}", repo.getName(), ex.getMessage());
           stdoutf("@|magenta [%s] rebase FAILED. Resolve manually|@", repo.getName());
@@ -1120,52 +1143,13 @@ public class mgit {
 
   @Command(name = "fetch", description = "Fetch all remotes for repos, and auto-merge PR state if remote branch is deleted")
   private static class Fetch extends MGitCommon implements Callable<Integer> {
-
-    final Logger log = LoggerFactory.getLogger(Fetch.class);
-
     @Override
     public Integer call() throws Exception {
       RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
-      List<File> repoDirs = findRepos();
       int fetched = 0, errors = 0;
-      for (File repo : repoDirs) {
+      for (File repo : findRepos()) {
         try {
-          runGitCommand("fetch", repo, "fetch", "origin");
-          stdoutf("@|green [%s] fetched|@", repo.getName());
-          // After fetch, check PR states
-          List<String> prStates = listPrStates(repo);
-          for (String entry : prStates) {
-            // entry lines come from: git config --get-regexp "^mgit\.pr\..*\.state"
-            // Format: "mgit.pr.<normalized-branch>.state <value>"
-            String[] parts = entry.split("\\s+", 2);
-            if (parts.length < 2)
-              continue;
-
-            String key = parts[0];
-            String state = parts[1];
-
-            if (!"created".equalsIgnoreCase(state))
-              continue;
-
-            // Extract <normalized-branch> from "mgit.pr.<norm>.state"
-            final String prefix = "mgit.pr.";
-            final String suffix = ".state";
-            if (!key.startsWith(prefix) || !key.endsWith(suffix))
-              continue;
-
-            String norm = key.substring(prefix.length(), key.length() - suffix.length());
-            // Recover the original branch we stored earlier
-            String originalBranch = getPrOriginalBranch(repo, norm);
-            if (originalBranch == null || originalBranch.isBlank()) {
-              // Cannot confidently check remote without original name
-              continue;
-            }
-
-            if (!remoteBranchExists(repo, originalBranch)) {
-              setPrState(repo, originalBranch, "merged");
-              System.out.printf("[%s] PR branch %s is gone from remote; state set to MERGED.%n", repo.getName(), originalBranch);
-            }
-          }
+          doFetch(repo);
           fetched++;
         } catch (Exception ex) {
           log.error("Fetch failed in '{}': {}", repo.getName(), ex.getMessage());
@@ -1174,6 +1158,40 @@ public class mgit {
       }
       log.info("Fetched: {}, Errors: {}", fetched, errors);
       return errors > 0 ? 1 : 0;
+    }
+  }
+
+  static void doFetch(File repo) {
+    runGitCommand("fetch", repo, "fetch", "origin");
+    stdoutf("@|green [%s] fetched|@", repo.getName());
+
+    // After fetch, check PR states
+    List<String> prStates = listPrStates(repo);
+    for (String entry : prStates) {
+      String[] parts = entry.split("\\s+", 2);
+      if (parts.length < 2)
+        continue;
+
+      String key = parts[0];
+      String state = parts[1];
+
+      if (!"created".equalsIgnoreCase(state))
+        continue;
+
+      final String prefix = "mgit.pr.";
+      final String suffix = ".state";
+      if (!key.startsWith(prefix) || !key.endsWith(suffix))
+        continue;
+
+      String norm = key.substring(prefix.length(), key.length() - suffix.length());
+      String originalBranch = getPrOriginalBranch(repo, norm);
+      if (originalBranch == null || originalBranch.isBlank())
+        continue;
+
+      if (!remoteBranchExists(repo, originalBranch)) {
+        setPrState(repo, originalBranch, "merged");
+        System.out.printf("[%s] PR branch %s is gone from remote; state set to MERGED.%n", repo.getName(), originalBranch);
+      }
     }
   }
 
@@ -1336,10 +1354,24 @@ public class mgit {
     private Map<ResolveStrategy, List<ResolutionStep>> mapConflictToCommands(File repo, String code, String file) {
       Map<ResolveStrategy, List<ResolutionStep>> result = new LinkedHashMap<>();
 
-      // helper: invalid strategy
+      // helpers
       BiConsumer<ResolveStrategy, String> skip = (s, msg) -> result.put(s, List.of(new ResolutionStep(Collections.emptyList(), "SKIP: " + msg)));
+      Runnable skipAllNotConflict = () -> {
+        for (ResolveStrategy s : ResolveStrategy.values()) {
+          skip.accept(s, "not a conflict for mgit resolve (" + code + ")");
+        }
+      };
+
+      // Guard: untracked directory lines like "?? some-dir/" are not conflicts
+      if ("??".equals(code) && file.endsWith("/")) {
+        for (ResolveStrategy s : ResolveStrategy.values()) {
+          skip.accept(s, "untracked directory; not a conflict (" + code + ")");
+        }
+        return result;
+      }
 
       switch (code) {
+      // --- True unmerged conflicts (index has stages) ---
       case "UU": // modified on both sides
         result.put(ResolveStrategy.WORKTREE,
             List.of(new ResolutionStep(List.of("add", file), "file modified on both sides -> accept worktree content")));
@@ -1347,49 +1379,51 @@ public class mgit {
             List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file modified on both sides -> keep index state"),
                 new ResolutionStep(List.of("add", file), "stage index version as resolved")));
         result.put(ResolveStrategy.LOCAL,
-            List.of(new ResolutionStep(List.of("checkout", "--theirs", "--", file), "file modified on both sides -> restore one side of index"),
+            List.of(new ResolutionStep(List.of("checkout", "--theirs", "--", file), "file modified on both sides -> restore local side into index"),
                 new ResolutionStep(List.of("add", file), "stage local side as resolved")));
         result.put(ResolveStrategy.UPSTREAM,
-            List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file modified on both sides -> restore other side of index"),
-                new ResolutionStep(List.of("add", file), "stage other side as resolved")));
+            List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file modified on both sides -> restore upstream side into index"),
+                new ResolutionStep(List.of("add", file), "stage upstream side as resolved")));
         break;
 
-      case "UD": // index says deleted, worktree has file
+      case "UD": // index records a delete, worktree still has file (semantic: delete vs keep)
         result.put(ResolveStrategy.WORKTREE,
-            List.of(new ResolutionStep(List.of("add", file), "index says deleted, worktree has file -> accept worktree content")));
+            List.of(new ResolutionStep(List.of("add", file), "index says delete, worktree has file -> keep file (stage worktree content)")));
         result.put(ResolveStrategy.INDEX,
-            List.of(new ResolutionStep(List.of("rm", "--", file), "index says deleted, worktree has file -> accept staged delete")));
+            List.of(new ResolutionStep(List.of("rm", "--", file), "index says delete, worktree has file -> accept staged delete")));
         skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for UD");
         skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for UD");
         break;
 
-      case "DU": // index deleted, worktree unmerged
+      case "DU": // index deleted, worktree has unmerged content (shape similar to UD)
         result.put(ResolveStrategy.WORKTREE,
-            List.of(new ResolutionStep(List.of("add", file), "index deleted, worktree has unmerged content -> accept worktree content")));
+            List.of(new ResolutionStep(List.of("add", file), "index deleted, worktree has content -> keep file (stage worktree content)")));
         result.put(ResolveStrategy.INDEX,
-            List.of(new ResolutionStep(List.of("rm", "--", file), "index deleted, worktree has unmerged content -> accept staged delete")));
+            List.of(new ResolutionStep(List.of("rm", "--", file), "index deleted, worktree has content -> accept staged delete")));
         skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for DU");
         skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for DU");
         break;
 
-      case "AA": // file added twice
-        result.put(ResolveStrategy.WORKTREE, List.of(new ResolutionStep(List.of("add", file), "file added twice -> accept worktree content")));
+      case "AA": // added twice
+        result.put(ResolveStrategy.WORKTREE,
+            List.of(new ResolutionStep(List.of("add", file), "file added from both sides -> accept worktree content")));
         result.put(ResolveStrategy.INDEX,
-            List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file added twice -> keep index state"),
+            List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file added from both sides -> keep index state"),
                 new ResolutionStep(List.of("add", file), "stage index version as resolved")));
         skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for AA");
         skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for AA");
         break;
 
-      case "DD": // file deleted twice
-        result.put(ResolveStrategy.INDEX, List.of(new ResolutionStep(List.of("rm", "--", file), "file deleted twice -> accept staged delete")));
+      case "DD": // deleted twice
+        result.put(ResolveStrategy.INDEX,
+            List.of(new ResolutionStep(List.of("rm", "--", file), "file deleted from both sides -> accept staged delete")));
         skip.accept(ResolveStrategy.WORKTREE, "WORKTREE not valid for DD");
         skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for DD");
         skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for DD");
         break;
 
       case "UA":
-      case "AU": // addition vs unmerged
+      case "AU": // addition vs unmerged entry
         result.put(ResolveStrategy.WORKTREE,
             List.of(new ResolutionStep(List.of("add", file), "file addition vs unmerged entry -> accept worktree content")));
         result.put(ResolveStrategy.INDEX,
@@ -1398,16 +1432,53 @@ public class mgit {
         skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for " + code);
         skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for " + code);
         break;
-      case "D?": // staged delete + untracked file
+
+      // --- Synthetic combined cases detected by Resolve.call() grouping ---
+      case "D?": // staged delete + untracked same file in worktree
         result.put(ResolveStrategy.WORKTREE,
-            List.of(new ResolutionStep(List.of("add", file), "file present in worktree, staged as delete -> keep file")));
+            List.of(new ResolutionStep(List.of("add", file), "file present in worktree, staged as delete -> keep file (stage worktree content)")));
         result.put(ResolveStrategy.INDEX,
             List.of(new ResolutionStep(List.of("rm", "--", file), "file present in worktree, staged as delete -> accept staged delete")));
         skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for D?");
         skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for D?");
         break;
+
+      // --- Guards: not conflicts for mgit resolve (give reason and skip) ---
+      case "??": // untracked file (not a conflict)
+        skipAllNotConflict.run();
+        break;
+
+      case "D":  // staged delete only; no disagreement
+        skipAllNotConflict.run();
+        break;
+
+      case "M":  // modified in worktree only
+        skipAllNotConflict.run();
+        break;
+
+      case "A":  // staged add only
+        skipAllNotConflict.run();
+        break;
+
+      case "R":  // rename in index only
+        skipAllNotConflict.run();
+        break;
+
+      case "C":  // copy in index only
+        skipAllNotConflict.run();
+        break;
+
+      case "T":  // typechange only
+        skipAllNotConflict.run();
+        break;
+
+      case "!!": // ignored path
+        for (ResolveStrategy s : ResolveStrategy.values()) {
+          skip.accept(s, "ignored by .gitignore; not a conflict (" + code + ")");
+        }
+        break;
+
       default:
-        // unknown code
         for (ResolveStrategy s : ResolveStrategy.values()) {
           skip.accept(s, "no strategy for code " + code);
         }
@@ -1447,5 +1518,4 @@ public class mgit {
       }
     }
   }
-
 }
