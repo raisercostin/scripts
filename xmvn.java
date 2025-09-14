@@ -11,6 +11,7 @@
 //DEPS ch.qos.logback:logback-classic:1.4.14
 //DEPS org.zeroturnaround:zt-exec:1.12
 //DEPS one.util:streamex:0.8.2
+//DEPS com.google.guava:guava:32.1.2-jre
 //SOURCES com/namekis/utils/RichLogback.java
 
 import java.io.File;
@@ -25,6 +26,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.TreeMap;
@@ -46,12 +48,13 @@ import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper;
 import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty;
+import com.google.common.graph.Traverser;
 import com.namekis.utils.RichLogback;
 
 import one.util.streamex.StreamEx;
 import picocli.CommandLine;
-import picocli.CommandLine.Option;
 import picocli.CommandLine.Help.Visibility;
+import picocli.CommandLine.Option;
 
 public class xmvn {
   private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(xmvn.class);
@@ -88,25 +91,141 @@ public class xmvn {
     public boolean debug = false;
   }
 
+  public abstract static class LoadPomOptions extends CommonOptions {
+    @CommandLine.Parameters(index = "0", description = "Directory containing pom.xml")
+    public File projectDir;
+    @CommandLine.Option(names = { "--ignore-unknown" }, description = "Ignore unknown XML fields")
+    public boolean ignoreUnknown = false;
+
+    @Option(names = "--use-effective-pom", description = "Use mvn help:effective-pom")
+    public boolean useEffectivePom = true;
+
+    @Option(names = "--use-pom-inheritance", description = "Use recursive pom.xml parent inheritance", defaultValue = "true")
+    public boolean usePomInheritance = true;
+
+    @Option(names = "--force-generate-effective-pom", description = "Force regeneration of effective-pom.xml even if it exists", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
+    public boolean forceGenerateEffectivePom = true;
+
+    @Option(names = "--debug-repositories", description = "Debug info on repositories", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
+    public boolean debugRepositories = false;
+  }
+
   @CommandLine.Command(name = "2arango", mixinStandardHelpOptions = true, description = """
       Generate ArangoDB graph from Maven multi-module project.
       """)
-  public static class ToArangoGraph extends CommonOptions implements Callable<Integer> {
-    @CommandLine.Parameters(index = "0", description = "Directory containing pom.xml")
-    public File projectDir;
-
+  public static class ToArangoGraph extends LoadPomOptions implements Callable<Integer> {
     @Override
     public Integer call() throws Exception {
       RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
-      //GradleKtsGenerator.sync(this)
-      log.info("Not implemented yet");
+      Project rootPom = xmvn.PomLoader.loadRootPom(this);
+      generateArangoGraph(rootPom);
       return 0;
     }
+
+    private void generateArangoGraph(xmvn.Project rootPom) {
+      List<String> projectDocs = new ArrayList<>();
+      List<String> dependencyDocs = new ArrayList<>();
+      List<String> edgeDocs = new ArrayList<>();
+
+      StringBuilder script = new StringBuilder();
+      script.append("""
+          // AQL script for ArangoDB
+          //echo Check password
+          //docker logs arangodb-instance
+          //===========================================
+          //GENERATED ROOT PASSWORD: ***
+          //===========================================
+          //echo Connect to arangodb 
+          //docker exec -it arangodb-instance arangosh
+          //echo Create database xmvn
+          //use xmvn
+          """);
+
+      Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
+        if (p.modules != null && p.modules.module != null) {
+          return p.modules.module.stream()
+              .map(m -> xmvn.PomLoader.loadPom(null, p,
+                  new File(p.pomFile.getParentFile(), m), p.context))
+              .filter(Objects::nonNull)
+              .toList();
+        }
+        return List.of();
+      });
+
+      traverser.depthFirstPreOrder(rootPom)
+               .forEach(p -> emitProjectAndDeps(p, projectDocs, dependencyDocs, edgeDocs));
+
+      if (!projectDocs.isEmpty()) {
+        script.append("""
+            FOR doc IN [
+            %s
+            ] INSERT doc INTO projects OPTIONS { overwrite: true }
+
+            """.formatted(String.join(",\n", projectDocs)));
+      }
+      if (!dependencyDocs.isEmpty()) {
+        script.append("""
+            FOR doc IN [
+            %s
+            ] INSERT doc INTO dependencies OPTIONS { overwrite: true }
+
+            """.formatted(String.join(",\n", dependencyDocs)));
+      }
+      if (!edgeDocs.isEmpty()) {
+        script.append("""
+            FOR doc IN [
+            %s
+            ] INSERT doc INTO edges OPTIONS { overwrite: true }
+
+            """.formatted(String.join(",\n", edgeDocs)));
+      }
+
+      System.out.println(script.toString());
+    }
+
+    private void emitProjectAndDeps(xmvn.Project project,
+                                    List<String> projects,
+                                    List<String> dependencies,
+                                    List<String> edges) {
+      String projKey = (project.groupId + "_" + project.artifactId)
+          .replaceAll("[^a-zA-Z0-9_]", "_");
+
+      projects.add("""
+          { _key: "%s", groupId: "%s", artifactId: "%s", version: "%s", packaging: "%s" }
+          """.formatted(
+              projKey,
+              project.groupId,
+              project.artifactId,
+              project.version != null ? project.version : "unknown",
+              project.packaging != null ? project.packaging : "jar"));
+
+      if (project.dependencies != null && project.dependencies.dependency != null) {
+        for (var dep : project.dependencies.dependency) {
+          String depKey = (dep.groupId + "_" + dep.artifactId)
+              .replaceAll("[^a-zA-Z0-9_]", "_");
+
+          dependencies.add("""
+              { _key: "%s", groupId: "%s", artifactId: "%s", version: "%s", packaging: "%s" }
+              """.formatted(
+                  depKey,
+                  dep.groupId,
+                  dep.artifactId,
+                  dep.version != null ? dep.version : "unknown",
+                  dep.type != null ? dep.type : "jar"));
+
+          edges.add("""
+              { _from: "projects/%s", _to: "dependencies/%s", scope: "%s" }
+              """.formatted(
+                  projKey,
+                  depKey,
+                  dep.scope != null ? dep.scope : "compile"));
+        }
+      }
+    }
+
   }
 
-  @CommandLine.Command(name = "2gradle", mixinStandardHelpOptions = true, description ="Convert a maven multi-module base to equivalent gradle build.",
-      footer=
-      """
+  @CommandLine.Command(name = "2gradle", mixinStandardHelpOptions = true, description = "Convert a maven multi-module base to equivalent gradle build.", footer = """
       Convert a maven multi-module base to equivalent gradle build.
 
       ## Features
@@ -135,19 +254,7 @@ public class xmvn {
       - add a build to eclipse standard projects (not dependent on gradle or maven or other natures) but properly configures dependencies
         between submodules and generates eclipse project files
       """)
-  public static class ToGradle extends CommonOptions implements Callable<Integer> {
-    @CommandLine.Parameters(index = "0", description = "Directory containing pom.xml")
-    public File projectDir;
-
-    @CommandLine.Option(names = { "--ignore-unknown" }, description = "Ignore unknown XML fields")
-    public boolean ignoreUnknown = false;
-
-    @Option(names = "--use-effective-pom", description = "Use mvn help:effective-pom")
-    public boolean useEffectivePom = true;
-
-    @Option(names = "--use-pom-inheritance", description = "Use recursive pom.xml parent inheritance", defaultValue = "true")
-    public boolean usePomInheritance = true;
-
+  public static class ToGradle extends LoadPomOptions implements Callable<Integer> {
     @Option(names = "--inline-versions", description = "Inline dependency versions instead of using val variables")
     public boolean inlineVersions = false;
 
@@ -159,12 +266,6 @@ public class xmvn {
 
     @Option(names = "--ignore-unknown-java-version", description = "Ignore unknown Java version in pom.xml (useful in debug)", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
     public boolean ignoreUnknownJavaVersion = true;
-
-    @Option(names = "--force-generate-effective-pom", description = "Force regeneration of effective-pom.xml even if it exists", defaultValue = "true", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
-    public boolean forceGenerateEffectivePom = true;
-
-    @Option(names = "--debug-repositories", description = "Debug info on repositories", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
-    public boolean debugRepositories = false;
 
     @Option(names = "--use-implementation-dependencies", description = "Use implementation dependencies instead of api. Use this if you want to compile only against explicit dependencies.", defaultValue = "false", showDefaultValue = CommandLine.Help.Visibility.ON_DEMAND)
     public Boolean useImplementationDependencies = null;
@@ -196,11 +297,11 @@ public class xmvn {
   }
 
   public static class ProjectContext {
-    public final ToGradle cli;
+    public final LoadPomOptions cli;
     public final Project root;
     public final Projects effectivePom;
 
-    public ProjectContext(ToGradle cli, Project root, Projects effectivePom) {
+    public ProjectContext(LoadPomOptions cli, Project root, Projects effectivePom) {
       this.cli = cli;
       this.root = root;
       this.effectivePom = effectivePom;
@@ -1156,14 +1257,14 @@ public class xmvn {
 
     public static Integer sync(ToGradle cli) throws Exception {
       log.info("Sync ...");
-      Project rootPom = MavenLoader.loadRootPom(cli);
+      Project rootPom = PomLoader.loadRootPom(cli);
       generateGradle(rootPom);
       log.info("Sync done.");
       return 0;
     }
 
     private static void generateGradle(Project rootPom) throws IOException {
-      ToGradle cli2 = rootPom.context.cli;
+      ToGradle cli2 = (xmvn.ToGradle) rootPom.context.cli;
       // At top-level in sync
       GradleModules gradleModules = collectModuleArtifactIdToGradlePath(rootPom, cli2.projectDir, cli2.ignoreUnknown, rootPom.context.effectivePom);
 
@@ -1356,7 +1457,7 @@ public class xmvn {
       return StreamEx.of(pom.modules.module).flatMap(moduleName -> {
         String fullPath = parentPath.isEmpty() ? moduleName : parentPath + ":" + moduleName;
         File moduleDir = baseDir.toPath().resolve(moduleName).toFile();
-        Project childPom = MavenLoader.loadPom(null, null, moduleDir, pom.context);
+        Project childPom = PomLoader.loadPom(null, null, moduleDir, pom.context);
         List<String> nested = childPom != null ? collectAllModulePaths(childPom, fullPath, moduleDir) : List.of();
         return StreamEx.of(fullPath).append(nested);
       }).toList();
@@ -1379,7 +1480,7 @@ public class xmvn {
         for (String moduleName : pom.modules.module) {
           Path moduleDir = baseDir.resolve(moduleName);
           if (Files.exists(moduleDir)) {
-            Project modulePom = MavenLoader.loadPom(null, null, moduleDir.toFile(), pom.context);
+            Project modulePom = PomLoader.loadPom(null, null, moduleDir.toFile(), pom.context);
             generateForModulesRecursively(moduleDir, modulePom, cli, effectivePom, gradleModules, false);
           } else {
             log.warn("Module directory not found: {}", moduleDir);
@@ -1410,220 +1511,6 @@ public class xmvn {
           log.warn("Renamed unexpected settings.gradle.kts in submodule: {} → {}", settingsGradle, renamed);
         } catch (IOException e) {
           log.error("Failed to rename stray settings.gradle.kts in {}: {}", dir, e.getMessage(), e);
-        }
-      }
-    }
-
-    static class MavenLoader {
-      public static Project loadRootPom(ToGradle cli) throws IOException, InterruptedException, TimeoutException {
-        Projects effectivePom = null;
-        if (cli.useEffectivePom) {
-          Path effPomPath = cli.projectDir.toPath().resolve("target/effective-pom.xml");
-          if (!Files.exists(effPomPath) || cli.forceGenerateEffectivePom) {
-            log.info("Generating effective-pom.xml");
-            generateEffectivePom(cli.projectDir, effPomPath);
-          }
-          effectivePom = loadEffectivePom(cli.ignoreUnknown, effPomPath);
-        }
-
-        ProjectContext context = new ProjectContext(cli, null, effectivePom);
-
-        Project rootPom = loadPom(null, null, context.cli.projectDir, context);
-        return rootPom;
-      }
-
-      private static void generateEffectivePom(File projectDir, Path effPomPath) throws IOException, InterruptedException, TimeoutException {
-        String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
-        int exit;
-        try {
-          exit = new ProcessExecutor().directory(projectDir).command(mavenCmd, "help:effective-pom", "-Doutput=" + effPomPath)
-              .redirectOutput(System.out).redirectError(System.err).exitValues(0) // Only allow zero exit value
-              .execute().getExitValue();
-        } catch (InvalidExitValueException e) {
-          throw new IOException("Maven failed with exit code: " + e.getExitValue(), e);
-        }
-        if (exit != 0) {
-          throw new IOException("Maven failed to generate " + effPomPath + " (exit " + exit + ")");
-        }
-      }
-
-      private static boolean isWindows() {
-        return System.getProperty("os.name").toLowerCase().contains("win");
-      }
-
-      private static Projects loadEffectivePom(boolean ignoreUnknown, Path effPomPath) throws IOException {
-        if (!Files.exists(effPomPath)) {
-          throw new RuntimeException("File not found at " + effPomPath);
-        }
-
-        JacksonXmlModule module = new JacksonXmlModule();
-        module.setDefaultUseWrapper(false); // optional depending on your XML structure
-
-        XmlMapper xmlMapper = new XmlMapper(module);
-        xmlMapper.setDefaultUseWrapper(false);
-        xmlMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, !ignoreUnknown);
-        String xml = Files.readString(effPomPath);
-
-        try {
-          // Try parse as Projects (multi-module)
-          return xmlMapper.readValue(xml, Projects.class);
-        } catch (UnrecognizedPropertyException e) {
-          // If failed because no 'project' wrapper, parse single PomModel then wrap it
-          if (e.getMessage().contains("one known property: \"project\"")) {
-            EffectivePom singlePom = xmlMapper.readValue(xml, EffectivePom.class);
-            Projects projects = new Projects();
-            projects.project.add(singlePom);
-            return projects;
-          }
-          throw e;
-        }
-      }
-
-      private static final Map<String, Project> pomCache = new HashMap<>();
-
-      public static Project loadPom(Project root, Project parentDirPom, File projectDirOrPomFile, ProjectContext context) {
-        boolean ignoreUnknown = context.cli.ignoreUnknown;
-        Projects effectivePom = context.effectivePom;
-        try {
-          File pomFile = projectDirOrPomFile.isDirectory() ? projectDirOrPomFile.toPath().resolve("pom.xml").toFile() : projectDirOrPomFile;
-
-          String key = pomFile.getCanonicalPath();
-          if (pomCache.containsKey(key)) {
-            return pomCache.get(key);
-          }
-          if (!pomFile.exists()) {
-            log.warn("POM file not found: {}", pomFile.getAbsolutePath());
-            return null;
-          }
-
-          log.info("Loading POM from {}", pomFile.getAbsolutePath());
-          Project pom = parsePom(pomFile, ignoreUnknown);
-          pom.context = root == null ? context.withRoot(pom) : context;
-          pom.parentDirPom = parentDirPom;
-          pomCache.put(key, pom);
-
-          if (pom.parentGav != null) {
-            log.info("Resolving parent POM for {} -> {}", pom.ga(), pom.parentGav.ga());
-            var parent = findParentPomFileNoCheck(pom.effectivePomOrThis(), ignoreUnknown);
-            if (parent == pom) {
-              throw new RuntimeException("Parent POM is self-referential: " + pom.id());
-            }
-            if (pom.parentPom != null) {
-              if (pom.groupId == null) {
-                pom.groupId = pom.parentPom.groupId;
-              }
-            }
-            pom.parentPom = parent;
-            Gav parentGav = pom.parentGav;
-            if (parentGav != null || parent != null) {
-              if (parentGav == null || parent == null) {
-                throw new RuntimeException(
-                    "Parent POM mismatch: one is null while the other is not. Parent: " + parentGav + ", ParentPom: " + parent);
-              }
-              if (!parentGav.groupId.equals(parent.groupId) || !parentGav.artifactId.equals(parent.artifactId)) {
-                // TODO remove this - needed for debug
-                parent = findParentPomFileNoCheck(pom, ignoreUnknown);
-                throw new RuntimeException("""
-                    In pom %s mismatch:
-                    parentGav %s
-                    parent    %s"
-                    """.formatted(pom.id(), parentGav.id(), parent.id()));
-              }
-              if (!parentGav.version.equals(parent.version)) {
-                log.warn("Parent POM version mismatch: {} vs {}", parentGav.version, parent.version);
-              }
-              // if (parent.artifactId == null || parentPom.artifactId == null) {
-              // return true; // artifactId can be null in some cases, e.g., parent POMs
-              // without artifactId
-              // }
-              if (!parentGav.artifactId.equals(parent.artifactId)) {
-                throw new RuntimeException("Parent POM artifactId mismatch: " + parentGav.artifactId + " vs " + parent.artifactId);
-              }
-            }
-          }
-          return pom;
-        } catch (IOException e) {
-          throw new RuntimeException("Failed to load POM from " + projectDirOrPomFile, e);
-        }
-      }
-
-      private static Project findParentPomFileNoCheck(Project pom, boolean ignoreUnknown) {
-        File projectDir = pom.pomFile.getParentFile();
-        String relPath = (pom.parentGav.relativePath == null || pom.parentGav.relativePath.isBlank()) ? "../pom.xml" : pom.parentGav.relativePath;
-        relPath = relPath.endsWith("/pom.xml") ? relPath : relPath + "/pom.xml";
-        // File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
-        // if (parentPomFile != null && parentPomFile.exists()) {
-        // pom.parentPom = loadPom(root, null, parentPomFile, ignoreUnknown,
-        // effectivePom);
-        // if (pom.parentPom != null) {
-        // if (pom.groupId == null) {
-        // pom.groupId = pom.parentPom.groupId;
-        // }
-        // }
-        // checkIsSame(pom);
-        // }
-
-        try {
-          File parentProjectDir = new File(projectDir, relPath).getCanonicalFile();
-          String candidateKey = parentProjectDir.getCanonicalPath();
-          Project parentPom = pomCache.get(candidateKey);
-          if (parentPom != null) {
-            if (parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
-              return parentPom;
-            }
-          }
-
-          // parentPom = loadPom(pom.context.root, pom.parentDirPom, projectDir,
-          // pom.context);
-          parentPom = loadPom(pom.context.root, pom.parentDirPom, parentProjectDir, pom.context);
-          if (parentPom != null) {
-            if (parentPom.effectivePomOrThis().ga().equals(pom.parentGav.ga())) {
-              if (!parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
-                if (parentPom.effectivePomOrThis().version.contains("${")) {
-                  log.info("In {} > Parent POM {} has unresolved version, using effective POM version: {}", pom.ga(),
-                      parentPom.effectivePomOrThis().id(), pom.parentGav.id());
-                } else {
-                  log.warn("In {} > Different versions found between parent POM {} and {}", pom.ga(), parentPom.effectivePomOrThis().id(),
-                      pom.parentGav.id());
-                }
-              }
-              return parentPom;
-            } else {
-              log.info("In {} > Inheritable declared parent POM [{}] differs from supra-module directory parent [{}] ... searching in .m2 repo next.",
-                  pom.ga(), pom.parentGav.ga(), parentPom.effectivePomOrThis().ga());
-            }
-          }
-          // If the parent POM is not found in the expected relative path, we fallback to
-          // Maven repo lookup
-          String groupPath = pom.parentGav.groupId.replace('.', '/');
-          String artifactId = pom.parentGav.artifactId;
-          String version = pom.parentGav.version;
-          File m2 = new File(System.getProperty("user.home"), ".m2/repository");
-          File repoPom = new File(m2, String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
-          Project parentPomFromRepo = loadPom(pom.context.root, null, repoPom, pom.context);
-          if (parentPomFromRepo != null)
-            return parentPomFromRepo;
-          throw new RuntimeException("Parent POM not found: tried local [" + candidateKey + "] and Maven repo [" + repoPom + "]");
-        } catch (IOException e) {
-          throw new RuntimeException("Failed to resolve parent POM path for " + pom.parentGav.artifactId, e);
-        }
-      }
-
-      private static Project parsePom(File pomFile, boolean ignoreUnknown) {
-        try {
-          XmlMapper xmlMapper = new XmlMapper();
-          xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, !ignoreUnknown);
-          Project res = xmlMapper.readValue(pomFile, Project.class);
-          res.pomFile = pomFile;
-          if (res.groupId == null && res.parentGav != null && res.parentGav.groupId != null) {
-            res.groupId = res.parentGav.groupId;
-          }
-          if (res.version == null && res.parentGav != null && res.parentGav.version != null) {
-            res.version = res.parentGav.version;
-          }
-          return res;
-        } catch (IOException e) {
-          throw new RuntimeException("Failed to parse POM file: " + pomFile.getAbsolutePath(), e);
         }
       }
     }
@@ -2093,7 +1980,7 @@ public class xmvn {
 
       for (String moduleName : pom.modules.module) {
         File moduleDir = new File(baseDir, moduleName);
-        Project childPom = MavenLoader.loadPom(root, pom, moduleDir, root.context);
+        Project childPom = PomLoader.loadPom(root, pom, moduleDir, root.context);
         if (childPom != null && childPom.artifactId != null) {
           String fullPath = parentGradlePath.isEmpty() ? moduleName : parentGradlePath + ":" + moduleName;
           gradleModules.addGradleModule(childPom.ga(), fullPath);
@@ -2111,12 +1998,10 @@ public class xmvn {
 
     private static void collectGradlePluginsAndConfigsRecursive(Project pom, StringBuilder pluginConfigSnippets, Map<String, String> pluginsMap,
         Set<String> visited) {
-
       if (pom == null)
         return;
-
       // Use effectivePom if configured
-      ToGradle cli = pom.context.cli;
+      ToGradle cli = (xmvn.ToGradle) pom.context.cli;
       Project epPom = pom.effectivePom();
       if (epPom != null) {
         collectPluginsFromPom(epPom, pluginConfigSnippets, pluginsMap, visited);
@@ -2689,21 +2574,21 @@ public class xmvn {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-               * .xsd") } outputDir =
-               * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-               * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-               * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-               * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-               * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-               * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-               * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-               * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-               * Ant classpath for the XJC task ant.withGroovyBuilder {
-               * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-               * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-               * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-               * "generated-sources/jaxb"))
-               */
+                  * .xsd") } outputDir =
+                  * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+                  * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+                  * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+                  * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+                  * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+                  * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+                  * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+                  * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+                  * Ant classpath for the XJC task ant.withGroovyBuilder {
+                  * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+                  * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+                  * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+                  * "generated-sources/jaxb"))
+                  */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
@@ -2730,4 +2615,217 @@ public class xmvn {
    * "org.glassfish.jaxb:jaxb-xjc:4.0.5", "-d", "target/generated-sources", "-p",
    * "com.example.generated", "src/main/resources/schema.xsd" ) }
    */
+
+  static class PomLoader {
+    public static Project loadRootPom(LoadPomOptions cli) throws IOException, InterruptedException, TimeoutException {
+      Projects effectivePom = null;
+      if (cli.useEffectivePom) {
+        Path effPomPath = cli.projectDir.toPath().resolve("target/effective-pom.xml");
+        if (!Files.exists(effPomPath) || cli.forceGenerateEffectivePom) {
+          log.info("Generating effective-pom.xml");
+          generateEffectivePom(cli.projectDir, effPomPath);
+        }
+        effectivePom = loadEffectivePom(cli.ignoreUnknown, effPomPath);
+      }
+
+      ProjectContext context = new ProjectContext(cli, null, effectivePom);
+
+      Project rootPom = loadPom(null, null, context.cli.projectDir, context);
+      return rootPom;
+    }
+
+    private static void generateEffectivePom(File projectDir, Path effPomPath) throws IOException, InterruptedException, TimeoutException {
+      String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
+      int exit;
+      try {
+        exit = new ProcessExecutor().directory(projectDir).command(mavenCmd, "help:effective-pom", "-Doutput=" + effPomPath)
+            .redirectOutput(System.out).redirectError(System.err).exitValues(0) // Only allow zero exit value
+            .execute().getExitValue();
+      } catch (InvalidExitValueException e) {
+        throw new IOException("Maven failed with exit code: " + e.getExitValue(), e);
+      }
+      if (exit != 0) {
+        throw new IOException("Maven failed to generate " + effPomPath + " (exit " + exit + ")");
+      }
+    }
+
+    private static boolean isWindows() {
+      return System.getProperty("os.name").toLowerCase().contains("win");
+    }
+
+    private static Projects loadEffectivePom(boolean ignoreUnknown, Path effPomPath) throws IOException {
+      if (!Files.exists(effPomPath)) {
+        throw new RuntimeException("File not found at " + effPomPath);
+      }
+
+      JacksonXmlModule module = new JacksonXmlModule();
+      module.setDefaultUseWrapper(false); // optional depending on your XML structure
+
+      XmlMapper xmlMapper = new XmlMapper(module);
+      xmlMapper.setDefaultUseWrapper(false);
+      xmlMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, !ignoreUnknown);
+      String xml = Files.readString(effPomPath);
+
+      try {
+        // Try parse as Projects (multi-module)
+        return xmlMapper.readValue(xml, Projects.class);
+      } catch (UnrecognizedPropertyException e) {
+        // If failed because no 'project' wrapper, parse single PomModel then wrap it
+        if (e.getMessage().contains("one known property: \"project\"")) {
+          EffectivePom singlePom = xmlMapper.readValue(xml, EffectivePom.class);
+          Projects projects = new Projects();
+          projects.project.add(singlePom);
+          return projects;
+        }
+        throw e;
+      }
+    }
+
+    private static final Map<String, Project> pomCache = new HashMap<>();
+
+    public static Project loadPom(Project root, Project parentDirPom, File projectDirOrPomFile, ProjectContext context) {
+      boolean ignoreUnknown = context.cli.ignoreUnknown;
+      Projects effectivePom = context.effectivePom;
+      try {
+        File pomFile = projectDirOrPomFile.isDirectory() ? projectDirOrPomFile.toPath().resolve("pom.xml").toFile() : projectDirOrPomFile;
+
+        String key = pomFile.getCanonicalPath();
+        if (pomCache.containsKey(key)) {
+          return pomCache.get(key);
+        }
+        if (!pomFile.exists()) {
+          log.warn("POM file not found: {}", pomFile.getAbsolutePath());
+          return null;
+        }
+
+        log.info("Loading POM from {}", pomFile.getAbsolutePath());
+        Project pom = parsePom(pomFile, ignoreUnknown);
+        pom.context = root == null ? context.withRoot(pom) : context;
+        pom.parentDirPom = parentDirPom;
+        pomCache.put(key, pom);
+
+        if (pom.parentGav != null) {
+          log.info("Resolving parent POM for {} -> {}", pom.ga(), pom.parentGav.ga());
+          var parent = findParentPomFileNoCheck(pom.effectivePomOrThis(), ignoreUnknown);
+          if (parent == pom) {
+            throw new RuntimeException("Parent POM is self-referential: " + pom.id());
+          }
+          if (pom.parentPom != null) {
+            if (pom.groupId == null) {
+              pom.groupId = pom.parentPom.groupId;
+            }
+          }
+          pom.parentPom = parent;
+          Gav parentGav = pom.parentGav;
+          if (parentGav != null || parent != null) {
+            if (parentGav == null || parent == null) {
+              throw new RuntimeException("Parent POM mismatch: one is null while the other is not. Parent: " + parentGav + ", ParentPom: " + parent);
+            }
+            if (!parentGav.groupId.equals(parent.groupId) || !parentGav.artifactId.equals(parent.artifactId)) {
+              // TODO remove this - needed for debug
+              parent = findParentPomFileNoCheck(pom, ignoreUnknown);
+              throw new RuntimeException("""
+                  In pom %s mismatch:
+                  parentGav %s
+                  parent    %s"
+                  """.formatted(pom.id(), parentGav.id(), parent.id()));
+            }
+            if (!parentGav.version.equals(parent.version)) {
+              log.warn("Parent POM version mismatch: {} vs {}", parentGav.version, parent.version);
+            }
+            // if (parent.artifactId == null || parentPom.artifactId == null) {
+            // return true; // artifactId can be null in some cases, e.g., parent POMs
+            // without artifactId
+            // }
+            if (!parentGav.artifactId.equals(parent.artifactId)) {
+              throw new RuntimeException("Parent POM artifactId mismatch: " + parentGav.artifactId + " vs " + parent.artifactId);
+            }
+          }
+        }
+        return pom;
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to load POM from " + projectDirOrPomFile, e);
+      }
+    }
+
+    private static Project findParentPomFileNoCheck(Project pom, boolean ignoreUnknown) {
+      File projectDir = pom.pomFile.getParentFile();
+      String relPath = (pom.parentGav.relativePath == null || pom.parentGav.relativePath.isBlank()) ? "../pom.xml" : pom.parentGav.relativePath;
+      relPath = relPath.endsWith("/pom.xml") ? relPath : relPath + "/pom.xml";
+      // File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
+      // if (parentPomFile != null && parentPomFile.exists()) {
+      // pom.parentPom = loadPom(root, null, parentPomFile, ignoreUnknown,
+      // effectivePom);
+      // if (pom.parentPom != null) {
+      // if (pom.groupId == null) {
+      // pom.groupId = pom.parentPom.groupId;
+      // }
+      // }
+      // checkIsSame(pom);
+      // }
+
+      try {
+        File parentProjectDir = new File(projectDir, relPath).getCanonicalFile();
+        String candidateKey = parentProjectDir.getCanonicalPath();
+        Project parentPom = pomCache.get(candidateKey);
+        if (parentPom != null) {
+          if (parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
+            return parentPom;
+          }
+        }
+
+        // parentPom = loadPom(pom.context.root, pom.parentDirPom, projectDir,
+        // pom.context);
+        parentPom = loadPom(pom.context.root, pom.parentDirPom, parentProjectDir, pom.context);
+        if (parentPom != null) {
+          if (parentPom.effectivePomOrThis().ga().equals(pom.parentGav.ga())) {
+            if (!parentPom.effectivePomOrThis().id().equals(pom.parentGav.id())) {
+              if (parentPom.effectivePomOrThis().version.contains("${")) {
+                log.info("In {} > Parent POM {} has unresolved version, using effective POM version: {}", pom.ga(),
+                    parentPom.effectivePomOrThis().id(), pom.parentGav.id());
+              } else {
+                log.warn("In {} > Different versions found between parent POM {} and {}", pom.ga(), parentPom.effectivePomOrThis().id(),
+                    pom.parentGav.id());
+              }
+            }
+            return parentPom;
+          } else {
+            log.info("In {} > Inheritable declared parent POM [{}] differs from supra-module directory parent [{}] ... searching in .m2 repo next.",
+                pom.ga(), pom.parentGav.ga(), parentPom.effectivePomOrThis().ga());
+          }
+        }
+        // If the parent POM is not found in the expected relative path, we fallback to
+        // Maven repo lookup
+        String groupPath = pom.parentGav.groupId.replace('.', '/');
+        String artifactId = pom.parentGav.artifactId;
+        String version = pom.parentGav.version;
+        File m2 = new File(System.getProperty("user.home"), ".m2/repository");
+        File repoPom = new File(m2, String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
+        Project parentPomFromRepo = loadPom(pom.context.root, null, repoPom, pom.context);
+        if (parentPomFromRepo != null)
+          return parentPomFromRepo;
+        throw new RuntimeException("Parent POM not found: tried local [" + candidateKey + "] and Maven repo [" + repoPom + "]");
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to resolve parent POM path for " + pom.parentGav.artifactId, e);
+      }
+    }
+
+    private static Project parsePom(File pomFile, boolean ignoreUnknown) {
+      try {
+        XmlMapper xmlMapper = new XmlMapper();
+        xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, !ignoreUnknown);
+        Project res = xmlMapper.readValue(pomFile, Project.class);
+        res.pomFile = pomFile;
+        if (res.groupId == null && res.parentGav != null && res.parentGav.groupId != null) {
+          res.groupId = res.parentGav.groupId;
+        }
+        if (res.version == null && res.parentGav != null && res.parentGav.version != null) {
+          res.version = res.parentGav.version;
+        }
+        return res;
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to parse POM file: " + pomFile.getAbsolutePath(), e);
+      }
+    }
+  }
 }
