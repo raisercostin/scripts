@@ -1837,13 +1837,16 @@ public class mvn2gradle {
             }
           }
           // Normal module dependency
-          deps.append(String.format("    %s(project(\":%s\"))\n", conf, gradlePath));
+          if (GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION.equals(conf)) {
+            deps.append(String.format("    compileOnly(project(\":%s\"))\n", gradlePath));
+            deps.append(String.format("    testImplementation(project(\":%s\"))\n", gradlePath));
+          } else {
+            deps.append(String.format("    %s(project(\":%s\"))\n", conf, gradlePath));
+          }
           var searchAgain = gradleModules.findByMavenGroupAndArtifact(resolvedGroupId, resolvedArtifactId);
           continue;
         }
         // ---- Lombok special case ----
-        // org.projectlombok:lombok:jar:1.18.22:provided
-        // org.projectlombok:lombok-maven-plugin:jar:1.18.6.0:provided
         if ("org.projectlombok".equals(resolvedGroupId)) {
           if (!"lombok".equals(resolvedArtifactId)) {
             log.warn("Strange lombok dependency {} in {}. Should have lombok artifactId. Check it manually.", dep, pom.idAndPath());
@@ -1861,7 +1864,6 @@ public class mvn2gradle {
           deps.append("    annotationProcessor(\"org.projectlombok:lombok:" + lombokVersion + "\")\n");
           deps.append("    testCompileOnly(\"org.projectlombok:lombok:" + lombokVersion + "\")\n");
           deps.append("    testAnnotationProcessor(\"org.projectlombok:lombok:" + lombokVersion + "\")\n");
-          // Optionally ensure plugin registration (not shown here)
           continue;
         }
         if (handleAnnotationProcessorDependency(dep, resolvedGroupId, resolvedArtifactId, version, pom, effectivePom, deps)) {
@@ -1901,13 +1903,31 @@ public class mvn2gradle {
 
         // Exclusions
         if (dep.exclusions != null && dep.exclusions.exclusion != null && !dep.exclusions.exclusion.isEmpty()) {
-          deps.append(String.format("    %s(\"%s\") {\n", conf, depCoordinate));
-          for (Exclusion excl : dep.exclusions.exclusion) {
-            deps.append(String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
+          if (GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION.equals(conf)) {
+            deps.append(String.format("    compileOnly(\"%s\") {\n", depCoordinate));
+            for (Exclusion excl : dep.exclusions.exclusion) {
+              deps.append(String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
+            }
+            deps.append("    }\n");
+            deps.append(String.format("    testImplementation(\"%s\") {\n", depCoordinate));
+            for (Exclusion excl : dep.exclusions.exclusion) {
+              deps.append(String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
+            }
+            deps.append("    }\n");
+          } else {
+            deps.append(String.format("    %s(\"%s\") {\n", conf, depCoordinate));
+            for (Exclusion excl : dep.exclusions.exclusion) {
+              deps.append(String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
+            }
+            deps.append("    }\n");
           }
-          deps.append("    }\n");
         } else {
-          deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
+          if (GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION.equals(conf)) {
+            deps.append(String.format("    compileOnly(\"%s\")\n", depCoordinate));
+            deps.append(String.format("    testImplementation(\"%s\")\n", depCoordinate));
+          } else {
+            deps.append(String.format("    %s(\"%s\")\n", conf, depCoordinate));
+          }
         }
       }
 
@@ -2614,21 +2634,21 @@ public class mvn2gradle {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-        * .xsd") } outputDir =
-        * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-        * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-        * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-        * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-        * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-        * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-        * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-        * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-        * Ant classpath for the XJC task ant.withGroovyBuilder {
-        * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-        * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-        * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-        * "generated-sources/jaxb"))
-        */
+         * .xsd") } outputDir =
+         * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+         * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+         * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+         * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+         * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+         * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+         * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+         * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+         * Ant classpath for the XJC task ant.withGroovyBuilder {
+         * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+         * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+         * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+         * "generated-sources/jaxb"))
+         */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
