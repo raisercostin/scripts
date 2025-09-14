@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>XMvn Graph</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #topbar {
+      display: flex; gap: 12px; align-items: center;
+      padding: 8px 12px; background: #f5f5f7; border-bottom: 1px solid #e5e5ea;
+      font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    #sigma-container { height: calc(100% - 52px); }
+    .badge { padding: 2px 6px; border-radius: 10px; font-size: 12px; background:#eee; }
+    .spacer { flex: 1; }
+    label { display: inline-flex; align-items: center; gap: 6px; }
+    input[type="number"] { width: 5.5em; }
+    fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 4px 8px; }
+    legend { padding: 0 6px; color: #555; }
+    button { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <strong>XMvn Graph</strong>
+    <span class="badge" id="stats">0 nodes • 0 edges</span>
+
+    <fieldset>
+      <legend>Filter</legend>
+      <label><input type="checkbox" id="f-projects" checked>Projects</label>
+      <label><input type="checkbox" id="f-libs" checked>Libs</label>
+      <label><input type="checkbox" id="f-boms" checked>BOMs</label>
+      <label><input type="checkbox" id="f-parent" checked>Parents</label>
+    </fieldset>
+
+    <div class="spacer"></div>
+
+    <label>
+      Layout
+      <select id="layout-select">
+        <option value="none">None (Manual)</option>
+        <option value="random">Randomize</option>
+        <option value="fa2" selected>ForceAtlas2</option>
+      </select>
+    </label>
+
+    <label>Iterations <input type="number" id="iterations" min="1" step="10" value="200"></label>
+    <button id="run-layout">Run</button>
+    <button id="start-loop">Start</button>
+    <button id="stop-loop" disabled>Stop</button>
+
+    <button id="reset-camera" title="Reset camera">Reset View</button>
+  </div>
+
+  <div id="sigma-container"></div>
+<script type="importmap">
+{
+  "imports": {
+    "sigma": "https://cdn.jsdelivr.net/npm/sigma@3/+esm",
+    "graphology": "https://cdn.jsdelivr.net/npm/graphology@0.25.4/+esm",
+    "@sigma/node-image": "https://cdn.jsdelivr.net/npm/@sigma/node-image@3/+esm",
+    "graphology-layout-forceatlas2": "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm"
+  }
+}
+</script>
+
+<script type="module">
+import Sigma from "sigma";
+import Graph from "graphology";
+import { createNodeImageProgram } from "@sigma/node-image";
+import forceAtlas2 from "graphology-layout-forceatlas2";
+
+let DATA = /* XMVN_DATA_START */ {
+  "attributes": { "name": "Maven Graph (sample)" },
+  "nodes": [
+    { "key": "proj_core", "attributes": { "label": "com.acme:core", "x": 10, "y": 0, "size": 9, "color": "#1f77b4", "meta": { "nodeType": "project" } } },
+    { "key": "proj_web",  "attributes": { "label": "com.acme:web",  "x": -10, "y": 0, "size": 9, "color": "#1f77b4", "meta": { "nodeType": "project" } } },
+    { "key": "lib_guava", "attributes": { "label": "com.google.guava:guava", "x": 0, "y": 15, "size": 6, "color": "#d62728", "meta": { "nodeType": "lib" } } },
+    { "key": "bom_spring", "attributes": { "label": "org.springframework:spring-bom", "x": 0, "y": -15, "size": 6, "color": "#e377c2", "meta": { "nodeType": "bom" } } },
+    { "key": "parent_acme", "attributes": { "label": "com.acme:parent", "x": 0, "y": -25, "size": 6, "color": "#7f7f7f", "meta": { "nodeType": "parent" } } }
+  ],
+  "edges": [
+    { "key": "web_core", "source": "proj_web", "target": "proj_core", "attributes": { "size": 1, "color": "#1f77b4" }, "meta": { "edgeType": "project-link", "scope": "compile" } },
+    { "key": "web_guava", "source": "proj_web", "target": "lib_guava", "attributes": { "size": 1, "color": "#ff7f0e" }, "meta": { "edgeType": "lib", "scope": "compile" } },
+    { "key": "core_bom", "source": "proj_core", "target": "bom_spring", "attributes": { "size": 1, "color": "#e377c2" }, "meta": { "edgeType": "bom-import" } },
+    { "key": "web_parent", "source": "proj_web", "target": "parent_acme", "attributes": { "size": 1, "color": "#7f7f7f" }, "meta": { "edgeType": "parent" } }
+  ]
+} /* XMVN_DATA_END */;
+
+main();
+
+function main() {
+  const container = document.getElementById("sigma-container");
+  const graph = new Graph();
+  graph.import(DATA);
+
+  setupStats(graph);
+  const renderer = setupRenderer(graph, container);
+  setupCamera(renderer);
+  setupNodeDragging(renderer, graph);
+  setupFilters(graph);
+  setupLayouts(graph);
+}
+
+function setupStats(graph) {
+  const statsEl = document.getElementById("stats");
+  function updateStats() {
+    statsEl.textContent = `${graph.order} nodes • ${graph.size} edges`;
+  }
+  graph.on("nodeAdded nodeDropped edgeAdded edgeDropped", updateStats);
+  updateStats();
+}
+
+function setupRenderer(graph, container) {
+  return new Sigma(graph, container, {
+    renderEdgeLabels: true,
+    nodeProgramClasses: {
+      image: createNodeImageProgram()
+    }
+  });
+}
+
+function setupCamera(renderer) {
+  document.getElementById("reset-camera").addEventListener("click", () => {
+    renderer.getCamera().animatedReset({ duration: 300 });
+  });
+}
+
+function setupNodeDragging(renderer, graph) {
+  let draggedNode = null;
+  let isDragging = false;
+
+  renderer.on("downNode", ({ node, event }) => {
+    draggedNode = node;
+    isDragging = true;
+    // Prevent camera movement on mousedown over node
+    event.preventSigmaDefault = true;
+    // Prevent browser default
+    if (event.original) {
+      event.original.preventDefault();
+      event.original.stopPropagation();
+    }
+  });
+
+  renderer.getContainer().addEventListener("mousemove", (e) => {
+    if (!isDragging || !draggedNode) return;
+    // Block camera move by stopping event
+    e.preventDefault();
+    e.stopPropagation();
+    // Update node position
+    const rect = renderer.getContainer().getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const pos = renderer.viewportToGraph({ x, y });
+    graph.setNodeAttribute(draggedNode, "x", pos.x);
+    graph.setNodeAttribute(draggedNode, "y", pos.y);
+  }, { passive: false });
+
+  renderer.getContainer().addEventListener("mouseup", (e) => {
+    if (isDragging) {
+      // Prevent camera panning on release
+      e.preventDefault();
+      e.stopPropagation();
+      draggedNode = null;
+      isDragging = false;
+    }
+  }, { passive: false });
+
+  // Optional: cancel drag if mouse leaves canvas
+  renderer.getContainer().addEventListener("mouseleave", () => {
+    draggedNode = null;
+    isDragging = false;
+  });
+}
+
+function setupFilters(graph) {
+  const $ = (id) => document.getElementById(id);
+  const fProjects = $("f-projects");
+  const fLibs = $("f-libs");
+  const fBoms = $("f-boms");
+  const fParent = $("f-parent");
+  function nodeMatchesFilters(attrs) {
+    const t = attrs.meta?.nodeType;
+    if (!t) return true;
+    return (
+      (t === "project" && fProjects.checked) ||
+      (t === "lib"     && fLibs.checked)     ||
+      (t === "bom"     && fBoms.checked)     ||
+      (t === "parent"  && fParent.checked)
+    );
+  }
+  function edgeMatchesFilters(attrs, s, t) {
+    const et = attrs.meta?.edgeType;
+    let allowedByType = true;
+    if (et) {
+      allowedByType =
+        (et === "project-link" && fProjects.checked) ||
+        (et === "lib"          && fLibs.checked)     ||
+        (et === "bom-import"   && fBoms.checked)     ||
+        (et === "parent"       && fParent.checked);
+    }
+    const srcHidden = graph.getNodeAttribute(s, "hidden") === true;
+    const tgtHidden = graph.getNodeAttribute(t, "hidden") === true;
+    return allowedByType && !srcHidden && !tgtHidden;
+  }
+  function applyFilters() {
+    graph.forEachNode((n, attrs) => {
+      graph.setNodeAttribute(n, "hidden", !nodeMatchesFilters(attrs));
+    });
+    graph.forEachEdge((e, attrs, s, t) => {
+      graph.setEdgeAttribute(e, "hidden", !edgeMatchesFilters(attrs, s, t));
+    });
+  }
+  [fProjects, fLibs, fBoms, fParent].forEach(cb => cb.addEventListener("change", applyFilters));
+  applyFilters();
+}
+
+function setupLayouts(graph) {
+  const $ = (id) => document.getElementById(id);
+  const layoutSelect = $("layout-select");
+  const iterationsInput = $("iterations");
+  const runBtn = $("run-layout");
+  const startBtn = $("start-loop");
+  const stopBtn = $("stop-loop");
+  let loopHandle = null;
+
+  function randomizePositions() {
+    graph.forEachNode((n) => {
+      graph.setNodeAttribute(n, "x", (Math.random() - 0.5) * 200);
+      graph.setNodeAttribute(n, "y", (Math.random() - 0.5) * 200);
+    });
+  }
+  function runOnce() {
+    const mode = layoutSelect.value;
+    const iters = Math.max(1, parseInt(iterationsInput.value || "1", 10));
+    if (mode === "none") return;
+    if (mode === "random") { randomizePositions(); return; }
+    if (mode === "fa2") {
+      const settings = forceAtlas2.inferSettings(graph);
+      forceAtlas2.assign(graph, { iterations: iters, settings });
+      return;
+    }
+  }
+  runBtn.addEventListener("click", runOnce);
+
+  startBtn.addEventListener("click", () => {
+    if (loopHandle) return;
+    const tick = () => {
+      if (layoutSelect.value !== "fa2") return;
+      const settings = forceAtlas2.inferSettings(graph);
+      forceAtlas2.assign(graph, { iterations: 10, settings });
+    };
+    loopHandle = setInterval(tick, 30);
+    startBtn.disabled = true; stopBtn.disabled = false;
+  });
+  stopBtn.addEventListener("click", () => {
+    if (loopHandle) clearInterval(loopHandle);
+    loopHandle = null;
+    startBtn.disabled = false; stopBtn.disabled = true;
+  });
+  layoutSelect.addEventListener("change", () => {
+    if (loopHandle) stopBtn.click();
+  });
+}
+</script>
+</body>
+</html>
