@@ -132,58 +132,113 @@ public class xmvn {
       return 0;
     }
 
-    public static class GraphData {
+    public class GraphData {
       public List<Node> nodes = new ArrayList<>();
       public List<Edge> edges = new ArrayList<>();
+      public Map<String, Object> attributes = new LinkedHashMap<>();
     }
-
     public static class Node {
-      public String key;
-      public String type; // project, lib, bom, parent
-      public Attributes attributes = new Attributes();
-      public Map<String, String> meta = new LinkedHashMap<>();
-
-      public Node(String key, String type, String label, String color) {
+      public final String key;
+      public final NodeAttributes attributes;
+      public Node(String key, NodeAttributes attributes) {
         this.key = key;
-        this.type = type;
-        this.attributes.label = label;
-        this.attributes.color = color;
-        this.attributes.size = 5;
-        this.attributes.x = Math.random() * 10;
-        this.attributes.y = Math.random() * 10;
+        this.attributes = attributes;
       }
+    }
+    // SigmaJS-compatible node/edge model for graph export
+    public static class NodeAttributes {
+      public final double x, y, size;
+      public final String color;
+      public final String label;
+      // Optionally: image, shape, etc.
+      public final NodeMeta meta;
 
-      public static class Attributes {
-        public String label;
-        public String color;
-        public double x;
-        public double y;
-        public int size;
+      public NodeAttributes(String label, String color, double x, double y, double size, NodeMeta meta) {
+        this.label = label;
+        this.color = color;
+        this.x = x;
+        this.y = y;
+        this.size = size;
+        this.meta = meta;
+      }
+    }
+    public static class NodeMeta {
+      public final String nodeType;     // e.g. "module", "library", "pom", "bom", etc.
+      public final String buildTool;    // e.g. "maven", "gradle", "make", etc.
+      public final String artifactType; // e.g. "jar", "war", "ear", etc.
+      public final String groupId;
+      public final String artifactId;
+      public final String version;
+
+      /**
+       * All fields explicit; pass null for what is not set.
+       * @param nodeType      Logical type: "module", "library", "pom", etc. (REQUIRED)
+       * @param buildTool     Origin: "maven", "gradle", "make", ...
+       * @param artifactType  Artifact type: "jar", "war", etc.
+       * @param groupId       Maven group
+       * @param artifactId    Maven artifact
+       * @param version       Version
+       */
+      public NodeMeta(String nodeType, String buildTool, String artifactType, String groupId, String artifactId, String version) {
+        this.nodeType = nodeType;
+        this.buildTool = buildTool;
+        this.artifactType = artifactType;
+        this.groupId = groupId;
+        this.artifactId = artifactId;
+        this.version = version;
       }
     }
 
     public static class Edge {
-      public String key;
-      public String source;
-      public String target;
-      public String type; // lib, bom, parent
-      public Attributes attributes = new Attributes();
-      public Map<String, String> meta = new LinkedHashMap<>();
+      public final String key, source, target;
+      public final EdgeAttributes attributes;
 
-      public Edge(String key, String source, String target, String type, String label, String color) {
+      public Edge(String key, String source, String target, EdgeAttributes attributes) {
         this.key = key;
         this.source = source;
         this.target = target;
-        this.type = type;
-        this.attributes.label = label;
-        this.attributes.color = color;
-        this.attributes.size = 1;
+        this.attributes = attributes;
       }
+    }
 
-      public static class Attributes {
-        public String label;
-        public String color;
-        public int size;
+    public static class EdgeAttributes {
+      public final double size;
+      public final String color;
+      public final String label;
+      public final EdgeMeta meta;
+
+      public EdgeAttributes(double size, String color, String label, EdgeMeta meta) {
+        this.size = size;
+        this.color = color;
+        this.label = label;
+        this.meta = meta;
+      }
+    }
+
+    public static class EdgeMeta {
+      public final String edgeType;   // e.g. "compile", "runtime", "parent", etc.
+      public final String scope;      // e.g. "test", "compile", etc.
+      public final String protocol;   // e.g. "rest", "soap", "graphql"
+      public final String relation;   // e.g. "parent"
+      public final String classifier;
+      public final String type;
+
+      /**
+       * All fields explicit; pass null for what is not set.
+       * @param edgeType   Logical edge type: "compile", "parent", etc. (REQUIRED)
+       * @param scope      Dependency scope
+       * @param protocol   Service protocol
+       * @param relation   Parent/child or other relationship
+       * @param classifier Maven classifier
+       * @param type       Maven type (jar, war, pom, ...)
+       */
+      public EdgeMeta(String edgeType, String scope, String protocol, String relation, String classifier, String type) {
+        this.edgeType = edgeType;
+        this.scope = scope;
+        this.protocol = protocol;
+        this.relation = relation;
+        this.classifier = classifier;
+        this.type = type;
       }
     }
 
@@ -221,75 +276,83 @@ public class xmvn {
     }
 
     private void emitProjectAndDeps(xmvn.Project project, List<Node> nodes, List<Edge> edges, Set<String> nodeKeys, Set<String> edgeKeys) {
-
       project = project.effectivePomOrThis();
       String projKey = (project.groupId + "_" + project.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
 
-      // Project node
-      Node projNode = addNode(nodes, nodeKeys, projKey, project.groupId + ":" + project.artifactId, "#1f77b4", "project");
-      if (projNode != null) {
-        projNode.meta.put("groupId", project.groupId);
-        projNode.meta.put("artifactId", project.artifactId);
-        projNode.meta.put("version", project.version);
-      }
+      // ---- Project Node ----
+      NodeAttributes projAttrs = new NodeAttributes(project.groupId + ":" + project.artifactId, "#1f77b4", Math.random() * 100 - 50,
+          Math.random() * 100 - 50, 7.0, new NodeMeta("project", "maven", null, project.groupId, project.artifactId, project.version));
+      addNode(nodes, nodeKeys, projKey, projAttrs);
 
-      // Dependencies
+      // ---- Dependencies ----
       if (project.dependencies != null && project.dependencies.dependency != null) {
         for (var dep : project.dependencies.dependency) {
           String depKey = (dep.groupId + "_" + dep.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
 
-          if ("pom".equals(dep.type) && "import".equals(dep.scope)) {
-            Node bomNode = addNode(nodes, nodeKeys, depKey, dep.groupId + ":" + dep.artifactId, "#e377c2", "bom");
-            if (bomNode != null) {
-              bomNode.meta.put("groupId", dep.groupId);
-              bomNode.meta.put("artifactId", dep.artifactId);
-              if (dep.version != null)
-                bomNode.meta.put("version", dep.version);
-            }
+          // Node attributes & meta for library/dependency
+          String depType = ("pom".equals(dep.type) && "import".equals(dep.scope)) ? "bom" : "library";
+          String depColor = "bom".equals(depType) ? "#e377c2" : "#d62728";
+          NodeAttributes depAttrs = new NodeAttributes(dep.groupId + ":" + dep.artifactId, depColor, Math.random() * 100 - 50,
+              Math.random() * 100 - 50, 6.0,new NodeMeta(depType, null,   // buildTool
+              dep.type, // artifactType
+              dep.groupId, dep.artifactId, dep.version));
+          addNode(nodes, nodeKeys, depKey, depAttrs);
 
-            Edge bomEdge = addEdge(edges, edgeKeys, projKey + "_" + depKey, projKey, depKey, "bom-import", "#e377c2", "bom");
-            if (bomEdge != null)
-              bomEdge.meta.put("scope", "import");
-          } else {
-            Node libNode = addNode(nodes, nodeKeys, depKey, dep.groupId + ":" + dep.artifactId, "#d62728", "lib");
-            if (libNode != null) {
-              libNode.meta.put("groupId", dep.groupId);
-              libNode.meta.put("artifactId", dep.artifactId);
-              if (dep.version != null)
-                libNode.meta.put("version", dep.version);
-            }
-
-            String scope = dep.scope != null ? dep.scope : "compile";
-            String color = scopeColor(scope);
-
-            Edge depEdge = addEdge(edges, edgeKeys, projKey + "_" + depKey, projKey, depKey, scope, color, "lib");
-            if (depEdge != null) {
-              depEdge.meta.put("scope", scope);
-              if (dep.classifier != null)
-                depEdge.meta.put("classifier", dep.classifier);
-              if (dep.type != null)
-                depEdge.meta.put("type", dep.type);
-            }
-          }
+          // Edge attributes & meta
+          String edgeType = "bom".equals(depType) ? "bom-import" : "lib";
+          String edgeColor = depColor;
+          String edgeScope = dep.scope != null ? dep.scope : "compile";
+          EdgeAttributes edgeAttrs = new EdgeAttributes(1.0, edgeColor, edgeScope,new EdgeMeta(edgeType, edgeScope, null, // protocol
+              null, // relation
+              dep.classifier, dep.type));
+          String edgeKey = projKey + "_" + depKey;
+          addEdge(edges, edgeKeys, edgeKey, projKey, depKey, edgeAttrs);
         }
       }
 
-      // Parent
+      // ---- Parent Relation ----
       if (project.parentPom != null) {
         var parent = project.parentPom.effectivePomOrThis();
         String parentKey = (parent.groupId + "_" + parent.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
+        NodeAttributes parentAttrs = new NodeAttributes(parent.groupId + ":" + parent.artifactId, "#7f7f7f", Math.random() * 100 - 50,
+            Math.random() * 100 - 50, 6.0,new NodeMeta("parent", null, "pom", parent.groupId, parent.artifactId, parent.version));
+        addNode(nodes, nodeKeys, parentKey, parentAttrs);
 
-        Node parentNode = addNode(nodes, nodeKeys, parentKey, parent.groupId + ":" + parent.artifactId, "#7f7f7f", "parent");
-        if (parentNode != null) {
-          parentNode.meta.put("groupId", parent.groupId);
-          parentNode.meta.put("artifactId", parent.artifactId);
-          parentNode.meta.put("version", parent.version);
-        }
-
-        Edge parentEdge = addEdge(edges, edgeKeys, projKey + "_parent_" + parentKey, projKey, parentKey, "parent", "#7f7f7f", "parent");
-        if (parentEdge != null)
-          parentEdge.meta.put("relation", "parent");
+        EdgeAttributes parentEdgeAttrs = new EdgeAttributes(1.0, "#7f7f7f", "parent",new EdgeMeta("parent", null, null, "parent", null, "pom"));
+        String edgeKey = projKey + "_parent_" + parentKey;
+        addEdge(edges, edgeKeys, edgeKey, projKey, parentKey, parentEdgeAttrs);
       }
+    }
+
+    // Add a node if not present. Returns the Node (existing or new).
+    private static Node addNode(List<Node> nodes, Set<String> nodeKeys, String key, NodeAttributes attributes) {
+      if (nodeKeys.add(key)) {
+        // key is new, add it
+        Node n = new Node(key, attributes);
+        nodes.add(n);
+        return n;
+      }
+      // Return existing node with this key
+      for (Node n : nodes) {
+        if (n.key.equals(key))
+          return n;
+      }
+      return null; // should never happen if data is consistent
+    }
+
+    // Add an edge if not present. Returns the Edge (existing or new).
+    private static Edge addEdge(List<Edge> edges, Set<String> edgeKeys, String key, String source, String target, EdgeAttributes attributes) {
+      if (edgeKeys.add(key)) {
+        Edge e = new Edge(key, source, target, attributes);
+        edges.add(e);
+        return e;
+      }
+      // Return existing edge with this key
+      for (Edge e : edges) {
+        if (e.key.equals(key))
+          return e;
+      }
+      return null;
     }
 
     private String scopeColor(String scope) {
@@ -304,23 +367,6 @@ public class xmvn {
       };
     }
 
-    private Node addNode(List<Node> nodes, Set<String> nodeKeys, String key, String label, String color, String type) {
-      if (nodeKeys.add(key)) {
-        Node n = new Node(key, type, label, color);
-        nodes.add(n);
-        return n;
-      }
-      return nodes.stream().filter(n -> n.key.equals(key)).findFirst().orElse(null);
-    }
-
-    private Edge addEdge(List<Edge> edges, Set<String> edgeKeys, String key, String source, String target, String label, String color, String type) {
-      if (edgeKeys.add(key)) {
-        Edge e = new Edge(key, source, target, type, label, color);
-        edges.add(e);
-        return e;
-      }
-      return edges.stream().filter(e -> e.key.equals(key)).findFirst().orElse(null);
-    }
   }
 
   @CommandLine.Command(name = "2arango", mixinStandardHelpOptions = true, description = """
@@ -2766,21 +2812,21 @@ public class xmvn {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-                                      * .xsd") } outputDir =
-                                      * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-                                      * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-                                      * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-                                      * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-                                      * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-                                      * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-                                      * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-                                      * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-                                      * Ant classpath for the XJC task ant.withGroovyBuilder {
-                                      * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-                                      * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-                                      * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-                                      * "generated-sources/jaxb"))
-                                      */
+                                            * .xsd") } outputDir =
+                                            * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+                                            * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+                                            * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+                                            * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+                                            * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+                                            * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+                                            * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+                                            * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+                                            * Ant classpath for the XJC task ant.withGroovyBuilder {
+                                            * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+                                            * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+                                            * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+                                            * "generated-sources/jaxb"))
+                                            */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {

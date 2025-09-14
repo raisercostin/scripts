@@ -24,14 +24,19 @@
   <div id="topbar">
     <strong>XMvn Graph</strong>
     <span class="badge" id="stats">0 nodes • 0 edges</span>
-    <span class="badge" id="log" style="background:#ffe5b2; color:#b36d00; margin-left:8px"></span>
-
-    <fieldset>
+    <div id="log" style="
+      height: 80px;
+      overflow-y: auto;
+      width: 200px;
+      font-family: monospace;
+      background: #222;
+      color: #cfcfcf;
+      font-size: 13px;
+      padding: 8px 12px;
+      border-top: 1px solid #444;">
+    </div>
+    <fieldset id="filter-fieldset">
       <legend>Filter</legend>
-      <label><input type="checkbox" id="f-projects" checked>Projects</label>
-      <label><input type="checkbox" id="f-libs" checked>Libs</label>
-      <label><input type="checkbox" id="f-boms" checked>BOMs</label>
-      <label><input type="checkbox" id="f-parent" checked>Parents</label>
     </fieldset>
 
     <div class="spacer"></div>
@@ -70,21 +75,54 @@ import Sigma from "sigma";
 import Graph from "graphology";
 import { createNodeImageProgram } from "@sigma/node-image";
 import forceAtlas2 from "graphology-layout-forceatlas2";
-
-let DATA = /* XMVN_DATA_START */ {
-  "attributes": { "name": "Maven Graph (sample)" },
+const DATA = /* XMVN_DATA_START */{
+  "attributes": { "name": "Build Tool Graph Example" },
   "nodes": [
-    { "key": "proj_core", "attributes": { "label": "com.acme:core", "x": 10, "y": 0, "size": 9, "color": "#1f77b4", "meta": { "nodeType": "project" } } },
-    { "key": "proj_web",  "attributes": { "label": "com.acme:web",  "x": -10, "y": 0, "size": 9, "color": "#1f77b4", "meta": { "nodeType": "project" } } },
-    { "key": "lib_guava", "attributes": { "label": "com.google.guava:guava", "x": 0, "y": 15, "size": 6, "color": "#d62728", "meta": { "nodeType": "lib" } } },
-    { "key": "bom_spring", "attributes": { "label": "org.springframework:spring-bom", "x": 0, "y": -15, "size": 6, "color": "#e377c2", "meta": { "nodeType": "bom" } } },
-    { "key": "parent_acme", "attributes": { "label": "com.acme:parent", "x": 0, "y": -25, "size": 6, "color": "#7f7f7f", "meta": { "nodeType": "parent" } } }
+    // Modules & Subprojects
+    { "key": "mod_app",   "attributes": { "label": "app",   "x": 0,  "y": 0,   "size": 10, "color": "#1f77b4", "meta": { "nodeType": "module", "buildTool": "maven" } } },
+    { "key": "mod_core",  "attributes": { "label": "core",  "x": 30, "y": -20, "size": 9,  "color": "#2ca02c", "meta": { "nodeType": "module", "buildTool": "gradle" } } },
+    { "key": "subproj_ui","attributes": { "label": "ui",    "x": -30,"y": -10, "size": 8,  "color": "#ff7f0e", "meta": { "nodeType": "subproject", "buildTool": "make" } } },
+
+    // Libraries
+    { "key": "lib_guava", "attributes": { "label": "guava", "x": 45, "y": 10,  "size": 7,  "color": "#d62728", "meta": { "nodeType": "library", "artifactType": "jar" } } },
+    { "key": "lib_log4j", "attributes": { "label": "log4j", "x": 40, "y": -30, "size": 7,  "color": "#9467bd", "meta": { "nodeType": "library", "artifactType": "jar" } } },
+
+    // Special Jars
+    { "key": "testjar",   "attributes": { "label": "app-tests", "x": 0, "y": 40, "size": 6, "color": "#e377c2", "meta": { "nodeType": "testjar" } } },
+    { "key": "srcjar",    "attributes": { "label": "app-src",   "x": 0, "y": 55, "size": 6, "color": "#17becf", "meta": { "nodeType": "srcjar" } } },
+    { "key": "docjar",    "attributes": { "label": "app-docs",  "x": 0, "y": 70, "size": 6, "color": "#bcbd22", "meta": { "nodeType": "docjar" } } },
+
+    // BOM, POM, ZIP, Docker, WAR, EAR
+    { "key": "bom_spring", "attributes": { "label": "spring-bom", "x": -50, "y": -20, "size": 6, "color": "#e377c2", "meta": { "nodeType": "bom" } } },
+    { "key": "pom_parent", "attributes": { "label": "parent-pom", "x": -40, "y": 15,  "size": 6, "color": "#7f7f7f", "meta": { "nodeType": "pom" } } },
+    { "key": "zip_dist",   "attributes": { "label": "dist.zip",   "x": 20,  "y": 60,  "size": 6, "color": "#8c564b", "meta": { "nodeType": "zip" } } },
+    { "key": "docker_img", "attributes": { "label": "app:docker", "x": 30,  "y": 75,  "size": 8, "color": "#00bfff", "meta": { "nodeType": "docker" } } },
+    { "key": "war_app",    "attributes": { "label": "webapp.war", "x": -10, "y": 60,  "size": 7, "color": "#ff1493", "meta": { "nodeType": "war" } } },
+    { "key": "ear_app",    "attributes": { "label": "enterprise.ear", "x": -25, "y": 75, "size": 7, "color": "#f39c12", "meta": { "nodeType": "ear" } } }
   ],
   "edges": [
-    { "key": "web_core", "source": "proj_web", "target": "proj_core", "attributes": { "size": 1, "color": "#1f77b4" }, "meta": { "edgeType": "project-link", "scope": "compile" } },
-    { "key": "web_guava", "source": "proj_web", "target": "lib_guava", "attributes": { "size": 1, "color": "#ff7f0e" }, "meta": { "edgeType": "lib", "scope": "compile" } },
-    { "key": "core_bom", "source": "proj_core", "target": "bom_spring", "attributes": { "size": 1, "color": "#e377c2" }, "meta": { "edgeType": "bom-import" } },
-    { "key": "web_parent", "source": "proj_web", "target": "parent_acme", "attributes": { "size": 1, "color": "#7f7f7f" }, "meta": { "edgeType": "parent" } }
+    // Standard Maven/Gradle scopes
+    { "key": "app_core", "source": "mod_app", "target": "mod_core", "attributes": { "size": 1.5, "color": "#1f77b4" }, "meta": { "edgeType": "compile", "scope": "compile" } },
+    { "key": "core_guava", "source": "mod_core", "target": "lib_guava", "attributes": { "size": 1, "color": "#d62728" }, "meta": { "edgeType": "runtime", "scope": "runtime" } },
+    { "key": "app_log4j",  "source": "mod_app", "target": "lib_log4j", "attributes": { "size": 1, "color": "#9467bd" }, "meta": { "edgeType": "provided", "scope": "provided" } },
+    { "key": "core_testjar", "source": "mod_core", "target": "testjar", "attributes": { "size": 1, "color": "#e377c2" }, "meta": { "edgeType": "test", "scope": "test" } },
+    { "key": "core_srcjar",  "source": "mod_core", "target": "srcjar", "attributes": { "size": 1, "color": "#17becf" }, "meta": { "edgeType": "system", "scope": "system" } },
+    { "key": "core_docjar",  "source": "mod_core", "target": "docjar", "attributes": { "size": 1, "color": "#bcbd22" }, "meta": { "edgeType": "doc", "scope": "doc" } },
+    { "key": "app_subproj_ui", "source": "mod_app", "target": "subproj_ui", "attributes": { "size": 1.2, "color": "#ff7f0e" }, "meta": { "edgeType": "testCompile", "scope": "testCompile" } },
+    { "key": "app_bom_spring", "source": "mod_app", "target": "bom_spring", "attributes": { "size": 1, "color": "#e377c2" }, "meta": { "edgeType": "bom-import" } },
+    { "key": "app_pom_parent", "source": "mod_app", "target": "pom_parent", "attributes": { "size": 1, "color": "#7f7f7f" }, "meta": { "edgeType": "parent" } },
+
+    // Output packaging
+    { "key": "app_zip",     "source": "mod_app", "target": "zip_dist",   "attributes": { "size": 1, "color": "#8c564b" }, "meta": { "edgeType": "zip" } },
+    { "key": "app_docker",  "source": "mod_app", "target": "docker_img", "attributes": { "size": 1, "color": "#00bfff" }, "meta": { "edgeType": "docker" } },
+    { "key": "app_war",     "source": "mod_app", "target": "war_app",    "attributes": { "size": 1, "color": "#ff1493" }, "meta": { "edgeType": "war" } },
+    { "key": "app_ear",     "source": "mod_app", "target": "ear_app",    "attributes": { "size": 1, "color": "#f39c12" }, "meta": { "edgeType": "ear" } },
+
+    // Non-Java edges (simulated service calls)
+    { "key": "app_rest",    "source": "mod_app", "target": "mod_core",   "attributes": { "size": 2, "color": "#2ecc40", "label": "REST" },    "meta": { "edgeType": "rest-call", "protocol": "rest" } },
+    { "key": "app_soap",    "source": "mod_app", "target": "subproj_ui", "attributes": { "size": 2, "color": "#2980b9", "label": "SOAP" },    "meta": { "edgeType": "soap-call", "protocol": "soap" } },
+    { "key": "app_graphql", "source": "mod_app", "target": "lib_log4j",  "attributes": { "size": 2, "color": "#fdcb6e", "label": "GraphQL" }, "meta": { "edgeType": "graphql", "protocol": "graphql" } },
+    { "key": "app_gwt",     "source": "subproj_ui", "target": "mod_core", "attributes": { "size": 2, "color": "#6c5ce7", "label": "GWT" },    "meta": { "edgeType": "gwt-call", "protocol": "gwt" } }
   ]
 } /* XMVN_DATA_END */;
 
@@ -93,12 +131,75 @@ const state = {
   hoveredNeighbors: null,
   isDragging: false
 };
+// Color palette for nodes
+const NODE_TYPE_COLORS = {
+  module:         "#1f77b4",
+  subproject:     "#2077A0",
+  library:        "#d62728",
+  testjar:        "#9467bd",
+  srcjar:         "#8c564b",
+  docjar:         "#c49c94",
+  bom:            "#e377c2",
+  pom:            "#bcbd22",
+  plugin:         "#ff7f0e",
+  extension:      "#17becf",
+  tool:           "#9edae5",
+  script:         "#dbdb8d",
+  config:         "#7f7f7f",
+  resource:       "#2ca02c",
+  container:      "#393b79",
+  distribution:   "#8c6d31",
+  npm_module:     "#ffb300",
+  py_package:     "#2ca02c",
+  crate:          "#d62728",
+  go_mod:         "#31a354",
+  service:        "#636363",
+  parent:         "#7f7f7f",
+  sample:         "#f7b6d2",
+  test:           "#c5b0d5"
+};
+
+// Color palette for edges (scopes/relationships)
+const EDGE_TYPE_COLORS = {
+  compile:            "#1f77b4",
+  runtime:            "#ff7f0e",
+  provided:           "#bcbd22",
+  system:             "#d62728",
+  test:               "#9467bd",
+  testCompile:        "#c5b0d5",
+  testRuntime:        "#f7b6d2",
+  annotationProcessor:"#8c564b",
+  import:             "#e377c2",
+  optional:           "#c49c94",
+  devDependency:      "#17becf",
+  peerDependency:     "#8c564b",
+  dependencyManagement: "#aec7e8",
+  extensionOf:        "#2ca02c",
+  packagedWith:       "#ffbb78",
+  ci:                 "#7f7f7f",
+  cd:                 "#393b79",
+  excludes:           "#ff9896",
+  rest:               "#98df8a",
+  soap:               "#c49c94",
+  graphql:            "#bcbd22",
+  gwt:                "#f7b6d2",
+  calls:              "#ff7f0e",
+  uses:               "#9edae5",
+  generates:          "#636363",
+  publishes:          "#8c6d31",
+  subscribes:         "#dbdb8d",
+  parent:             "#7f7f7f",
+  bom:                "#e377c2",
+  project_link:       "#1f77b4"
+};
 
 main();
 
 function main() {
   const container = document.getElementById("sigma-container");
   const graph = new Graph();
+  DATA.edges = dedupeEdges(DATA.edges);
+  assignColors(DATA.nodes, DATA.edges);
   graph.import(DATA);
 
   setupStats(graph);
@@ -115,57 +216,140 @@ function main() {
   setupFilters(graph);
   setupLayouts(graph);
 }
+function assignColors(nodes, edges) {
+  nodes.forEach(n => {
+    const type = n.attributes?.meta?.nodeType;
+    if (type && NODE_TYPE_COLORS[type] && !n.attributes.color)
+      n.attributes.color = NODE_TYPE_COLORS[type];
+  });
+  edges.forEach(e => {
+    let t = e.meta?.edgeType || e.meta?.scope;
+    if (t && EDGE_TYPE_COLORS[t] && !e.attributes.color)
+      e.attributes.color = EDGE_TYPE_COLORS[t];
+  });
+}
+function dedupeEdges(edges) {
+  const seen = new Set();
+  return edges.filter(e => {
+    const key = e.source + "->" + e.target;
+    if (seen.has(key)) {
+      console.warn(`[dedupe] Duplicate edge ignored: ${key}`);
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
 
 function setupStats(graph) {
   const statsEl = document.getElementById("stats");
-  function updateStats() {
-    statsEl.textContent = `${graph.order} nodes • ${graph.size} edges`;
+  function updateStats(filteredNodes, filteredEdges) {
+    statsEl.textContent = `${filteredNodes} of ${graph.order} nodes • ${filteredEdges} of ${graph.size} edges`;
   }
-  graph.on("nodeAdded nodeDropped edgeAdded edgeDropped", updateStats);
-  updateStats();
+  // Allow external update
+  graph._updateStats = updateStats;
+  // Initial, full values
+  updateStats(graph.order, graph.size);
 }
 
 function setupFilters(graph) {
-  const $ = (id) => document.getElementById(id);
-  const fProjects = $("f-projects");
-  const fLibs = $("f-libs");
-  const fBoms = $("f-boms");
-  const fParent = $("f-parent");
+  const filterFieldset = document.getElementById("filter-fieldset");
+  const logEl = document.getElementById("log");
+
+  // Gather unique node and edge types, and one example color for each
+  const nodeTypeData = {};
+  const edgeTypeData = {};
+
+  graph.forEachNode((_, attrs) => {
+    const t = attrs.meta?.nodeType;
+    if (t && !nodeTypeData[t]) {
+      nodeTypeData[t] = { color: attrs.color || "#888" };
+    }
+  });
+  graph.forEachEdge((_, attrs) => {
+    const et = attrs.meta?.edgeType;
+    if (et && !edgeTypeData[et]) {
+      edgeTypeData[et] = { color: attrs.color || "#aaa" };
+    }
+  });
+
+  // Build HTML for checkboxes, with colored squares and group labels
+  let html = `<legend>Filter</legend>
+    <div style="margin-bottom:6px"><b>Nodes:</b> `;
+  Object.entries(nodeTypeData).forEach(([type, { color }]) => {
+    html += `
+      <label style="margin-right: 10px;">
+        <input type="checkbox" id="f-node-${type}" checked>
+        <span style="display:inline-block;width:13px;height:13px;vertical-align:-2px;background:${color};border-radius:3px;border:1px solid #ccc;margin-right:2px"></span>
+        ${type}
+      </label>`;
+  });
+  html += `</div><div><b>Edges:</b> `;
+  Object.entries(edgeTypeData).forEach(([type, { color }]) => {
+    html += `
+      <label style="margin-right: 10px;">
+        <input type="checkbox" id="f-edge-${type}" checked>
+        <span style="display:inline-block;width:13px;height:13px;vertical-align:-2px;background:${color};border-radius:3px;border:1px solid #ccc;margin-right:2px"></span>
+        ${type}
+      </label>`;
+  });
+  html += `</div>`;
+  filterFieldset.innerHTML = html;
+
+  // Only now get the elements for event listeners
+  const nodeChecks = {};
+  const edgeChecks = {};
+  Object.keys(nodeTypeData).forEach(type => {
+    nodeChecks[type] = document.getElementById(`f-node-${type}`);
+  });
+  Object.keys(edgeTypeData).forEach(type => {
+    edgeChecks[type] = document.getElementById(`f-edge-${type}`);
+  });
+
+  function logMsg(msg) {
+    if (!logEl) return;
+    logEl.innerHTML += msg + "<br/>";
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
   function nodeMatchesFilters(attrs) {
     const t = attrs.meta?.nodeType;
     if (!t) return true;
-    return (
-      (t === "project" && fProjects.checked) ||
-      (t === "lib"     && fLibs.checked)     ||
-      (t === "bom"     && fBoms.checked)     ||
-      (t === "parent"  && fParent.checked)
-    );
+    return nodeChecks[t]?.checked !== false;
   }
   function edgeMatchesFilters(attrs, s, t) {
     const et = attrs.meta?.edgeType;
     let allowedByType = true;
-    if (et) {
-      allowedByType =
-        (et === "project-link" && fProjects.checked) ||
-        (et === "lib"          && fLibs.checked)     ||
-        (et === "bom-import"   && fBoms.checked)     ||
-        (et === "parent"       && fParent.checked);
-    }
+    if (et) allowedByType = edgeChecks[et]?.checked !== false;
     const srcHidden = graph.getNodeAttribute(s, "hidden") === true;
     const tgtHidden = graph.getNodeAttribute(t, "hidden") === true;
     return allowedByType && !srcHidden && !tgtHidden;
   }
   function applyFilters() {
+    let shownNodes = 0, shownEdges = 0;
     graph.forEachNode((n, attrs) => {
-      graph.setNodeAttribute(n, "hidden", !nodeMatchesFilters(attrs));
+      const visible = nodeMatchesFilters(attrs);
+      graph.setNodeAttribute(n, "hidden", !visible);
+      if (visible) shownNodes++;
     });
     graph.forEachEdge((e, attrs, s, t) => {
-      graph.setEdgeAttribute(e, "hidden", !edgeMatchesFilters(attrs, s, t));
+      const visible = edgeMatchesFilters(attrs, s, t);
+      graph.setEdgeAttribute(e, "hidden", !visible);
+      if (visible) shownEdges++;
     });
+    const nodeParts = Object.keys(nodeChecks).filter(t => nodeChecks[t].checked);
+    const edgeParts = Object.keys(edgeChecks).filter(t => edgeChecks[t].checked);
+    const msg = `[${new Date().toLocaleTimeString()}] Filters: nodes [${nodeParts.join(", ")}], edges [${edgeParts.join(", ")}] — ${shownNodes}/${graph.order} nodes, ${shownEdges}/${graph.size} edges shown.`;
+    logMsg(msg);
+    console.log(msg);
   }
-  [fProjects, fLibs, fBoms, fParent].forEach(cb => cb.addEventListener("change", applyFilters));
+
+  // Add event listeners to all checkboxes
+  Object.values(nodeChecks).forEach(cb => cb.addEventListener("change", applyFilters));
+  Object.values(edgeChecks).forEach(cb => cb.addEventListener("change", applyFilters));
   applyFilters();
 }
+
 
 function setupCamera(renderer) {
   document.getElementById("reset-camera").addEventListener("click", () => {
