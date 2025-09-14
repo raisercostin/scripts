@@ -13,9 +13,12 @@
 //DEPS one.util:streamex:0.8.2
 //DEPS com.google.guava:guava:32.1.2-jre
 //SOURCES com/namekis/utils/RichLogback.java
+//FILES xmvn-graph.html
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -192,6 +195,7 @@ public class xmvn {
         }
         return List.of();
       });
+
       GraphData graph = new GraphData();
       Set<String> nodeKeys = new HashSet<>();
       Set<String> edgeKeys = new HashSet<>();
@@ -200,113 +204,20 @@ public class xmvn {
       com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
       String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(graph);
 
-      File htmlFile = new File(projectDir, "graph.html");
-
-      // Self-contained HTML with embedded JSON
-      String html = """
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8" />
-            <title>XMvn Dependency Graph</title>
-            <style>
-              html, body, #sigma-container {
-                margin: 0;
-                padding: 0;
-                width: 100%%;
-                height: 100%%;
-                overflow: hidden;
-              }
-            </style>
-            <script type="importmap">
-            {
-              "imports": {
-                "sigma": "https://cdn.jsdelivr.net/npm/sigma@3/+esm",
-                "graphology": "https://cdn.jsdelivr.net/npm/graphology@0.25.4/+esm",
-                "graphology-layout-forceatlas2": "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm",
-                "graphology-layout": "https://cdn.jsdelivr.net/npm/graphology-layout@0.6.1/+esm"
-              }
-            }
-            </script>
-          </head>
-          <body>
-            <div id="sigma-container"></div>
-            <script type="module">
-              import Sigma from "sigma";
-              import Graph from "graphology";
-              import forceAtlas2 from "graphology-layout-forceatlas2";
-              import { circular } from "graphology-layout";
-
-              const container = document.getElementById("sigma-container");
-              const graph = new Graph();
-
-              const data = %s;
-
-              // Adaugă nodurile
-              data.nodes.forEach(n => {
-                graph.addNode(n.key, {
-                  label: n.attributes.label,
-                  size: n.attributes.size,
-                  color: n.attributes.color
-                });
-              });
-
-              // Adaugă muchiile
-              data.edges.forEach(e => {
-                graph.addEdge(e.source, e.target, {
-                  size: e.attributes.size,
-                  color: e.attributes.color,
-                  type: "arrow"
-                });
-              });
-               // 4. Add colors to the nodes, based on node types:
-                //const COLORS: Record<string, string> = { institution: "#FA5A3D", subject: "#5A75DB" };
-                //graph.forEachNode((node, attributes) =>
-                //  graph.setNodeAttribute(node, "color", COLORS[attributes.nodeType as string]),
-                //);
-
-                // 5. Use degrees for node sizes:
-                const degrees = graph.nodes().map((node) => graph.degree(node));
-                const minDegree = Math.min(...degrees);
-                const maxDegree = Math.max(...degrees);
-                const minSize = 2,
-                  maxSize = 15;
-                graph.forEachNode((node) => {
-                  const degree = graph.degree(node);
-                  graph.setNodeAttribute(
-                    node,
-                    "size",
-                    minSize + ((degree - minDegree) / (maxDegree - minDegree)) * (maxSize - minSize),
-                  );
-                });
-
-              // Poziții inițiale random
-              graph.nodes().forEach(node => {
-                graph.setNodeAttribute(node, "x", Math.random() * 200 - 100);
-                graph.setNodeAttribute(node, "y", Math.random() * 200 - 100);
-              });
-
-              // Rulează ForceAtlas2 sincron (200 iterații)
-              //forceAtlas2.assign(graph, { iterations: 200 });
-                      // 6. Position nodes on a circle, then run Force Atlas 2 for a while to get
-                //    proper graph layout:
-                //circular.assign(graph);
-                const settings = forceAtlas2.inferSettings(graph);
-                forceAtlas2.assign(graph, { settings, iterations: 1000 });
-
-              // Renderer Sigma
-              new Sigma(graph, container, {
-                renderEdgeLabels: true
-              });
-            </script>
-          </body>
-          </html>
-          """.formatted(jsonString);
-
-      try (var writer = new java.io.FileWriter(htmlFile)) {
-        writer.write(html);
+      // --- Load HTML template from classpath ---
+      String html;
+      try (InputStream in = getClass().getResourceAsStream("/xmvn-graph.html")) {
+        if (in == null)
+          throw new FileNotFoundException("Resource not found: /xmvn-graph.html");
+        html = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
       }
-      log.info("Self-contained Sigma.js v3 HTML written to {}", htmlFile.getAbsolutePath());
+
+      String replaced = html.replaceAll("(?s)/\\* XMVN_DATA_START \\*/.*?/\\* XMVN_DATA_END \\*/",
+          "/* XMVN_DATA_START */\n" + jsonString + "\n/* XMVN_DATA_END */");
+
+      File htmlFile = new File(projectDir, "xmvn-graph.html");
+      Files.writeString(htmlFile.toPath(), replaced, java.nio.charset.StandardCharsets.UTF_8);
+      log.info("Sigma v3 HTML with filters+highlight written to {}", htmlFile.getAbsolutePath());
     }
 
     private void emitProjectAndDeps(xmvn.Project project, List<Node> nodes, List<Edge> edges, Set<String> nodeKeys, Set<String> edgeKeys) {
@@ -2855,21 +2766,21 @@ public class xmvn {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-                                   * .xsd") } outputDir =
-                                   * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-                                   * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-                                   * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-                                   * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-                                   * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-                                   * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-                                   * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-                                   * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-                                   * Ant classpath for the XJC task ant.withGroovyBuilder {
-                                   * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-                                   * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-                                   * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-                                   * "generated-sources/jaxb"))
-                                   */
+                                      * .xsd") } outputDir =
+                                      * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+                                      * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+                                      * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+                                      * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+                                      * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+                                      * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+                                      * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+                                      * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+                                      * Ant classpath for the XJC task ant.withGroovyBuilder {
+                                      * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+                                      * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+                                      * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+                                      * "generated-sources/jaxb"))
+                                      */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
