@@ -959,7 +959,6 @@ public class mgit {
     private boolean forceRebase;
     @Option(names = "--fetch", description = "Fetch remote refs before rebase (slower)")
     boolean fetch;
-
     @Override
     public Integer call() throws Exception {
       RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, false);
@@ -969,6 +968,7 @@ public class mgit {
         return 1;
       }
       int rebased = 0, skipped = 0, failed = 0;
+
       for (File repo : repoDirs) {
         String branch = getCurrentBranch(repo);
         if (branch == null) {
@@ -983,6 +983,15 @@ public class mgit {
           continue;
         }
 
+        // === Guard 1: detect "D + ??" upfront (deleted staged + untracked dirs)
+        String status = runGitCommand("status", repo, "status", "--porcelain");
+        if (status.contains("D ") && status.contains("??")) {
+          stdoutf("@|yellow [%s] skipped (staged deletions + untracked dirs; use 'mgit resolve --repos=%s')|@",
+                  repo.getName(), repo.getName());
+          skipped++;
+          continue;
+        }
+
         try {
           if (fetch) {
             try {
@@ -993,12 +1002,14 @@ public class mgit {
               continue;
             }
           }
+
           String defaultBranch = getRemoteDefaultBranch(repo);
           List<String> rebaseCmd = new ArrayList<>(List.of("rebase", "--autostash"));
           if (forceRebase) {
             rebaseCmd.add("--force-rebase");
           }
           rebaseCmd.add("origin/" + defaultBranch);
+
           try {
             runGitCommand("rebase", repo, rebaseCmd.toArray(new String[0]));
             String pushCmd = "git -C " + repo.getAbsolutePath() + " push --force-with-lease";
@@ -1006,12 +1017,20 @@ public class mgit {
             rebased++;
           } catch (Exception ex) {
             String msg = ex.getMessage();
-            if (msg != null && msg.contains("rebase-merge")) {
-              stdoutf("@|yellow [%s] rebase already in progress. Use 'git rebase --continue' or '--abort'.|@", repo.getName());
+            if (msg != null && msg.contains("untracked working tree files would be overwritten by reset")) {
+              // === Guard 2: detect overwrite error
+              stdoutf("@|red [%s] rebase BLOCKED: untracked files would be overwritten.|@", repo.getName());
+              stdoutf("@|red Run 'mgit resolve --repos=%s' to choose WORKTREE or INDEX before rebasing.|@",
+                      repo.getName());
+              skipped++;
+            } else if (msg != null && msg.contains("rebase-merge")) {
+              stdoutf("@|yellow [%s] rebase already in progress. Use 'git rebase --continue' or '--abort'.|@",
+                      repo.getName());
               skipped++;
             } else {
               log.error("Rebase failed in '{}': {}", repo.getName(), msg);
-              stdoutf("@|magenta [%s] rebase FAILED. Use 'mgit resolve --repos=%s' to fix conflicts|@", repo.getName(), repo.getName());
+              stdoutf("@|magenta [%s] rebase FAILED. Use 'mgit resolve --repos=%s' to fix conflicts|@",
+                      repo.getName(), repo.getName());
               failed++;
             }
           }
@@ -1021,7 +1040,11 @@ public class mgit {
           failed++;
         }
       }
+
+      // === Final summary ===
+      stdoutf("[mgit] Summary: Rebased=%d, Skipped=%d, Failed=%d", rebased, skipped, failed);
       log.info("Rebased: {}, Skipped: {}, Failed: {}", rebased, skipped, failed);
+
       return failed > 0 ? 1 : 0;
     }
   }
@@ -1202,10 +1225,20 @@ public class mgit {
   }
 
   enum ResolveStrategy {
-    WORKTREE,  // trust current filesystem content (present -> add, absent -> rm). Current dir/work/worktree content.
-    INDEX,     // trust what was staged before the conflict. Current staged/index intended to be committed.
-    LOCAL,     // trust the commit/branch you are rebasing or merging from. Current branch with committed stuff.
-    UPSTREAM   // trust the branch/commit you are applying onto. The other branch with committed stuff.
+    WORKTREE("trust current filesystem content (present -> add, absent -> rm)", false), INDEX("trust what was staged before the conflict", false),
+    LOCAL("trust the currently checked-out branch (committed state)", false), UPSTREAM("trust the branch/commit you are applying onto", false),
+
+    CONTINUE("rebase in progress -> continue with staged resolutions", true),
+    ABORT("rebase in progress -> abort rebase and return to pre-rebase state", true),
+    SKIP("rebase in progress -> skip current patch and continue", true), CLEAN("broken rebase metadata -> remove stale rebase-merge dir", true);
+
+    final String description;
+    final boolean rebaseOnly;
+
+    ResolveStrategy(String description, boolean rebaseOnly) {
+      this.description = description;
+      this.rebaseOnly = rebaseOnly;
+    }
   }
 
   static class ResolutionStep {
@@ -1252,52 +1285,26 @@ public class mgit {
       int totalSuggested = 0;
 
       for (File repo : findRepos()) {
-        String status = runGitCommand("status", repo, "status", "--porcelain", "--branch");
-        if (status.isBlank())
-          continue;
-
         stdoutf("[%s] conflicts:", repo.getName());
-        stdoutf("  # git -C %s status --branch --porcelain", repo.getAbsolutePath());
 
-        // --- Group codes by file ---
-        Map<String, List<String>> codesByFile = new LinkedHashMap<>();
-        for (String line : status.split("\n")) {
-          if (line.isBlank() || line.startsWith("##"))
-            continue; // skip branch header
-          String code = line.substring(0, 2).trim();
-          String file = line.substring(2).trim();
-          codesByFile.computeIfAbsent(file, f -> new ArrayList<>()).add(code);
-        }
+        // --- Detect rebase in progress ---
 
-        // --- Process merged codes per file ---
-        for (var entry : codesByFile.entrySet()) {
-          String file = entry.getKey();
-          List<String> codes = entry.getValue();
-
-          // join codes like ["D","?"] -> "D?"
-          // normalize codes before joining
-          List<String> normalized = codes.stream().map(c -> c.equals("??") ? "?" : c) // collapse ?? to single ?
-              .toList();
-          String combined = String.join("", normalized);
-
-          if (fileMatcher != null && !fileMatcher.matches(Paths.get(file)))
-            continue;
-          if (conflictFilter != null && !conflictFilter.contains(combined))
-            continue;
-
-          Map<ResolveStrategy, List<ResolutionStep>> options = mapConflictToCommands(repo, combined, file);
-
+        File gitDir = gitDir(repo);
+        File rebaseMerge = new File(gitDir, "rebase-merge");
+        File rebaseApply = new File(gitDir, "rebase-apply");
+        log.debug("Checking for rebase in progress in {}: rebase-merge={}:{}, rebase-apply={}:{}", repo, rebaseMerge.getAbsolutePath(),
+            rebaseMerge.exists(), rebaseApply.getAbsoluteFile(), rebaseApply.exists());
+        if (rebaseMerge.exists() || rebaseApply.exists()) {
+          String syntheticCode = "REBASE";
+          Map<ResolveStrategy, List<ResolutionStep>> options = mapConflictToCommands(repo, syntheticCode, "(in-progress)");
           totalConflicts++;
-
           if (strategy == null) {
-            // === Advisor mode ===
-            stdoutf("  %s %s", combined, file);
-            for (var opt : options.entrySet()) {
-              ResolveStrategy s = opt.getKey();
-              List<ResolutionStep> steps = opt.getValue();
+            stdoutf("  %s (in-progress)", syntheticCode);
+            for (var entry : options.entrySet()) {
+              ResolveStrategy s = entry.getKey();
+              List<ResolutionStep> steps = entry.getValue();
               if (steps.isEmpty())
                 continue;
-
               if (steps.get(0).cmds.isEmpty()) {
                 stdoutf("    %s -> %s", s, steps.get(0).description);
                 totalSkipped++;
@@ -1310,7 +1317,97 @@ public class mgit {
               }
             }
           } else {
-            // === Executor mode ===
+            List<ResolutionStep> steps = options.getOrDefault(strategy, List.of());
+            boolean ran = false;
+            for (ResolutionStep step : steps) {
+              if (step.cmds.isEmpty()) {
+                stdoutf("   [SKIP] (in-progress) (%s)", step.description);
+                totalSkipped++;
+                continue;
+              }
+              if (!ran) {
+                stdoutf("   [RESOLVE %s -> %s] (in-progress)", syntheticCode, strategy);
+                ran = true;
+              }
+              stdoutf("     # %s", step.description);
+              stdoutf("     git -C %s %s", repo.getAbsolutePath(), String.join(" ", step.cmds));
+              if (execute) {
+                runGitCommand("resolve", repo, step.cmds.toArray(new String[0]));
+                totalResolved++;
+              } else {
+                totalSuggested++;
+              }
+            }
+            if (ran && !execute) {
+              stdoutf("     # (use --execute to apply this resolution)");
+            }
+          }
+          continue; // skip normal porcelain parsing for this repo
+        }
+
+        // --- Normal porcelain status ---
+        String status = runGitCommand("status", repo, "status", "--porcelain", "--branch");
+        if (status.isBlank())
+          continue;
+
+        stdoutf("  # git -C %s status --branch --porcelain", repo.getAbsolutePath());
+
+        // group codes by file
+        Map<String, List<String>> codesByFile = new LinkedHashMap<>();
+        for (String line : status.split("\n")) {
+          if (line.isBlank() || line.startsWith("##"))
+            continue;
+          String code = line.substring(0, 2).trim();
+          String file = line.substring(2).trim();
+          // normalize ?? to ?
+          if (code.equals("??"))
+            code = "?";
+          // skip untracked directories
+          if (code.equals("?") && file.endsWith("/"))
+            continue;
+          codesByFile.computeIfAbsent(file, f -> new ArrayList<>()).add(code);
+        }
+
+        for (var entry : codesByFile.entrySet()) {
+          String file = entry.getKey();
+          List<String> codes = entry.getValue();
+          String combined = String.join("", codes);
+
+          if (fileMatcher != null && !fileMatcher.matches(Paths.get(file)))
+            continue;
+          if (conflictFilter != null && !conflictFilter.contains(combined))
+            continue;
+
+          Map<ResolveStrategy, List<ResolutionStep>> options = mapConflictToCommands(repo, combined, file);
+
+          totalConflicts++;
+
+          if (strategy == null) {
+            // advisor mode
+            stdoutf("  %s %s", combined, file);
+            if (options.isEmpty()) {
+              stdoutf("    (no resolution available for this code)");
+              totalSkipped++;
+            } else {
+              for (var opt : options.entrySet()) {
+                ResolveStrategy s = opt.getKey();
+                List<ResolutionStep> steps = opt.getValue();
+                if (steps.isEmpty())
+                  continue;
+                if (steps.get(0).cmds.isEmpty()) {
+                  stdoutf("    %s -> %s", s, steps.get(0).description);
+                  totalSkipped++;
+                } else {
+                  stdoutf("    %s -> %s", s, steps.get(0).description);
+                  for (ResolutionStep step : steps) {
+                    stdoutf("      git %s", String.join(" ", step.cmds));
+                  }
+                  totalSuggested++;
+                }
+              }
+            }
+          } else {
+            // executor mode
             List<ResolutionStep> steps = options.getOrDefault(strategy, List.of());
             boolean ran = false;
             for (ResolutionStep step : steps) {
@@ -1339,7 +1436,7 @@ public class mgit {
         }
       }
 
-      // --- Final summary ---
+      // summary
       if (totalConflicts == 0) {
         stdoutf("[mgit] No conflicts found in selected repos");
       } else if (strategy == null) {
@@ -1349,6 +1446,28 @@ public class mgit {
       }
 
       return 0;
+    }
+
+    private File gitDir(File repo) {
+      try {
+        File dotGit = new File(repo, ".git");
+        if (dotGit.isFile()) {
+          String content = Files.readString(dotGit.toPath()).trim();
+          if (content.startsWith("gitdir:")) {
+            content = content.substring("gitdir:".length()).trim();
+          }
+          Path gitPath = Paths.get(content);
+          if (!gitPath.isAbsolute()) {
+            // resolve relative to the repo’s root directory (same as git -C repo)
+            gitPath = repo.toPath().resolve(gitPath).normalize();
+          }
+          return gitPath.toFile();
+        } else {
+          return dotGit; // normal .git directory
+        }
+      } catch (IOException e) {
+        throw new RuntimeException("Failed to read .git dir in " + repo, e);
+      }
     }
 
     private Map<ResolveStrategy, List<ResolutionStep>> mapConflictToCommands(File repo, String code, String file) {
@@ -1391,8 +1510,6 @@ public class mgit {
             List.of(new ResolutionStep(List.of("add", file), "index says delete, worktree has file -> keep file (stage worktree content)")));
         result.put(ResolveStrategy.INDEX,
             List.of(new ResolutionStep(List.of("rm", "--", file), "index says delete, worktree has file -> accept staged delete")));
-        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for UD");
-        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for UD");
         break;
 
       case "DU": // index deleted, worktree has unmerged content (shape similar to UD)
@@ -1400,8 +1517,6 @@ public class mgit {
             List.of(new ResolutionStep(List.of("add", file), "index deleted, worktree has content -> keep file (stage worktree content)")));
         result.put(ResolveStrategy.INDEX,
             List.of(new ResolutionStep(List.of("rm", "--", file), "index deleted, worktree has content -> accept staged delete")));
-        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for DU");
-        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for DU");
         break;
 
       case "AA": // added twice
@@ -1410,16 +1525,11 @@ public class mgit {
         result.put(ResolveStrategy.INDEX,
             List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file added from both sides -> keep index state"),
                 new ResolutionStep(List.of("add", file), "stage index version as resolved")));
-        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for AA");
-        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for AA");
         break;
 
       case "DD": // deleted twice
         result.put(ResolveStrategy.INDEX,
             List.of(new ResolutionStep(List.of("rm", "--", file), "file deleted from both sides -> accept staged delete")));
-        skip.accept(ResolveStrategy.WORKTREE, "WORKTREE not valid for DD");
-        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for DD");
-        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for DD");
         break;
 
       case "UA":
@@ -1429,8 +1539,6 @@ public class mgit {
         result.put(ResolveStrategy.INDEX,
             List.of(new ResolutionStep(List.of("checkout", "--ours", "--", file), "file addition vs unmerged entry -> keep index state"),
                 new ResolutionStep(List.of("add", file), "stage index version as resolved")));
-        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for " + code);
-        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for " + code);
         break;
 
       // --- Synthetic combined cases detected by Resolve.call() grouping ---
@@ -1439,49 +1547,56 @@ public class mgit {
             List.of(new ResolutionStep(List.of("add", file), "file present in worktree, staged as delete -> keep file (stage worktree content)")));
         result.put(ResolveStrategy.INDEX,
             List.of(new ResolutionStep(List.of("rm", "--", file), "file present in worktree, staged as delete -> accept staged delete")));
-        skip.accept(ResolveStrategy.LOCAL, "LOCAL not valid for D?");
-        skip.accept(ResolveStrategy.UPSTREAM, "UPSTREAM not valid for D?");
         break;
 
       // --- Guards: not conflicts for mgit resolve (give reason and skip) ---
       case "??": // untracked file (not a conflict)
-        skipAllNotConflict.run();
         break;
-
-      case "D":  // staged delete only; no disagreement
-        skipAllNotConflict.run();
+      case "D": // deleted in index, still exists in worktree
+        result.put(ResolveStrategy.WORKTREE,
+            List.of(new ResolutionStep(List.of("add", file), "index says deleted, but worktree has content -> keep worktree version")));
+        result.put(ResolveStrategy.INDEX,
+            List.of(new ResolutionStep(List.of("rm", "--", file), "index says deleted, worktree has content -> accept staged delete")));
         break;
 
       case "M":  // modified in worktree only
-        skipAllNotConflict.run();
         break;
 
       case "A":  // staged add only
-        skipAllNotConflict.run();
         break;
 
       case "R":  // rename in index only
-        skipAllNotConflict.run();
         break;
 
       case "C":  // copy in index only
-        skipAllNotConflict.run();
         break;
 
       case "T":  // typechange only
-        skipAllNotConflict.run();
         break;
-
       case "!!": // ignored path
         for (ResolveStrategy s : ResolveStrategy.values()) {
           skip.accept(s, "ignored by .gitignore; not a conflict (" + code + ")");
         }
         break;
+      case "REBASE":
+        File gitDir = gitDir(repo);
+        File rebaseMerge = new File(gitDir, "rebase-merge");
+        File rebaseApply = new File(gitDir, "rebase-apply");
+
+        if ((rebaseMerge.exists() || rebaseApply.exists()) && !new File(rebaseMerge, "head-name").exists()) {
+          result.put(ResolveStrategy.CLEAN, List.of(
+              new ResolutionStep(List.of("!rm", "-rf", rebaseMerge.getAbsolutePath()), "broken rebase metadata -> remove stale rebase-merge dir")));
+        } else {
+          result.put(ResolveStrategy.CONTINUE,
+              List.of(new ResolutionStep(List.of("rebase", "--continue"), "rebase in progress -> continue with staged resolutions")));
+          result.put(ResolveStrategy.ABORT,
+              List.of(new ResolutionStep(List.of("rebase", "--abort"), "rebase in progress -> abort rebase and return to pre-rebase state")));
+          result.put(ResolveStrategy.SKIP,
+              List.of(new ResolutionStep(List.of("rebase", "--skip"), "rebase in progress -> skip current patch and continue")));
+        }
+        break;
 
       default:
-        for (ResolveStrategy s : ResolveStrategy.values()) {
-          skip.accept(s, "no strategy for code " + code);
-        }
         break;
       }
 
