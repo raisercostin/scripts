@@ -86,6 +86,17 @@ let DATA = /* XMVN_DATA_START */ {
     { "key": "web_parent", "source": "proj_web", "target": "parent_acme", "attributes": { "size": 1, "color": "#7f7f7f" }, "meta": { "edgeType": "parent" } }
   ]
 } /* XMVN_DATA_END */;
+const state = {
+  hoveredNode: null,
+  hoveredNeighbors: null,
+  dragging: false,
+  filters: {
+    project: true,
+    lib: true,
+    bom: true,
+    parent: true
+  }
+};
 
 main();
 
@@ -95,7 +106,15 @@ function main() {
   graph.import(DATA);
 
   setupStats(graph);
-  const renderer = setupRenderer(graph, container);
+  const renderer = new Sigma(graph, container, {
+    renderEdgeLabels: true,
+    minZoomRatio: 0.1, // Minimum zoom-out (smaller value = zoom out more)
+    maxZoomRatio: 10,  // Maximum zoom-in (higher value = zoom in more)
+    nodeProgramClasses: {
+      image: createNodeImageProgram()
+    }
+  });
+  setupHoverHighlight(graph, renderer);
   setupCamera(renderer);
   setupNodeDragging(renderer, graph);
   setupFilters(graph);
@@ -111,108 +130,130 @@ function setupStats(graph) {
   updateStats();
 }
 
-function setupRenderer(graph, container) {
-  return new Sigma(graph, container, {
-    renderEdgeLabels: true,
-    nodeProgramClasses: {
-      image: createNodeImageProgram()
-    }
-  });
-}
-
 function setupCamera(renderer) {
   document.getElementById("reset-camera").addEventListener("click", () => {
     renderer.getCamera().animatedReset({ duration: 300 });
   });
 }
 
+function setupHoverHighlight(graph, renderer) {
+  renderer.setSetting("nodeReducer", (node, data) => {
+    const res = { ...data };
+    if (state.hoveredNode && node !== state.hoveredNode && !state.hoveredNeighbors.has(node)) {
+      res.color = "#f2f2f2";
+      res.label = "";
+    }
+    return res;
+  });
+  renderer.setSetting("edgeReducer", (edge, data) => {
+    if (!state.hoveredNode) return data;
+    const s = graph.source(edge), t = graph.target(edge);
+    if (s !== state.hoveredNode && t !== state.hoveredNode) {
+      return { ...data, hidden: true };
+    }
+    return data;
+  });
+  renderer.on("enterNode", ({ node }) => {
+    state.hoveredNode = node;
+    state.hoveredNeighbors = new Set(graph.neighbors(node));
+    renderer.refresh({ skipIndexation: true });
+  });
+  renderer.on("leaveNode", () => {
+    state.hoveredNode = null;
+    state.hoveredNeighbors = null;
+    renderer.refresh({ skipIndexation: true });
+  });
+}
 function setupNodeDragging(renderer, graph) {
   let draggedNode = null;
   let isDragging = false;
+  let dragOffset = { x: 0, y: 0 };
 
   renderer.on("downNode", ({ node, event }) => {
     draggedNode = node;
     isDragging = true;
-    // Prevent camera movement on mousedown over node
+    // Calculate offset between node and mouse
+    const attrs = graph.getNodeAttributes(node);
+    const rect = renderer.getContainer().getBoundingClientRect();
+    const mx = event.original.clientX - rect.left;
+    const my = event.original.clientY - rect.top;
+    const { x: nodeX, y: nodeY } = renderer.viewportToGraph({ x: mx, y: my });
+    dragOffset.x = attrs.x - nodeX;
+    dragOffset.y = attrs.y - nodeY;
     event.preventSigmaDefault = true;
-    // Prevent browser default
     if (event.original) {
       event.original.preventDefault();
       event.original.stopPropagation();
     }
   });
 
-  renderer.getContainer().addEventListener("mousemove", (e) => {
+  function handleMove(e) {
     if (!isDragging || !draggedNode) return;
-    // Block camera move by stopping event
     e.preventDefault();
     e.stopPropagation();
-    // Update node position
     const rect = renderer.getContainer().getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const pos = renderer.viewportToGraph({ x, y });
-    graph.setNodeAttribute(draggedNode, "x", pos.x);
-    graph.setNodeAttribute(draggedNode, "y", pos.y);
-  }, { passive: false });
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const { x, y } = renderer.viewportToGraph({ x: mx, y: my });
+    graph.setNodeAttribute(draggedNode, "x", x + dragOffset.x);
+    graph.setNodeAttribute(draggedNode, "y", y + dragOffset.y);
+  }
 
-  renderer.getContainer().addEventListener("mouseup", (e) => {
+  function handleUp(e) {
     if (isDragging) {
-      // Prevent camera panning on release
+      isDragging = false;
+      draggedNode = null;
+      dragOffset = { x: 0, y: 0 };
       e.preventDefault();
       e.stopPropagation();
-      draggedNode = null;
-      isDragging = false;
-    }
-  }, { passive: false });
 
-  // Optional: cancel drag if mouse leaves canvas
-  renderer.getContainer().addEventListener("mouseleave", () => {
-    draggedNode = null;
-    isDragging = false;
-  });
+      // --- Key fix for sticky camera ---
+      // Dispatch a fake mouseup event to the canvas to end any panning
+      const evt = new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window });
+      renderer.getContainer().dispatchEvent(evt);
+    }
+  }
+
+  renderer.getContainer().addEventListener("mousemove", handleMove, { passive: false });
+  renderer.getContainer().addEventListener("mouseup", handleUp, { passive: false });
+  renderer.getContainer().addEventListener("mouseleave", handleUp, { passive: false });
 }
 
-function setupFilters(graph) {
+function setupFilters(graph, renderer) {
   const $ = (id) => document.getElementById(id);
-  const fProjects = $("f-projects");
-  const fLibs = $("f-libs");
-  const fBoms = $("f-boms");
-  const fParent = $("f-parent");
-  function nodeMatchesFilters(attrs) {
-    const t = attrs.meta?.nodeType;
-    if (!t) return true;
-    return (
-      (t === "project" && fProjects.checked) ||
-      (t === "lib"     && fLibs.checked)     ||
-      (t === "bom"     && fBoms.checked)     ||
-      (t === "parent"  && fParent.checked)
-    );
-  }
-  function edgeMatchesFilters(attrs, s, t) {
-    const et = attrs.meta?.edgeType;
-    let allowedByType = true;
-    if (et) {
-      allowedByType =
-        (et === "project-link" && fProjects.checked) ||
-        (et === "lib"          && fLibs.checked)     ||
-        (et === "bom-import"   && fBoms.checked)     ||
-        (et === "parent"       && fParent.checked);
-    }
-    const srcHidden = graph.getNodeAttribute(s, "hidden") === true;
-    const tgtHidden = graph.getNodeAttribute(t, "hidden") === true;
-    return allowedByType && !srcHidden && !tgtHidden;
-  }
-  function applyFilters() {
-    graph.forEachNode((n, attrs) => {
-      graph.setNodeAttribute(n, "hidden", !nodeMatchesFilters(attrs));
+  const types = ["project", "lib", "bom", "parent"];
+
+  types.forEach(type => {
+    $(`f-${type}s`).addEventListener("change", () => {
+      state.filters[type] = $(`f-${type}s`).checked;
+      renderer.refresh();
     });
-    graph.forEachEdge((e, attrs, s, t) => {
-      graph.setEdgeAttribute(e, "hidden", !edgeMatchesFilters(attrs, s, t));
-    });
-  }
-  [fProjects, fLibs, fBoms, fParent].forEach(cb => cb.addEventListener("change", applyFilters));
-  applyFilters();
+  });
+
+  renderer.setSetting("nodeReducer", (node, data) => {
+    // Filter node
+    const type = data.meta?.nodeType;
+    if (!state.filters[type]) return { ...data, hidden: true };
+
+    // Hover logic (only if not dragging)
+    if (!state.dragging && state.hoveredNode && node !== state.hoveredNode && !state.hoveredNeighbors.has(node))
+      return { ...data, color: "#f2f2f2", label: "" };
+
+    return data;
+  });
+
+  renderer.setSetting("edgeReducer", (edge, data) => {
+    // Filter edge by type and endpoints
+    const meta = data.meta || {};
+    if (!state.filters[meta.edgeType?.replace(/-.*$/, "")]) return { ...data, hidden: true };
+    const s = graph.source(edge), t = graph.target(edge);
+    if (!state.filters[graph.getNodeAttribute(s, "meta")?.nodeType] || !state.filters[graph.getNodeAttribute(t, "meta")?.nodeType])
+      return { ...data, hidden: true };
+    // Hover logic (only if not dragging)
+    if (!state.dragging && state.hoveredNode && s !== state.hoveredNode && t !== state.hoveredNode)
+      return { ...data, hidden: true };
+    return data;
+  });
 }
 
 function setupLayouts(graph) {
