@@ -67,7 +67,8 @@ public class xmvn {
   }
 
   @CommandLine.Command(name = "xmvn", mixinStandardHelpOptions = true, version = "0.1", description = """
-      xmvn - extract Maven models and emit them in other formats.""", subcommands = { xmvn.ToGradle.class, xmvn.ToArangoGraph.class })
+      xmvn - extract Maven models and emit them in other formats.""", subcommands = { xmvn.ToGradle.class, xmvn.ToArangoGraph.class,
+      xmvn.ToGraph.class })
   static class XmvnRoot implements Runnable {
     @Override
     public void run() {
@@ -110,6 +111,155 @@ public class xmvn {
     public boolean debugRepositories = false;
   }
 
+  @CommandLine.Command(name = "2graph", mixinStandardHelpOptions = true, description = """
+      Generate Sigma.js visualization from Maven multi-module project.
+      Produces:
+      - graph-data.json : Graphology JSON with nodes and edges (unless --no-embed-data)
+      - graph.html      : HTML viewer using Sigma.js
+      """)
+  public static class ToGraph extends LoadPomOptions implements Callable<Integer> {
+    @Option(names = "--embed-data", negatable = true, description = "Embed JSON data directly in HTML (default: true)", defaultValue = "true")
+    private boolean embedData;
+
+    @Override
+    public Integer call() throws Exception {
+      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
+      Project rootPom = xmvn.PomLoader.loadRootPom(this);
+      generateGraphFiles(rootPom);
+      return 0;
+    }
+
+    private void generateGraphFiles(xmvn.Project rootPom) throws IOException {
+      Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
+        if (p.modules != null && p.modules.module != null) {
+          return p.modules.module.stream().map(m -> xmvn.PomLoader.loadPom(null, p, new File(p.pomFile.getParentFile(), m), p.context))
+              .filter(Objects::nonNull).toList();
+        }
+        return List.of();
+      });
+      List<Map<String, Object>> nodes = new ArrayList<>();
+      List<Map<String, Object>> edges = new ArrayList<>();
+      Set<String> nodeKeys = new HashSet<>();
+      Set<String> edgeKeys = new HashSet<>();
+
+      traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, nodes, edges, nodeKeys, edgeKeys));
+
+      // Graph JSON in Graphology import format
+      Map<String, Object> json = new LinkedHashMap<>();
+      json.put("attributes", Map.of("name", "Maven Graph"));
+      json.put("nodes", nodes);
+      json.put("edges", edges);
+
+      com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+      String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(json);
+
+      File jsonFile = new File(projectDir, "graph-data.json");
+      File htmlFile = new File(projectDir, "graph.html");
+
+      if (embedData) {
+        // Self-contained HTML with embedded JSON
+        StringBuilder sb = new StringBuilder();
+        sb.append("""
+            <!doctype html>
+            <html lang="en">
+              <head>
+                <meta charset="UTF-8" />
+                <title>Maven Graph</title>
+                <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
+                <script src="https://cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js"></script>
+              </head>
+              <body style="margin:0; background: lightgrey">
+                <div id="container" style="width: 100%; height: 100vh; background: white"></div>
+                <script>
+                  const graph = new graphology.Graph();
+                  graph.import(
+            """);
+        sb.append(jsonString);
+        sb.append("""
+                  );
+                  new Sigma(graph, document.getElementById("container"));
+                </script>
+              </body>
+            </html>
+            """);
+
+        try (var writer = new java.io.FileWriter(htmlFile)) {
+          writer.write(sb.toString());
+        }
+        log.info("Self-contained Sigma.js HTML written to {}", htmlFile.getAbsolutePath());
+      } else {
+        // Separate JSON + HTML
+        om.writerWithDefaultPrettyPrinter().writeValue(jsonFile, json);
+
+        String html = """
+            <!doctype html>
+            <html lang="en">
+              <head>
+                <meta charset="UTF-8" />
+                <title>Maven Graph</title>
+                <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
+                <script src="https://cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js"></script>
+              </head>
+              <body style="margin:0; background: lightgrey">
+                <div id="container" style="width: 100%; height: 100vh; background: white"></div>
+                <script>
+                  fetch("graph-data.json")
+                    .then(r => r.json())
+                    .then(data => {
+                      const graph = new graphology.Graph();
+                      graph.import(data);
+                      new Sigma(graph, document.getElementById("container"));
+                    });
+                </script>
+              </body>
+            </html>
+            """;
+
+        try (var writer = new java.io.FileWriter(htmlFile)) {
+          writer.write(html);
+        }
+        log.info("Graphology JSON written to {}", jsonFile.getAbsolutePath());
+        log.info("Sigma.js HTML viewer written to {}", htmlFile.getAbsolutePath());
+      }
+    }
+
+    private void emitProjectAndDeps(xmvn.Project project, List<Map<String, Object>> nodes, List<Map<String, Object>> edges, Set<String> nodeKeys,
+        Set<String> edgeKeys) {
+      String projKey = (project.groupId + "_" + project.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
+
+      addNode(nodes, nodeKeys, projKey, project.groupId + ":" + project.artifactId, "blue");
+
+      if (project.dependencies != null && project.dependencies.dependency != null) {
+        for (var dep : project.dependencies.dependency) {
+          String depKey = (dep.groupId + "_" + dep.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
+
+          addNode(nodes, nodeKeys, depKey, dep.groupId + ":" + dep.artifactId, "red");
+          addEdge(edges, edgeKeys, projKey + "_" + depKey, projKey, depKey);
+        }
+      }
+    }
+
+    private void addNode(List<Map<String, Object>> nodes, Set<String> nodeKeys, String key, String label, String color) {
+      if (nodeKeys.add(key)) {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("key", key);
+        node.put("attributes", Map.of("label", label, "x", Math.random() * 10, "y", Math.random() * 10, "size", 5, "color", color));
+        nodes.add(node);
+      }
+    }
+
+    private void addEdge(List<Map<String, Object>> edges, Set<String> edgeKeys, String key, String source, String target) {
+      if (edgeKeys.add(key)) {
+        Map<String, Object> edge = new LinkedHashMap<>();
+        edge.put("key", key);
+        edge.put("source", source);
+        edge.put("target", target);
+        edge.put("attributes", Map.of("size", 1, "color", "grey"));
+        edges.add(edge);
+      }
+    }
+  }
+
   @CommandLine.Command(name = "2arango", mixinStandardHelpOptions = true, description = """
       Generate ArangoDB graph from Maven multi-module project.
       """)
@@ -135,7 +285,7 @@ public class xmvn {
           //===========================================
           //GENERATED ROOT PASSWORD: ***
           //===========================================
-          //echo Connect to arangodb 
+          //echo Connect to arangodb
           //docker exec -it arangodb-instance arangosh
           //echo Create database xmvn
           //use xmvn
@@ -143,17 +293,13 @@ public class xmvn {
 
       Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
         if (p.modules != null && p.modules.module != null) {
-          return p.modules.module.stream()
-              .map(m -> xmvn.PomLoader.loadPom(null, p,
-                  new File(p.pomFile.getParentFile(), m), p.context))
-              .filter(Objects::nonNull)
-              .toList();
+          return p.modules.module.stream().map(m -> xmvn.PomLoader.loadPom(null, p, new File(p.pomFile.getParentFile(), m), p.context))
+              .filter(Objects::nonNull).toList();
         }
         return List.of();
       });
 
-      traverser.depthFirstPreOrder(rootPom)
-               .forEach(p -> emitProjectAndDeps(p, projectDocs, dependencyDocs, edgeDocs));
+      traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, projectDocs, dependencyDocs, edgeDocs));
 
       if (!projectDocs.isEmpty()) {
         script.append("""
@@ -183,42 +329,25 @@ public class xmvn {
       System.out.println(script.toString());
     }
 
-    private void emitProjectAndDeps(xmvn.Project project,
-                                    List<String> projects,
-                                    List<String> dependencies,
-                                    List<String> edges) {
-      String projKey = (project.groupId + "_" + project.artifactId)
-          .replaceAll("[^a-zA-Z0-9_]", "_");
+    private void emitProjectAndDeps(xmvn.Project project, List<String> projects, List<String> dependencies, List<String> edges) {
+      String projKey = (project.groupId + "_" + project.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
 
       projects.add("""
           { _key: "%s", groupId: "%s", artifactId: "%s", version: "%s", packaging: "%s" }
-          """.formatted(
-              projKey,
-              project.groupId,
-              project.artifactId,
-              project.version != null ? project.version : "unknown",
-              project.packaging != null ? project.packaging : "jar"));
+          """.formatted(projKey, project.groupId, project.artifactId, project.version != null ? project.version : "unknown",
+          project.packaging != null ? project.packaging : "jar"));
 
       if (project.dependencies != null && project.dependencies.dependency != null) {
         for (var dep : project.dependencies.dependency) {
-          String depKey = (dep.groupId + "_" + dep.artifactId)
-              .replaceAll("[^a-zA-Z0-9_]", "_");
+          String depKey = (dep.groupId + "_" + dep.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
 
           dependencies.add("""
               { _key: "%s", groupId: "%s", artifactId: "%s", version: "%s", packaging: "%s" }
-              """.formatted(
-                  depKey,
-                  dep.groupId,
-                  dep.artifactId,
-                  dep.version != null ? dep.version : "unknown",
-                  dep.type != null ? dep.type : "jar"));
+              """.formatted(depKey, dep.groupId, dep.artifactId, dep.version != null ? dep.version : "unknown", dep.type != null ? dep.type : "jar"));
 
           edges.add("""
               { _from: "projects/%s", _to: "dependencies/%s", scope: "%s" }
-              """.formatted(
-                  projKey,
-                  depKey,
-                  dep.scope != null ? dep.scope : "compile"));
+              """.formatted(projKey, depKey, dep.scope != null ? dep.scope : "compile"));
         }
       }
     }
@@ -2574,21 +2703,21 @@ public class xmvn {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-                  * .xsd") } outputDir =
-                  * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-                  * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-                  * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-                  * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-                  * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-                  * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-                  * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-                  * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-                  * Ant classpath for the XJC task ant.withGroovyBuilder {
-                  * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-                  * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-                  * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-                  * "generated-sources/jaxb"))
-                  */
+                       * .xsd") } outputDir =
+                       * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+                       * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+                       * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+                       * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+                       * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+                       * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+                       * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+                       * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+                       * Ant classpath for the XJC task ant.withGroovyBuilder {
+                       * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+                       * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+                       * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+                       * "generated-sources/jaxb"))
+                       */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
