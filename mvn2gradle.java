@@ -138,8 +138,7 @@ public class mvn2gradle {
 
     public boolean useApiDependencies() {
       if (useApiDependencies == useImplementationDependencies) {
-        throw new IllegalArgumentException(
-            "Cannot use both --use-api-dependencies and --use-implementation-dependencies at the same time.");
+        throw new IllegalArgumentException("Cannot use both --use-api-dependencies and --use-implementation-dependencies at the same time.");
       }
       return useApiDependencies && !useImplementationDependencies;
     }
@@ -242,8 +241,7 @@ public class mvn2gradle {
     }
 
     public String idAndPath() {
-      return "%s:%s:%s@[%s]".formatted(groupId, artifactId, version != null ? version : "SNAPSHOT",
-          pomFile.getAbsolutePath());
+      return "%s:%s:%s@[%s]".formatted(groupId, artifactId, version != null ? version : "SNAPSHOT", pomFile.getAbsolutePath());
     }
 
     public Project effectivePom() {
@@ -263,8 +261,7 @@ public class mvn2gradle {
         return null;
       }
       for (EffectivePom epPom : effectivePom.project) {
-        if (pom.groupId != null && pom.groupId.equals(epPom.groupId) && pom.artifactId != null
-            && pom.artifactId.equals(epPom.artifactId)) {
+        if (pom.groupId != null && pom.groupId.equals(epPom.groupId) && pom.artifactId != null && pom.artifactId.equals(epPom.artifactId)) {
           epPom.pomFile = pom.pomFile;
           return epPom;
         }
@@ -304,8 +301,7 @@ public class mvn2gradle {
 
     @Override
     public String toString() {
-      return "Parent[groupId='%s', artifactId='%s', version='%s', relativePath='%s']".formatted(groupId, artifactId,
-          version, relativePath);
+      return "Parent[groupId='%s', artifactId='%s', version='%s', relativePath='%s']".formatted(groupId, artifactId, version, relativePath);
     }
 
     public String id() {
@@ -499,8 +495,7 @@ public class mvn2gradle {
 
     @Override
     public String toString() {
-      return "%s:%s:%s:%s:%s%s:%s:%s']".formatted(groupId, artifactId, version, scope, type, classifier, optional,
-          exclusions);
+      return "%s:%s:%s:%s:%s%s:%s:%s']".formatted(groupId, artifactId, version, scope, type, classifier, optional, exclusions);
     }
 
     /** Ga with prefix and suffix to match start and end. */
@@ -981,52 +976,49 @@ public class mvn2gradle {
     }
 
     static {
-      register(new PluginConvertor("javacc", "org.codehaus.mojo:javacc-maven-plugin:javacc", "org.javacc.javacc",
-          "4.0.1", (ctx, pom) -> """
-              tasks {
-                  compileJavacc {
-                      inputDirectory = file("src/main/javacc")
-                      outputDirectory = file(layout.buildDirectory.dir("generated/javacc"))
-                      arguments = mapOf("grammar_encoding" to "UTF-8", "static" to "false")
-                  }
+      register(new PluginConvertor("javacc", "org.codehaus.mojo:javacc-maven-plugin:javacc", "org.javacc.javacc", "4.0.1", (ctx, pom) -> """
+          tasks {
+              compileJavacc {
+                  inputDirectory = file("src/main/javacc")
+                  outputDirectory = file(layout.buildDirectory.dir("generated/javacc"))
+                  arguments = mapOf("grammar_encoding" to "UTF-8", "static" to "false")
               }
-              sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/javacc"))
-              """));
-      register(new PluginConvertor("checkstyle", "org.apache.maven.plugins:maven-checkstyle-plugin:default",
-          "checkstyle", null, (ctx, pom) -> {
-            if (ctx.configuration == null || ctx.configuration.skip()) {
-              return "//checkstyle skip";
+          }
+          sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/javacc"))
+          """));
+      register(new PluginConvertor("checkstyle", "org.apache.maven.plugins:maven-checkstyle-plugin:default", "checkstyle", null, (ctx, pom) -> {
+        if (ctx.configuration == null || ctx.configuration.skip()) {
+          return "//checkstyle skip";
+        }
+        java.nio.file.Path configPath = java.nio.file.Paths.get(ctx.configuration.configLocation);
+        if (!java.nio.file.Files.exists(configPath)) {
+          return "//checkstyle config file not found: " + ctx.configuration.configLocation;
+        }
+        return """
+            checkstyle {
+                isIgnoreFailures = %s // Equivalent to <skip>true</skip>
+                configFile = file("%s")
             }
-            java.nio.file.Path configPath = java.nio.file.Paths.get(ctx.configuration.configLocation);
-            if (!java.nio.file.Files.exists(configPath)) {
-              return "//checkstyle config file not found: " + ctx.configuration.configLocation;
-            }
-            return """
-                checkstyle {
-                    isIgnoreFailures = %s // Equivalent to <skip>true</skip>
-                    configFile = file("%s")
-                }
-                """.formatted(ctx.configuration.skip() ? "true" : "false", ctx.configuration.configLocation);
-          }) {
+            """.formatted(ctx.configuration.skip() ? "true" : "false", ctx.configuration.configLocation);
+      }) {
         @Override
         public boolean isEnabled(PluginExecutionContext ctx, Project pom) {
           return ctx.configuration == null || !ctx.configuration.skip();
         }
       });
       // ...and so on
-      register(new PluginConvertor("testJars", "org.apache.maven.plugins:maven-jar-plugin:test-jar", null, null,
-          (ctx, pom) -> """
-              tasks.register<Jar>("testJar") {
-                  archiveClassifier.set("tests")
-                  from(sourceSets.test.get().output)
-              }
-              configurations {
-                  create("testArtifacts")
-              }
-              artifacts {
-                  add("testArtifacts", tasks.named("testJar"))
-              }
-              """));
+      register(new PluginConvertor("testJars", "org.apache.maven.plugins:maven-jar-plugin:test-jar", null, null, (ctx, pom) -> """
+          tasks.register<Jar>("testJar") {
+              archiveClassifier.set("tests")
+              from(sourceSets.test.get().output)
+          }
+          configurations {
+              create("testArtifacts")
+          }
+          artifacts {
+              add("testArtifacts", tasks.named("testJar"))
+          }
+          """));
       // register(
       // new PluginConvertor("org.codehaus.mojo:build-helper-maven-plugin:add-source",
       // null, null, (ctx, pom) -> """
@@ -1101,8 +1093,7 @@ public class mvn2gradle {
 
         // check xsd files by walking the directory via Path api
         try {
-          long count = Files.walk(schemaDirPath)
-              .filter(FileSystems.getDefault().getPathMatcher("glob:**/*.xsd")::matches).count();
+          long count = Files.walk(schemaDirPath).filter(FileSystems.getDefault().getPathMatcher("glob:**/*.xsd")::matches).count();
           if (count == 0) {
             return "//jaxb plugin disabled - no xsd files found in " + schemaDirPath;
           }
@@ -1136,8 +1127,7 @@ public class mvn2gradle {
       Project rootPom = loadPom(null, null, context.cli.projectDir, context);
 
       // At top-level in sync
-      GradleModules gradleModules = collectModuleArtifactIdToGradlePath(rootPom, cli.projectDir, cli.ignoreUnknown,
-          effectivePom);
+      GradleModules gradleModules = collectModuleArtifactIdToGradlePath(rootPom, cli.projectDir, cli.ignoreUnknown, effectivePom);
 
       // Generate settings.gradle.kts for root project and modules
       String settingsGradle = generateSettingsGradleKts(rootPom);
@@ -1338,8 +1328,8 @@ public class mvn2gradle {
     }
 
     // TODO refactor to use pom structure
-    private static void generateForModulesRecursively(Path baseDir, Project pom, Cli cli, Projects effectivePom,
-        GradleModules gradleModules, boolean isRoot) {
+    private static void generateForModulesRecursively(Path baseDir, Project pom, Cli cli, Projects effectivePom, GradleModules gradleModules,
+        boolean isRoot) {
       log.info("Generating build.gradle.kts for {}", pom.artifactId);
 
       String gradleKts = generate(pom, effectivePom, gradleModules, cli);
@@ -1391,13 +1381,11 @@ public class mvn2gradle {
 
     private static final Map<String, Project> pomCache = new HashMap<>();
 
-    public static Project loadPom(Project root, Project parentDirPom, File projectDirOrPomFile,
-        ProjectContext context) {
+    public static Project loadPom(Project root, Project parentDirPom, File projectDirOrPomFile, ProjectContext context) {
       boolean ignoreUnknown = context.cli.ignoreUnknown;
       Projects effectivePom = context.effectivePom;
       try {
-        File pomFile = projectDirOrPomFile.isDirectory() ? projectDirOrPomFile.toPath().resolve("pom.xml").toFile()
-            : projectDirOrPomFile;
+        File pomFile = projectDirOrPomFile.isDirectory() ? projectDirOrPomFile.toPath().resolve("pom.xml").toFile() : projectDirOrPomFile;
 
         String key = pomFile.getCanonicalPath();
         if (pomCache.containsKey(key)) {
@@ -1429,8 +1417,7 @@ public class mvn2gradle {
           Gav parentGav = pom.parentGav;
           if (parentGav != null || parent != null) {
             if (parentGav == null || parent == null) {
-              throw new RuntimeException("Parent POM mismatch: one is null while the other is not. Parent: " + parentGav
-                  + ", ParentPom: " + parent);
+              throw new RuntimeException("Parent POM mismatch: one is null while the other is not. Parent: " + parentGav + ", ParentPom: " + parent);
             }
             if (!parentGav.groupId.equals(parent.groupId) || !parentGav.artifactId.equals(parent.artifactId)) {
               // TODO remove this - needed for debug
@@ -1449,8 +1436,7 @@ public class mvn2gradle {
             // without artifactId
             // }
             if (!parentGav.artifactId.equals(parent.artifactId)) {
-              throw new RuntimeException(
-                  "Parent POM artifactId mismatch: " + parentGav.artifactId + " vs " + parent.artifactId);
+              throw new RuntimeException("Parent POM artifactId mismatch: " + parentGav.artifactId + " vs " + parent.artifactId);
             }
           }
         }
@@ -1462,8 +1448,7 @@ public class mvn2gradle {
 
     private static Project findParentPomFileNoCheck(Project pom, boolean ignoreUnknown) {
       File projectDir = pom.pomFile.getParentFile();
-      String relPath = (pom.parentGav.relativePath == null || pom.parentGav.relativePath.isBlank()) ? "../pom.xml"
-          : pom.parentGav.relativePath;
+      String relPath = (pom.parentGav.relativePath == null || pom.parentGav.relativePath.isBlank()) ? "../pom.xml" : pom.parentGav.relativePath;
       relPath = relPath.endsWith("/pom.xml") ? relPath : relPath + "/pom.xml";
       // File parentPomFile = findParentPomFile(pom, pomFile.getParentFile());
       // if (parentPomFile != null && parentPomFile.exists()) {
@@ -1497,14 +1482,13 @@ public class mvn2gradle {
                 log.info("In {} > Parent POM {} has unresolved version, using effective POM version: {}", pom.ga(),
                     parentPom.effectivePomOrThis().id(), pom.parentGav.id());
               } else {
-                log.warn("In {} > Different versions found between parent POM {} and {}", pom.ga(),
-                    parentPom.effectivePomOrThis().id(), pom.parentGav.id());
+                log.warn("In {} > Different versions found between parent POM {} and {}", pom.ga(), parentPom.effectivePomOrThis().id(),
+                    pom.parentGav.id());
               }
             }
             return parentPom;
           } else {
-            log.info(
-                "In {} > Inheritable declared parent POM [{}] differs from supra-module directory parent [{}] ... searching in .m2 repo next.",
+            log.info("In {} > Inheritable declared parent POM [{}] differs from supra-module directory parent [{}] ... searching in .m2 repo next.",
                 pom.ga(), pom.parentGav.ga(), parentPom.effectivePomOrThis().ga());
           }
         }
@@ -1514,13 +1498,11 @@ public class mvn2gradle {
         String artifactId = pom.parentGav.artifactId;
         String version = pom.parentGav.version;
         File m2 = new File(System.getProperty("user.home"), ".m2/repository");
-        File repoPom = new File(m2,
-            String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
+        File repoPom = new File(m2, String.format("%s/%s/%s/%s-%s.pom", groupPath, artifactId, version, artifactId, version));
         Project parentPomFromRepo = loadPom(pom.context.root, null, repoPom, pom.context);
         if (parentPomFromRepo != null)
           return parentPomFromRepo;
-        throw new RuntimeException(
-            "Parent POM not found: tried local [" + candidateKey + "] and Maven repo [" + repoPom + "]");
+        throw new RuntimeException("Parent POM not found: tried local [" + candidateKey + "] and Maven repo [" + repoPom + "]");
       } catch (IOException e) {
         throw new RuntimeException("Failed to resolve parent POM path for " + pom.parentGav.artifactId, e);
       }
@@ -1529,8 +1511,7 @@ public class mvn2gradle {
     private static Project parsePom(File pomFile, boolean ignoreUnknown) {
       try {
         XmlMapper xmlMapper = new XmlMapper();
-        xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
-            !ignoreUnknown);
+        xmlMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, !ignoreUnknown);
         Project res = xmlMapper.readValue(pomFile, Project.class);
         res.pomFile = pomFile;
         if (res.groupId == null && res.parentGav != null && res.parentGav.groupId != null) {
@@ -1575,100 +1556,98 @@ public class mvn2gradle {
             %s
           }
           """.formatted(prefixLines(generateExcludesBlock(excludes), "", "  ")) : "";
-      return String.format(
-          """
-              %s
-              %s
+      return String.format("""
+          %s
+          %s
 
-              plugins {
-                  id("java")
-                  id("java-library") //allows api dependencies
-                  id("eclipse")
-                  id("com.vanniktech.dependency.graph.generator") version "0.8.0"
-                  id ("project-report")
-              %s
-              }
+          plugins {
+              id("java")
+              id("java-library") //allows api dependencies
+              id("eclipse")
+              id("com.vanniktech.dependency.graph.generator") version "0.8.0"
+              id ("project-report")
+          %s
+          }
 
-              java {
-                  sourceCompatibility = JavaVersion.toVersion("%s")
-                  targetCompatibility = JavaVersion.toVersion("%s")
-              }
+          java {
+              sourceCompatibility = JavaVersion.toVersion("%s")
+              targetCompatibility = JavaVersion.toVersion("%s")
+          }
 
-              group = "%s"
-              version = "%s"
-              layout.buildDirectory.set(file("$projectDir/target/gradle"))
+          group = "%s"
+          version = "%s"
+          layout.buildDirectory.set(file("$projectDir/target/gradle"))
 
-              %s
+          %s
 
-              tasks.withType<JavaCompile> {
-                  //-Xlint:unchecked can be configured with -P-GCompiler-Xlint:unchecked -P-GCompiler-nowarn
-                  project.properties.keys
-                      .filter { it.toString().startsWith("-GCompiler") }
-                      .forEach { key ->
-                          val arg = key.toString().removePrefix("-GCompiler")
-                          logger.info("Adding compiler arg: $arg")
-                          options.compilerArgs.add(arg)
-                      }
-                  options.encoding = "UTF-8"
-                  destinationDirectory.set(
-                      layout.buildDirectory.dir(
-                          "classes/java/" + if (name.contains("Test", ignoreCase = true)) "test" else "main"
-                      )
+          tasks.withType<JavaCompile> {
+              //-Xlint:unchecked can be configured with -P-GCompiler-Xlint:unchecked -P-GCompiler-nowarn
+              project.properties.keys
+                  .filter { it.toString().startsWith("-GCompiler") }
+                  .forEach { key ->
+                      val arg = key.toString().removePrefix("-GCompiler")
+                      logger.info("Adding compiler arg: $arg")
+                      options.compilerArgs.add(arg)
+                  }
+              options.encoding = "UTF-8"
+              destinationDirectory.set(
+                  layout.buildDirectory.dir(
+                      "classes/java/" + if (name.contains("Test", ignoreCase = true)) "test" else "main"
                   )
-              }
-              eclipse {
-                  classpath {
-                      defaultOutputDir = layout.buildDirectory.dir("eclipse/classes/java/main").get().asFile
-                      file {
-                          whenMerged {
-                              val entries = (this as org.gradle.plugins.ide.eclipse.model.Classpath).entries
-                              entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.ProjectDependency>()
-                                  .forEach { it.entryAttributes["without_test_code"] = "false" }
-                              entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.SourceFolder>()
-                                  .filter { it.path.startsWith("/") }
-                                  .forEach { it.entryAttributes["without_test_code"] = "false" }
-                          }
-                          withXml {
-                            val node = asNode()
-                            node.appendNode("classpathentry", mapOf(
-                                "kind" to "src",
-                                "path" to "target/gradle/generated/javacc"
-                            ))
-                         }
+              )
+          }
+          eclipse {
+              classpath {
+                  defaultOutputDir = layout.buildDirectory.dir("eclipse/classes/java/main").get().asFile
+                  file {
+                      whenMerged {
+                          val entries = (this as org.gradle.plugins.ide.eclipse.model.Classpath).entries
+                          entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.ProjectDependency>()
+                              .forEach { it.entryAttributes["without_test_code"] = "false" }
+                          entries.filterIsInstance<org.gradle.plugins.ide.eclipse.model.SourceFolder>()
+                              .filter { it.path.startsWith("/") }
+                              .forEach { it.entryAttributes["without_test_code"] = "false" }
                       }
+                      withXml {
+                        val node = asNode()
+                        node.appendNode("classpathentry", mapOf(
+                            "kind" to "src",
+                            "path" to "target/gradle/generated/javacc"
+                        ))
+                     }
                   }
               }
+          }
 
-              dependencies {
-              %s
-              }
+          dependencies {
+          %s
+          }
 
-              //Force declared dependencies to be used. Gradle would use the maximum version and that is not compatible with maven
-              val forcedDeps = configurations
-                .flatMap { it.dependencies }
-                .filter { it.version != null }
-                .map { "${it.group}:${it.name}:${it.version}" }
-                .distinct()
-              configurations.all {
-                resolutionStrategy {
-                  force(forcedDeps)
-                }
-              }
+          //Force declared dependencies to be used. Gradle would use the maximum version and that is not compatible with maven
+          val forcedDeps = configurations
+            .flatMap { it.dependencies }
+            .filter { it.version != null }
+            .map { "${it.group}:${it.name}:${it.version}" }
+            .distinct()
+          configurations.all {
+            resolutionStrategy {
+              force(forcedDeps)
+            }
+          }
 
-              %s
-              %s
-              """,
-          gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version, "", // do
-                                                                                                                    // not
-                                                                                                                    // render
-                                                                                                                    // local
-                                                                                                                    // repositories
-                                                                                                                    // -
-                                                                                                                    // are
-                                                                                                                    // configured
-                                                                                                                    // in
-                                                                                                                    // settings
-                                                                                                                    // repositories("")
+          %s
+          %s
+          """, gradlePropertyBlock, depResult.variableBlock, pluginsBlock, javaVersion, javaVersion, group, version, "", // do
+          // not
+          // render
+          // local
+          // repositories
+          // -
+          // are
+          // configured
+          // in
+          // settings
+          // repositories("")
           depResult.dependencyBlock, pluginConfigSnippets, excludesBlock);
     }
 
@@ -1710,8 +1689,7 @@ public class mvn2gradle {
               })
               : StreamEx.empty())
           // DependencyManagement
-          .append(includeDependencyManagement && pom.dependencyManagement != null
-              && pom.dependencyManagement.dependencies != null
+          .append(includeDependencyManagement && pom.dependencyManagement != null && pom.dependencyManagement.dependencies != null
               && pom.dependencyManagement.dependencies.dependency != null
                   ? StreamEx.of(pom.dependencyManagement.dependencies.dependency).flatMap(d -> {
                     if (d.version == null)
@@ -1725,30 +1703,26 @@ public class mvn2gradle {
                   : StreamEx.empty())
           // Profile Dependencies
           .append(includeProfileDependencies && pom.profiles != null && pom.profiles.profile != null
-              ? StreamEx.of(pom.profiles.profile)
-                  .flatMap(profile -> profile.dependencies != null && profile.dependencies.dependency != null
-                      ? StreamEx.of(profile.dependencies.dependency).flatMap(d -> {
-                        if (d.version == null)
-                          return StreamEx.empty();
-                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}")
-                            .matcher(d.version);
-                        List<String> keys = new ArrayList<>();
-                        while (m.find())
-                          keys.add(m.group(1));
-                        return StreamEx.of(keys);
-                      })
-                      : StreamEx.empty())
+              ? StreamEx.of(pom.profiles.profile).flatMap(profile -> profile.dependencies != null && profile.dependencies.dependency != null
+                  ? StreamEx.of(profile.dependencies.dependency).flatMap(d -> {
+                    if (d.version == null)
+                      return StreamEx.empty();
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}").matcher(d.version);
+                    List<String> keys = new ArrayList<>();
+                    while (m.find())
+                      keys.add(m.group(1));
+                    return StreamEx.of(keys);
+                  })
+                  : StreamEx.empty())
               : StreamEx.empty())
           .distinct().toSet();
 
-      Map<String, String> allProps = includeOwnProperties && pom.properties != null && pom.properties.any != null
-          ? pom.properties.any
+      Map<String, String> allProps = includeOwnProperties && pom.properties != null && pom.properties.any != null ? pom.properties.any
           : java.util.Collections.emptyMap();
 
       if (includeParentProperties && pom.parentPom != null) {
         allProps = new java.util.LinkedHashMap<>(allProps);
-        Map<String, String> parentProps = pom.parentPom.properties != null && pom.parentPom.properties.any != null
-            ? pom.parentPom.properties.any
+        Map<String, String> parentProps = pom.parentPom.properties != null && pom.parentPom.properties.any != null ? pom.parentPom.properties.any
             : java.util.Collections.emptyMap();
         allProps.putAll(parentProps); // child overrides parent
       }
@@ -1762,9 +1736,8 @@ public class mvn2gradle {
           log.warn("Referenced property '%s' in POM %s has a value that starts with '$': '%s'. "
               + "This is not supported in Gradle Kotlin DSL.".formatted(key, pom.id(), value));
           // If the value is a property reference, we can skip it
-          throw new RuntimeException(
-              "Referenced property '%s' in POM %s has a value that is another property reference: '%s'. "
-                  + "This is not supported in Gradle Kotlin DSL.".formatted(key, pom.id(), value));
+          throw new RuntimeException("Referenced property '%s' in POM %s has a value that is another property reference: '%s'. "
+              + "This is not supported in Gradle Kotlin DSL.".formatted(key, pom.id(), value));
         }
         String safeKey = toKotlinVar(key);
         return "val %s = \"%s\"".formatted(safeKey, value);
@@ -1784,8 +1757,7 @@ public class mvn2gradle {
 
     private static String buildPluginsBlockKts(Map<String, String> pluginsMap) {
       String pluginsEntries = StreamEx.of(pluginsMap.entrySet())
-          .map(e -> e.getValue() == null ? "    id(\"" + e.getKey() + "\")"
-              : "    id(\"" + e.getKey() + "\") version \"" + e.getValue() + "\"")
+          .map(e -> e.getValue() == null ? "    id(\"" + e.getKey() + "\")" : "    id(\"" + e.getKey() + "\") version \"" + e.getValue() + "\"")
           .joining("\n");
       return pluginsEntries;
     }
@@ -1820,23 +1792,20 @@ public class mvn2gradle {
       public void addGradleModule(String ga, String gradlePath) {
         if (modules.containsKey(ga)) {
           log.warn("Gradle module {} already exists for {}. Overwriting with {}", ga, modules.get(ga), gradlePath);
-          throw new RuntimeException(
-              "Gradle module " + ga + " already exists for " + modules.get(ga) + ". Overwriting with " + gradlePath);
+          throw new RuntimeException("Gradle module " + ga + " already exists for " + modules.get(ga) + ". Overwriting with " + gradlePath);
         }
         modules.put(ga, gradlePath);
       }
     }
 
-    private static DependencyEmitResult emitDeps(Project pom, Projects effectivePom, GradleModules gradleModules,
-        Cli cli) {
+    private static DependencyEmitResult emitDeps(Project pom, Projects effectivePom, GradleModules gradleModules, Cli cli) {
       pom = pom.effectivePomOrThis();
 
       if (pom.dependencies == null || pom.dependencies.dependency == null) {
         return new DependencyEmitResult("", "", false);
       }
       pom.dependencies.dependency.sort(
-          java.util.Comparator.comparing((Dependency d) -> toGradleConf(cli, d, d.scope, cli.useApiDependencies()))
-              .thenComparing(d -> d.gaFull()));
+          java.util.Comparator.comparing((Dependency d) -> toGradleConf(cli, d, d.scope, cli.useApiDependencies())).thenComparing(d -> d.gaFull()));
 
       StringBuilder varDecls = new StringBuilder();
       StringBuilder deps = new StringBuilder();
@@ -1860,11 +1829,9 @@ public class mvn2gradle {
           // Handle test-jar module dependency
           if ("test".equals(conf) || "testImplementation".equals(conf)) {
             if (isTestJar) {
-              deps.append(String.format(
-                  "    testImplementation(project(path = \":%s\", configuration = \"testArtifacts\"))\n", gradlePath));
-              if(GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION.equals(conf)) {
-                deps.append(String.format(
-                    "    compileOnly(project(path = \":%s\", configuration = \"testArtifacts\"))\n", gradlePath));
+              deps.append(String.format("    testImplementation(project(path = \":%s\", configuration = \"testArtifacts\"))\n", gradlePath));
+              if (GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION.equals(conf)) {
+                deps.append(String.format("    compileOnly(project(path = \":%s\", configuration = \"testArtifacts\"))\n", gradlePath));
               }
               continue;
             }
@@ -1879,8 +1846,7 @@ public class mvn2gradle {
         // org.projectlombok:lombok-maven-plugin:jar:1.18.6.0:provided
         if ("org.projectlombok".equals(resolvedGroupId)) {
           if (!"lombok".equals(resolvedArtifactId)) {
-            log.warn("Strange lombok dependency {} in {}. Should have lombok artifactId. Check it manually.", dep,
-                pom.idAndPath());
+            log.warn("Strange lombok dependency {} in {}. Should have lombok artifactId. Check it manually.", dep, pom.idAndPath());
             if ("lombok-maven-plugin".equals(resolvedArtifactId)) {
               version = "1.18.22";
             }
@@ -1898,8 +1864,7 @@ public class mvn2gradle {
           // Optionally ensure plugin registration (not shown here)
           continue;
         }
-        if (handleAnnotationProcessorDependency(dep, resolvedGroupId, resolvedArtifactId, version, pom, effectivePom,
-            deps)) {
+        if (handleAnnotationProcessorDependency(dep, resolvedGroupId, resolvedArtifactId, version, pom, effectivePom, deps)) {
           continue;
         }
         // -----------------------------
@@ -1907,18 +1872,16 @@ public class mvn2gradle {
         // 1. Detect version
         String resolvedVersion = resolveVersion(dep, pom, cli.useEffectivePom, effectivePom);
         String extractedVersion = extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom);
-        String finalVersion = replaceMavenPropsWithKotlinVars(
-            resolvedVersion != null && !resolvedVersion.isBlank() ? resolvedVersion
-                : (extractedVersion != null && !extractedVersion.isBlank() ? extractedVersion : "unknown"));
+        String finalVersion = replaceMavenPropsWithKotlinVars(resolvedVersion != null && !resolvedVersion.isBlank() ? resolvedVersion
+            : (extractedVersion != null && !extractedVersion.isBlank() ? extractedVersion : "unknown"));
 
-        if (finalVersion.equals("unknown") || finalVersion.startsWith("$")
-            || (finalVersion.startsWith("${") && finalVersion.endsWith("}"))) {
+        if (finalVersion.equals("unknown") || finalVersion.startsWith("$") || (finalVersion.startsWith("${") && finalVersion.endsWith("}"))) {
           if (cli.ignoreUnknownVersions) {
             log.warn("Dependency {}:{} has unknown version, skipping", resolvedGroupId, resolvedArtifactId);
             continue;
           }
-          throw new RuntimeException("Failed to resolve version for dependency: %s:%s:%s on %s"
-              .formatted(resolvedGroupId, resolvedArtifactId, finalVersion, pom.idAndPath()));
+          throw new RuntimeException("Failed to resolve version for dependency: %s:%s:%s on %s".formatted(resolvedGroupId, resolvedArtifactId,
+              finalVersion, pom.idAndPath()));
         }
 
         String versionExpr;
@@ -1940,8 +1903,7 @@ public class mvn2gradle {
         if (dep.exclusions != null && dep.exclusions.exclusion != null && !dep.exclusions.exclusion.isEmpty()) {
           deps.append(String.format("    %s(\"%s\") {\n", conf, depCoordinate));
           for (Exclusion excl : dep.exclusions.exclusion) {
-            deps.append(
-                String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
+            deps.append(String.format("        exclude(group = \"%s\", module = \"%s\")\n", excl.groupId, excl.artifactId));
           }
           deps.append("    }\n");
         } else {
@@ -1952,8 +1914,8 @@ public class mvn2gradle {
       return new DependencyEmitResult(varDecls.toString(), deps.toString(), hasLombok);
     }
 
-    private static boolean handleAnnotationProcessorDependency(Dependency dep, String resolvedGroupId,
-        String resolvedArtifactId, String version, Project pom, Projects effectivePom, StringBuilder deps) {
+    private static boolean handleAnnotationProcessorDependency(Dependency dep, String resolvedGroupId, String resolvedArtifactId, String version,
+        Project pom, Projects effectivePom, StringBuilder deps) {
 
       // Example known processors map or set
       Map<String, String> annotationProcessors = Map.ofEntries(Map.entry("org.projectlombok:lombok", "lombok"), //
@@ -1973,8 +1935,7 @@ public class mvn2gradle {
         return false;
       }
 
-      String depVersion = (version == null || version.isBlank())
-          ? extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom)
+      String depVersion = (version == null || version.isBlank()) ? extractVersionFromProjects(resolvedGroupId, resolvedArtifactId, effectivePom)
           : version;
 
       if (depVersion == null || depVersion.isBlank())
@@ -1989,25 +1950,22 @@ public class mvn2gradle {
     }
 
     private static String createVersionPropertyName(Dependency dep, String resolvedGroupId, String resolvedArtifactId) {
-      String scopePart = (dep.scope == null || dep.scope.isBlank()) ? ""
-          : "_" + dep.scope.replaceAll("[^a-zA-Z0-9]", "_");
+      String scopePart = (dep.scope == null || dep.scope.isBlank()) ? "" : "_" + dep.scope.replaceAll("[^a-zA-Z0-9]", "_");
       String typePart = (dep.type == null || dep.type.isBlank()) ? "" : "_" + dep.type.replaceAll("[^a-zA-Z0-9]", "_");
-      String classifierPart = (dep.classifier == null || dep.classifier.isBlank()) ? ""
-          : "_" + dep.classifier.replaceAll("[^a-zA-Z0-9]", "_");
-      String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_"
-          + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart + typePart + classifierPart;
+      String classifierPart = (dep.classifier == null || dep.classifier.isBlank()) ? "" : "_" + dep.classifier.replaceAll("[^a-zA-Z0-9]", "_");
+      String varName = "ver_" + resolvedGroupId.replaceAll("[^a-zA-Z0-9]", "_") + "_" + resolvedArtifactId.replaceAll("[^a-zA-Z0-9]", "_") + scopePart
+          + typePart + classifierPart;
       return varName;
     }
 
-    private static GradleModules collectModuleArtifactIdToGradlePath(Project rootPom, File rootDir,
-        boolean ignoreUnknown, Projects effectivePom) {
+    private static GradleModules collectModuleArtifactIdToGradlePath(Project rootPom, File rootDir, boolean ignoreUnknown, Projects effectivePom) {
       GradleModules gradleModules = new GradleModules();
       collectModulesRecursivelyWithPaths(rootPom, rootPom, rootDir, "", gradleModules);
       return gradleModules;
     }
 
-    private static void collectModulesRecursivelyWithPaths(Project root, Project pom, File baseDir,
-        String parentGradlePath, GradleModules gradleModules) {
+    private static void collectModulesRecursivelyWithPaths(Project root, Project pom, File baseDir, String parentGradlePath,
+        GradleModules gradleModules) {
       if (pom == null || pom.modules == null || pom.modules.module == null)
         return;
 
@@ -2022,16 +1980,15 @@ public class mvn2gradle {
       }
     }
 
-    private static Map<String, String> collectGradlePluginsAndConfigs(Project pom, StringBuilder pluginConfigSnippets,
-        mvn2gradle.Cli cli) {
+    private static Map<String, String> collectGradlePluginsAndConfigs(Project pom, StringBuilder pluginConfigSnippets, mvn2gradle.Cli cli) {
       Map<String, String> pluginsMap = new LinkedHashMap<>();
       Set<String> visited = new HashSet<>(); // to avoid duplicates when traversing parents
       collectGradlePluginsAndConfigsRecursive(pom, pluginConfigSnippets, pluginsMap, visited);
       return pluginsMap;
     }
 
-    private static void collectGradlePluginsAndConfigsRecursive(Project pom, StringBuilder pluginConfigSnippets,
-        Map<String, String> pluginsMap, Set<String> visited) {
+    private static void collectGradlePluginsAndConfigsRecursive(Project pom, StringBuilder pluginConfigSnippets, Map<String, String> pluginsMap,
+        Set<String> visited) {
 
       if (pom == null)
         return;
@@ -2049,8 +2006,7 @@ public class mvn2gradle {
       }
     }
 
-    private static void collectPluginsFromPom(Project pom, StringBuilder pluginConfigSnippets,
-        Map<String, String> pluginsMap, Set<String> visited) {
+    private static void collectPluginsFromPom(Project pom, StringBuilder pluginConfigSnippets, Map<String, String> pluginsMap, Set<String> visited) {
       if (pom.build == null || pom.build.plugins == null || pom.build.plugins.plugin == null)
         return;
 
@@ -2078,8 +2034,7 @@ public class mvn2gradle {
                   %s
                   // Plugin %s end.
 
-                  """.formatted(conv.name, pluginKey,
-                  conv.gradlePluginId != null ? " and using gradle " + conv.gradlePluginId : "", config.trim(),
+                  """.formatted(conv.name, pluginKey, conv.gradlePluginId != null ? " and using gradle " + conv.gradlePluginId : "", config.trim(),
                   conv.name));
             }
           }
@@ -2123,8 +2078,7 @@ public class mvn2gradle {
       return result;
     }
 
-    private static void collectPluginExecutionsRecursive(Plugin plugin, Project pom,
-        List<PluginExecutionContext> result, Set<String> seenExecKeys) {
+    private static void collectPluginExecutionsRecursive(Plugin plugin, Project pom, List<PluginExecutionContext> result, Set<String> seenExecKeys) {
       if (pom == null || pom.build == null || pom.build.plugins == null || pom.build.plugins.plugin == null)
         return;
       for (Plugin p : pom.build.plugins.plugin) {
@@ -2145,8 +2099,7 @@ public class mvn2gradle {
               }
             }
           }
-          if ((p.executions == null || p.executions.execution == null || p.executions.execution.isEmpty())
-              && seenExecKeys.isEmpty()) {
+          if ((p.executions == null || p.executions.execution == null || p.executions.execution.isEmpty()) && seenExecKeys.isEmpty()) {
             result.add(new PluginExecutionContext(p, "default", p.configuration));
           }
         }
@@ -2193,8 +2146,7 @@ public class mvn2gradle {
           log.warn("No Java version found in POM " + (pom.artifactId != null ? pom.artifactId : ""));
           return "1.8";
         } else
-          throw new RuntimeException(
-              "Java version property not found in POM " + (pom.artifactId != null ? pom.artifactId : ""));
+          throw new RuntimeException("Java version property not found in POM " + (pom.artifactId != null ? pom.artifactId : ""));
       }
 
       String resolvedVersion = resolveProperties(rawVersion, pom);
@@ -2227,14 +2179,12 @@ public class mvn2gradle {
       }
     }
 
-    static void generateEffectivePom(File projectDir, Path effPomPath)
-        throws IOException, InterruptedException, TimeoutException {
+    static void generateEffectivePom(File projectDir, Path effPomPath) throws IOException, InterruptedException, TimeoutException {
       String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
       int exit;
       try {
-        exit = new ProcessExecutor().directory(projectDir)
-            .command(mavenCmd, "help:effective-pom", "-Doutput=" + effPomPath).redirectOutput(System.out)
-            .redirectError(System.err).exitValues(0) // Only allow zero exit value
+        exit = new ProcessExecutor().directory(projectDir).command(mavenCmd, "help:effective-pom", "-Doutput=" + effPomPath)
+            .redirectOutput(System.out).redirectError(System.err).exitValues(0) // Only allow zero exit value
             .execute().getExitValue();
       } catch (InvalidExitValueException e) {
         throw new IOException("Maven failed with exit code: " + e.getExitValue(), e);
@@ -2398,6 +2348,7 @@ public class mvn2gradle {
     }
 
     private static final String GRADLE_COMPILE_ONLY_PLUS_TEST_IMPLEMENTATION = "compileOnly+testImplementation";
+
     private static String toGradleConf(Cli cli, Dependency dep, String scope, boolean useApiDependencies) {
       if (scope == null || scope.isBlank() || "compile".equals(scope) || "compile+runtime".equals(scope)) {
         return useApiDependencies ? "api" : "implementation";
@@ -2663,21 +2614,21 @@ public class mvn2gradle {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-       * .xsd") } outputDir =
-       * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-       * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-       * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-       * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-       * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-       * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-       * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-       * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-       * Ant classpath for the XJC task ant.withGroovyBuilder {
-       * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-       * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-       * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-       * "generated-sources/jaxb"))
-       */
+        * .xsd") } outputDir =
+        * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+        * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+        * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+        * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+        * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+        * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+        * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+        * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+        * Ant classpath for the XJC task ant.withGroovyBuilder {
+        * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+        * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+        * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+        * "generated-sources/jaxb"))
+        */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
