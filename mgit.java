@@ -356,6 +356,7 @@ public class mgit {
     public int behind = 0;
     public int local = 0;
     public int clean = 0;
+    public int conflicted = 0;
   }
 
   @Command(name = "status", description = "Show git status for all repos (with color, short summary)")
@@ -383,17 +384,20 @@ public class mgit {
         String magenta = "\u001B[35m";
         String cyan = "\u001B[36m";
         String reset = "\u001B[0m";
-
-        if (rs.dirty)
-          tags.append(red).append("[DIRTY]").append(reset);
-        if (rs.ahead > 0)
-          tags.append(yellow).append("[AHEAD ").append(rs.ahead).append("]").append(reset);
-        if (rs.behind > 0)
-          tags.append(magenta).append("[BEHIND ").append(rs.behind).append("]").append(reset);
-        if (rs.onlyLocal && !rs.dirty)
-          tags.append(cyan).append("[LOCAL]").append(reset);
-        if (!rs.dirty && rs.ahead == 0 && rs.behind == 0 && !rs.onlyLocal)
-          tags.append(green).append("[CLEAN]").append(reset);
+        if (rs.conflicted) {
+          tags.append(red).append("[CONFLICT]").append(reset);
+        } else {
+          if (rs.dirty)
+            tags.append(red).append("[DIRTY]").append(reset);
+          if (rs.ahead > 0)
+            tags.append(yellow).append("[AHEAD ").append(rs.ahead).append("]").append(reset);
+          if (rs.behind > 0)
+            tags.append(magenta).append("[BEHIND ").append(rs.behind).append("]").append(reset);
+          if (rs.onlyLocal && !rs.dirty)
+            tags.append(cyan).append("[LOCAL]").append(reset);
+          if (!rs.dirty && rs.ahead == 0 && rs.behind == 0 && !rs.onlyLocal)
+            tags.append(green).append("[CLEAN]").append(reset);
+        }
 
         String header = String.format("%s%s/%s/#%s%s %s", blue, repo.getName(), rs.branch, rs.shortHash, reset, tags);
 
@@ -411,7 +415,9 @@ public class mgit {
           System.out.println();
         }
         // Update counts
-        if (rs.dirty) {
+        if (rs.conflicted) {
+          counts.conflicted++;
+        } else if (rs.dirty) {
           counts.dirty++;
         } else if (rs.ahead > 0) {
           counts.ahead++;
@@ -441,7 +447,8 @@ public class mgit {
       }
     }
 
-    String getShortStatus(File repo) {
+    @Deprecated // not used observed at 2025-09-13
+    private String getShortStatus(File repo) {
       try {
         String shortHash = getShortHash(repo);
         String branch = getBranchOrDetached(repo, shortHash);
@@ -482,6 +489,7 @@ public class mgit {
 
     static class StatusState {
       boolean dirty;
+      boolean conflicted = false;
       int ahead;
       int behind;
       boolean onlyLocal = false;
@@ -490,10 +498,20 @@ public class mgit {
       int defaultBehind;
     }
 
-    static StatusState getRepoState(File repo) {
+    @Deprecated // not used observed at 2025-09-13
+    private static StatusState getRepoState(File repo) {
       StatusState state = new StatusState();
       state.dirtyFiles = getPorcelainStatus(repo);
       state.dirty = !state.dirtyFiles.isEmpty();
+
+      // Detect conflicts from porcelain codes (U?, ?U, AA, DD, UU, etc.)
+      state.conflicted = StreamEx.of(state.dirtyFiles.split("\\r?\\n")).anyMatch(line -> {
+        if (line.isBlank())
+          return false;
+        String code = line.substring(0, Math.min(2, line.length())).trim();
+        return code.matches("U.|.U|AA|DD|UU");
+      });
+      log.info("here:" + state.conflicted);
 
       // Ahead/behind vs upstream
       try {
@@ -606,6 +624,7 @@ public class mgit {
       }
       List<Entry> order = List.of(
           new Entry("[DIRTY]", "red", counts.dirty, "Uncommitted local changes. Use 'mgit commit -am <msg>' or 'mgit stash'."),
+          new Entry("[CONFLICT]", "red", counts.conflicted, "Unmerged/conflicted state. Resolve conflicts before continuing."),
           new Entry("[AHEAD]", "yellow", counts.ahead, "Local commits to push. Use 'mgit push'."),
           new Entry("[BEHIND]", "magenta", counts.behind, "Remote has commits to pull. Use 'mgit pull' or 'mgit fetch'."),
           new Entry("[LOCAL]", "cyan", counts.local, "Branch exists only locally (no remote). Use 'mgit push -u origin <branch>'."),
@@ -832,7 +851,8 @@ public class mgit {
     return branch.isEmpty() ? null : branch;
   }
 
-  static class RepoStatus {
+  public static class RepoStatus {
+    public boolean conflicted;
     String branch;
     String shortHash;
     boolean dirty;
@@ -850,6 +870,14 @@ public class mgit {
     String[] lines = statusOutput.split("\\r?\\n");
     rs.dirty = lines.length > 1;
     rs.dirtyFiles = rs.dirty ? StreamEx.of(lines).skip(1).map(l -> "  " + l.trim()).joining("\n") : "";
+
+    // Detect conflicts from porcelain codes
+    rs.conflicted = StreamEx.of(lines).skip(1).anyMatch(line -> {
+      if (line.isBlank())
+        return false;
+      String code = line.substring(0, Math.min(2, line.length())).trim();
+      return code.matches("U.|.U|AA|DD|UU");
+    });
 
     // Parse first line for branch and ahead/behind/local
     if (lines.length > 0 && lines[0].startsWith("##")) {
