@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.StringJoiner;
 import java.util.TreeMap;
 import java.util.concurrent.Callable;
@@ -46,6 +47,7 @@ import org.zeroturnaround.exec.ProcessExecutor;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
@@ -133,18 +135,21 @@ public class xmvn {
     }
 
     public class GraphData {
-      public List<Node> nodes = new ArrayList<>();
-      public List<Edge> edges = new ArrayList<>();
+      public SortedMap<String, Node> nodes = new TreeMap<>();
+      public SortedMap<String, Edge> edges = new TreeMap<>();
       public Map<String, Object> attributes = new LinkedHashMap<>();
     }
+
     public static class Node {
       public final String key;
       public final NodeAttributes attributes;
+
       public Node(String key, NodeAttributes attributes) {
         this.key = key;
         this.attributes = attributes;
       }
     }
+
     // SigmaJS-compatible node/edge model for graph export
     public static class NodeAttributes {
       public final double x, y, size;
@@ -162,6 +167,7 @@ public class xmvn {
         this.meta = meta;
       }
     }
+
     public static class NodeMeta {
       public final String nodeType;     // e.g. "module", "library", "pom", "bom", etc.
       public final String buildTool;    // e.g. "maven", "gradle", "make", etc.
@@ -243,21 +249,20 @@ public class xmvn {
     }
 
     private void generateGraphFiles(xmvn.Project rootPom) throws IOException {
-      Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
-        if (p.modules != null && p.modules.module != null) {
-          return p.modules.module.stream().map(m -> xmvn.PomLoader.loadPom(null, p, new File(p.pomFile.getParentFile(), m), p.context))
-              .filter(Objects::nonNull).toList();
-        }
-        return List.of();
-      });
-
       GraphData graph = new GraphData();
-      Set<String> nodeKeys = new HashSet<>();
-      Set<String> edgeKeys = new HashSet<>();
-      traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, graph.nodes, graph.edges, nodeKeys, edgeKeys));
-
-      com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
-      String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(graph);
+      //      Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
+      //        if (p.modules != null && p.modules.module != null) {
+      //          return p.modules.module.stream().map(m -> xmvn.PomLoader.loadPom(null, p, new File(p.pomFile.getParentFile(), m), p.context))
+      //              .filter(Objects::nonNull).toList();
+      //        }
+      //        return List.of();
+      //      });
+      //      traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, graph));
+      rootPom.effectivePomOrThis().context.effectivePom.project.forEach(ep -> emitProjectAndDeps(ep, graph));
+      log.info("Graph has {} nodes and {} edges", graph.nodes.size(), graph.edges.size());
+      ObjectMapper om = new ObjectMapper();
+      Map<String, Object> g = Map.of("nodes", new ArrayList<>(graph.nodes.values()), "edges", new ArrayList<>(graph.edges.values()));
+      String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(g);
 
       // --- Load HTML template from classpath ---
       String html;
@@ -275,98 +280,111 @@ public class xmvn {
       log.info("Sigma v3 HTML with filters+highlight written to {}", htmlFile.getAbsolutePath());
     }
 
-    private void emitProjectAndDeps(xmvn.Project project, List<Node> nodes, List<Edge> edges, Set<String> nodeKeys, Set<String> edgeKeys) {
+    private void emitProjectAndDeps(xmvn.Project project, GraphData graph) {
       project = project.effectivePomOrThis();
-      String projKey = (project.groupId + "_" + project.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
+      String projKey = project.ga();
 
       // ---- Project Node ----
-      NodeAttributes projAttrs = new NodeAttributes(project.groupId + ":" + project.artifactId, "#1f77b4", 0,
-          0, 7.0, new NodeMeta("project", "maven", null, project.groupId, project.artifactId, project.version));
-      addNode(nodes, nodeKeys, projKey, projAttrs);
+      NodeAttributes projAttrs = new NodeAttributes(project.ga(), nodeColor("project"), 0, 0, 7.0,
+          new NodeMeta("project", "maven", null, project.groupId, project.artifactId, project.version));
+      addNode(graph.nodes, projKey, projAttrs);
 
       // ---- Dependencies ----
       if (project.dependencies != null && project.dependencies.dependency != null) {
         for (var dep : project.dependencies.dependency) {
-          String depKey = (dep.groupId + "_" + dep.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
+          String depKey = dep.ga();
 
           // Node attributes & meta for library/dependency
-          String depType = ("pom".equals(dep.type) && "import".equals(dep.scope)) ? "bom" : "library";
-          String depColor = "bom".equals(depType) ? "#e377c2" : "#d62728";
-          NodeAttributes depAttrs = new NodeAttributes(dep.groupId + ":" + dep.artifactId, depColor, 0,
-              0, 6.0,new NodeMeta(depType, null,   // buildTool
+          String depType = dep.scope;//("pom".equals(dep.type) && "import".equals(dep.scope)) ? "bom" : "library";
+          String depColor = nodeColor(depType);
+          NodeAttributes depAttrs = new NodeAttributes(dep.ga(), depColor, 0, 0, 6.0, new NodeMeta(depType, null,   // buildTool
               dep.type, // artifactType
               dep.groupId, dep.artifactId, dep.version));
-          addNode(nodes, nodeKeys, depKey, depAttrs);
+          addNode(graph.nodes, depKey, depAttrs);
 
           // Edge attributes & meta
-          String edgeType = "bom".equals(depType) ? "bom-import" : "lib";
+          String edgeType = dep.scope;//"bom".equals(depType) ? "bom-import" : "lib";
           String edgeColor = depColor;
           String edgeScope = dep.scope != null ? dep.scope : "compile";
-          EdgeAttributes edgeAttrs = new EdgeAttributes(1.0, edgeColor, edgeScope,new EdgeMeta(edgeType, edgeScope, null, // protocol
+          EdgeAttributes edgeAttrs = new EdgeAttributes(1.0, edgeColor, edgeScope, new EdgeMeta(edgeType, edgeScope, null, // protocol
               null, // relation
               dep.classifier, dep.type));
-          String edgeKey = projKey + "_" + depKey;
-          addEdge(edges, edgeKeys, edgeKey, projKey, depKey, edgeAttrs);
+          String edgeKey = projKey + "/" + depKey;
+          addEdge(graph.edges, edgeKey, projKey, depKey, edgeAttrs);
         }
       }
 
       // ---- Parent Relation ----
       if (project.parentPom != null) {
         var parent = project.parentPom.effectivePomOrThis();
-        String parentKey = (parent.groupId + "_" + parent.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
-        NodeAttributes parentAttrs = new NodeAttributes(parent.groupId + ":" + parent.artifactId, "#7f7f7f", 0,
-            0, 6.0,new NodeMeta("parent", null, "pom", parent.groupId, parent.artifactId, parent.version));
-        addNode(nodes, nodeKeys, parentKey, parentAttrs);
+        String parentKey = parent.ga();
+        NodeAttributes parentAttrs = new NodeAttributes(parent.groupId + ":" + parent.artifactId, nodeColor("parent"), 0, 0, 6.0,
+            new NodeMeta("parent", null, "pom", parent.groupId, parent.artifactId, parent.version));
+        addNode(graph.nodes, parentKey, parentAttrs);
 
-        EdgeAttributes parentEdgeAttrs = new EdgeAttributes(1.0, "#7f7f7f", "parent",new EdgeMeta("parent", null, null, "parent", null, "pom"));
+        EdgeAttributes parentEdgeAttrs = new EdgeAttributes(1.0, nodeColor("parent"), "parent",
+            new EdgeMeta("parent", null, null, "parent", null, "pom"));
         String edgeKey = projKey + "_parent_" + parentKey;
-        addEdge(edges, edgeKeys, edgeKey, projKey, parentKey, parentEdgeAttrs);
+        addEdge(graph.edges, edgeKey, projKey, parentKey, parentEdgeAttrs);
+      }
+      // ---- Parent Relation ----
+      if (project.parentDirPom != null) {
+        var parent = project.parentDirPom.effectivePomOrThis();
+        String parentKey = parent.ga();
+        NodeAttributes parentAttrs = new NodeAttributes(parent.groupId + ":" + parent.artifactId, nodeColor("parentDir"), 0, 0, 6.0,
+            new NodeMeta("parentDir", null, "pom", parent.groupId, parent.artifactId, parent.version));
+        addNode(graph.nodes, parentKey, parentAttrs);
+
+        EdgeAttributes parentEdgeAttrs = new EdgeAttributes(1.0, nodeColor("parentDir"), "parentDir",
+            new EdgeMeta("parentDir", null, null, "parentDir", null, "pom"));
+        String edgeKey = projKey + "_parentDir_" + parentKey;
+        addEdge(graph.edges, edgeKey, projKey, parentKey, parentEdgeAttrs);
       }
     }
 
-    // Add a node if not present. Returns the Node (existing or new).
-    private static Node addNode(List<Node> nodes, Set<String> nodeKeys, String key, NodeAttributes attributes) {
-      if (nodeKeys.add(key)) {
-        // key is new, add it
+    private static Node addNode(SortedMap<String, Node> nodes, String key, NodeAttributes attributes) {
+      Node existing = nodes.get(key);
+      if (existing == null) {
         Node n = new Node(key, attributes);
-        nodes.add(n);
+        nodes.put(key, n);
         return n;
       }
-      // Return existing node with this key
-      for (Node n : nodes) {
-        if (n.key.equals(key))
-          return n;
+
+      // Priority: project > others
+      if (!"project".equals(existing.attributes.meta.nodeType) && "project".equals(attributes.meta.nodeType)) {
+        Node n = new Node(key, attributes);
+        nodes.put(key, n);
+        return n;
       }
-      return null; // should never happen if data is consistent
+
+      return existing;
     }
 
-    // Add an edge if not present. Returns the Edge (existing or new).
-    private static Edge addEdge(List<Edge> edges, Set<String> edgeKeys, String key, String source, String target, EdgeAttributes attributes) {
-      if (edgeKeys.add(key)) {
+    private static Edge addEdge(SortedMap<String, Edge> edges, String key, String source, String target, EdgeAttributes attributes) {
+      Edge existing = edges.get(key);
+      if (existing == null) {
         Edge e = new Edge(key, source, target, attributes);
-        edges.add(e);
+        edges.put(key, e);
         return e;
       }
-      // Return existing edge with this key
-      for (Edge e : edges) {
-        if (e.key.equals(key))
-          return e;
-      }
-      return null;
+      return existing;
     }
 
-    private String scopeColor(String scope) {
+    private String nodeColor(String scope) {
+      //log.info("Color for scope/type {}", scope);
       return switch (scope) {
-      case "compile" -> "#1f77b4";   // blue
+      case "project" -> "#1f77b4";   // blue
+      case "compile" -> "red";         // red
       case "provided" -> "#17becf";  // cyan
       case "runtime" -> "#2ca02c";   // green
       case "test" -> "#ff7f0e";      // orange
       case "system" -> "#9467bd";    // purple
       case "import" -> "#8c564b";    // brown
+      case "bom" -> "#e377c2";       // pink
+      case "parentDir" -> "#e3A7c2"; // light pink 
       default -> "#7f7f7f";          // grey
       };
     }
-
   }
 
   @CommandLine.Command(name = "2arango", mixinStandardHelpOptions = true, description = """
@@ -874,6 +892,10 @@ public class xmvn {
     public Exclusions exclusions;
 
     private Dependency() {
+    }
+
+    public String ga() {
+      return "%s:%s".formatted(groupId, artifactId);
     }
 
     @Override
@@ -2812,21 +2834,21 @@ public class xmvn {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-                                            * .xsd") } outputDir =
-                                            * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-                                            * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-                                            * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-                                            * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-                                            * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-                                            * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-                                            * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-                                            * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-                                            * Ant classpath for the XJC task ant.withGroovyBuilder {
-                                            * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-                                            * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-                                            * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-                                            * "generated-sources/jaxb"))
-                                            */
+                                                 * .xsd") } outputDir =
+                                                 * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+                                                 * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+                                                 * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+                                                 * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+                                                 * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+                                                 * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+                                                 * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+                                                 * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+                                                 * Ant classpath for the XJC task ant.withGroovyBuilder {
+                                                 * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+                                                 * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+                                                 * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+                                                 * "generated-sources/jaxb"))
+                                                 */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
