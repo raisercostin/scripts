@@ -200,15 +200,30 @@ function main() {
   const graph = new Graph();
   DATA.edges = dedupeEdges(DATA.edges);
   assignColors(DATA.nodes, DATA.edges);
+
+  // Ensure every node has random initial coords
+  DATA.nodes.forEach(n => {
+    if (typeof n.attributes.x !== "number" || n.attributes.x===0)
+      n.attributes.x = Math.random() * 10 - 5;
+    if (typeof n.attributes.y !== "number"|| n.attributes.y===0)
+      n.attributes.y = Math.random() * 10 - 5;
+  });
+
   graph.import(DATA);
 
   setupStats(graph);
   const renderer = new Sigma(graph, container, {
     renderEdgeLabels: true,
+    defaultEdgeType: "arrow",
     minZoomRatio: 0.1,
     maxZoomRatio: 10,
     nodeProgramClasses: { image: createNodeImageProgram() }
   });
+
+  // Kick-start layout
+  const settings = forceAtlas2.inferSettings(graph);
+  forceAtlas2.assign(graph, { iterations: 200, settings });
+  renderer.refresh();
 
   setupHoverHighlight(graph, renderer);
   setupCamera(renderer);
@@ -216,6 +231,7 @@ function main() {
   setupFilters(graph);
   setupLayouts(graph);
 }
+
 function assignColors(nodes, edges) {
   nodes.forEach(n => {
     const type = n.attributes?.meta?.nodeType;

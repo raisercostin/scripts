@@ -280,8 +280,8 @@ public class xmvn {
       String projKey = (project.groupId + "_" + project.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
 
       // ---- Project Node ----
-      NodeAttributes projAttrs = new NodeAttributes(project.groupId + ":" + project.artifactId, "#1f77b4", Math.random() * 100 - 50,
-          Math.random() * 100 - 50, 7.0, new NodeMeta("project", "maven", null, project.groupId, project.artifactId, project.version));
+      NodeAttributes projAttrs = new NodeAttributes(project.groupId + ":" + project.artifactId, "#1f77b4", 0,
+          0, 7.0, new NodeMeta("project", "maven", null, project.groupId, project.artifactId, project.version));
       addNode(nodes, nodeKeys, projKey, projAttrs);
 
       // ---- Dependencies ----
@@ -292,8 +292,8 @@ public class xmvn {
           // Node attributes & meta for library/dependency
           String depType = ("pom".equals(dep.type) && "import".equals(dep.scope)) ? "bom" : "library";
           String depColor = "bom".equals(depType) ? "#e377c2" : "#d62728";
-          NodeAttributes depAttrs = new NodeAttributes(dep.groupId + ":" + dep.artifactId, depColor, Math.random() * 100 - 50,
-              Math.random() * 100 - 50, 6.0,new NodeMeta(depType, null,   // buildTool
+          NodeAttributes depAttrs = new NodeAttributes(dep.groupId + ":" + dep.artifactId, depColor, 0,
+              0, 6.0,new NodeMeta(depType, null,   // buildTool
               dep.type, // artifactType
               dep.groupId, dep.artifactId, dep.version));
           addNode(nodes, nodeKeys, depKey, depAttrs);
@@ -314,8 +314,8 @@ public class xmvn {
       if (project.parentPom != null) {
         var parent = project.parentPom.effectivePomOrThis();
         String parentKey = (parent.groupId + "_" + parent.artifactId).replaceAll("[^a-zA-Z0-9_]", "_");
-        NodeAttributes parentAttrs = new NodeAttributes(parent.groupId + ":" + parent.artifactId, "#7f7f7f", Math.random() * 100 - 50,
-            Math.random() * 100 - 50, 6.0,new NodeMeta("parent", null, "pom", parent.groupId, parent.artifactId, parent.version));
+        NodeAttributes parentAttrs = new NodeAttributes(parent.groupId + ":" + parent.artifactId, "#7f7f7f", 0,
+            0, 6.0,new NodeMeta("parent", null, "pom", parent.groupId, parent.artifactId, parent.version));
         addNode(nodes, nodeKeys, parentKey, parentAttrs);
 
         EdgeAttributes parentEdgeAttrs = new EdgeAttributes(1.0, "#7f7f7f", "parent",new EdgeMeta("parent", null, null, "parent", null, "pom"));
