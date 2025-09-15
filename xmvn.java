@@ -137,6 +137,7 @@ public class xmvn {
         }
         return List.of();
       });
+
       List<Map<String, Object>> nodes = new ArrayList<>();
       List<Map<String, Object>> edges = new ArrayList<>();
       Set<String> nodeKeys = new HashSet<>();
@@ -144,83 +145,121 @@ public class xmvn {
 
       traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, nodes, edges, nodeKeys, edgeKeys));
 
-      // Graph JSON in Graphology import format
+      // Graph JSON
       Map<String, Object> json = new LinkedHashMap<>();
-      json.put("attributes", Map.of("name", "Maven Graph"));
       json.put("nodes", nodes);
       json.put("edges", edges);
 
       com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
       String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(json);
 
-      File jsonFile = new File(projectDir, "graph-data.json");
       File htmlFile = new File(projectDir, "graph.html");
 
-      if (embedData) {
-        // Self-contained HTML with embedded JSON
-        StringBuilder sb = new StringBuilder();
-        sb.append("""
-            <!doctype html>
-            <html lang="en">
-              <head>
-                <meta charset="UTF-8" />
-                <title>Maven Graph</title>
-                <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
-                <script src="https://cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js"></script>
-              </head>
-              <body style="margin:0; background: lightgrey">
-                <div id="container" style="width: 100%; height: 100vh; background: white"></div>
-                <script>
-                  const graph = new graphology.Graph();
-                  graph.import(
-            """);
-        sb.append(jsonString);
-        sb.append("""
+      // Self-contained HTML with embedded JSON
+      String html = """
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <title>XMvn Dependency Graph</title>
+            <style>
+              html, body, #sigma-container {
+                margin: 0;
+                padding: 0;
+                width: 100%%;
+                height: 100%%;
+                overflow: hidden;
+              }
+            </style>
+            <script type="importmap">
+            {
+              "imports": {
+                "sigma": "https://cdn.jsdelivr.net/npm/sigma@3/+esm",
+                "graphology": "https://cdn.jsdelivr.net/npm/graphology@0.25.4/+esm",
+                "graphology-layout-forceatlas2": "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm",
+                "graphology-layout": "https://cdn.jsdelivr.net/npm/graphology-layout@0.6.1/+esm"
+              }
+            }
+            </script>
+          </head>
+          <body>
+            <div id="sigma-container"></div>
+            <script type="module">
+              import Sigma from "sigma";
+              import Graph from "graphology";
+              import forceAtlas2 from "graphology-layout-forceatlas2";
+              import { circular } from "graphology-layout";
+
+              const container = document.getElementById("sigma-container");
+              const graph = new Graph();
+
+              const data = %s;
+
+              // Adaugă nodurile
+              data.nodes.forEach(n => {
+                graph.addNode(n.key, {
+                  label: n.attributes.label,
+                  size: n.attributes.size,
+                  color: n.attributes.color
+                });
+              });
+
+              // Adaugă muchiile
+              data.edges.forEach(e => {
+                graph.addEdge(e.source, e.target, {
+                  size: e.attributes.size,
+                  color: e.attributes.color,
+                  type: "arrow"
+                });
+              });
+               // 4. Add colors to the nodes, based on node types:
+                //const COLORS: Record<string, string> = { institution: "#FA5A3D", subject: "#5A75DB" };
+                //graph.forEachNode((node, attributes) =>
+                //  graph.setNodeAttribute(node, "color", COLORS[attributes.nodeType as string]),
+                //);
+          
+                // 5. Use degrees for node sizes:
+                const degrees = graph.nodes().map((node) => graph.degree(node));
+                const minDegree = Math.min(...degrees);
+                const maxDegree = Math.max(...degrees);
+                const minSize = 2,
+                  maxSize = 15;
+                graph.forEachNode((node) => {
+                  const degree = graph.degree(node);
+                  graph.setNodeAttribute(
+                    node,
+                    "size",
+                    minSize + ((degree - minDegree) / (maxDegree - minDegree)) * (maxSize - minSize),
                   );
-                  new Sigma(graph, document.getElementById("container"));
-                </script>
-              </body>
-            </html>
-            """);
+                });
+                
+              // Poziții inițiale random
+              graph.nodes().forEach(node => {
+                graph.setNodeAttribute(node, "x", Math.random() * 200 - 100);
+                graph.setNodeAttribute(node, "y", Math.random() * 200 - 100);
+              });
 
-        try (var writer = new java.io.FileWriter(htmlFile)) {
-          writer.write(sb.toString());
-        }
-        log.info("Self-contained Sigma.js HTML written to {}", htmlFile.getAbsolutePath());
-      } else {
-        // Separate JSON + HTML
-        om.writerWithDefaultPrettyPrinter().writeValue(jsonFile, json);
+              // Rulează ForceAtlas2 sincron (200 iterații)
+              //forceAtlas2.assign(graph, { iterations: 200 });
+                      // 6. Position nodes on a circle, then run Force Atlas 2 for a while to get
+                //    proper graph layout:
+                //circular.assign(graph);
+                const settings = forceAtlas2.inferSettings(graph);
+                forceAtlas2.assign(graph, { settings, iterations: 600 });
 
-        String html = """
-            <!doctype html>
-            <html lang="en">
-              <head>
-                <meta charset="UTF-8" />
-                <title>Maven Graph</title>
-                <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/2.4.0/sigma.min.js"></script>
-                <script src="https://cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js"></script>
-              </head>
-              <body style="margin:0; background: lightgrey">
-                <div id="container" style="width: 100%; height: 100vh; background: white"></div>
-                <script>
-                  fetch("graph-data.json")
-                    .then(r => r.json())
-                    .then(data => {
-                      const graph = new graphology.Graph();
-                      graph.import(data);
-                      new Sigma(graph, document.getElementById("container"));
-                    });
-                </script>
-              </body>
-            </html>
-            """;
+              // Renderer Sigma
+              new Sigma(graph, container, {
+                renderEdgeLabels: true
+              });
+            </script>
+          </body>
+          </html>
+          """.formatted(jsonString);
 
-        try (var writer = new java.io.FileWriter(htmlFile)) {
-          writer.write(html);
-        }
-        log.info("Graphology JSON written to {}", jsonFile.getAbsolutePath());
-        log.info("Sigma.js HTML viewer written to {}", htmlFile.getAbsolutePath());
+      try (var writer = new java.io.FileWriter(htmlFile)) {
+        writer.write(html);
       }
+      log.info("Self-contained Sigma.js v3 HTML written to {}", htmlFile.getAbsolutePath());
     }
 
     private void emitProjectAndDeps(xmvn.Project project, List<Map<String, Object>> nodes, List<Map<String, Object>> edges, Set<String> nodeKeys,
@@ -254,7 +293,7 @@ public class xmvn {
         edge.put("key", key);
         edge.put("source", source);
         edge.put("target", target);
-        edge.put("attributes", Map.of("size", 1, "color", "grey"));
+        edge.put("attributes", Map.of("size", 2, "color", "grey"));
         edges.add(edge);
       }
     }
@@ -2703,21 +2742,21 @@ public class xmvn {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-                       * .xsd") } outputDir =
-                       * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-                       * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-                       * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-                       * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-                       * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-                       * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-                       * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-                       * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-                       * Ant classpath for the XJC task ant.withGroovyBuilder {
-                       * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-                       * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-                       * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-                       * "generated-sources/jaxb"))
-                       */
+                         * .xsd") } outputDir =
+                         * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+                         * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+                         * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+                         * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+                         * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+                         * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+                         * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+                         * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+                         * Ant classpath for the XJC task ant.withGroovyBuilder {
+                         * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+                         * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+                         * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+                         * "generated-sources/jaxb"))
+                         */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
