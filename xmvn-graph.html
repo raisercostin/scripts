@@ -121,6 +121,19 @@ button:hover {
   display: none;
   z-index: 1000;
 }
+#side-panel {
+  position: absolute;
+  right: 0;
+  top: 52px;  /* below topbar */
+  bottom: 0;
+  width: 300px;
+  overflow: auto;
+  background: #fafafa;
+  border-left: 1px solid #ddd;
+  padding: 8px;
+  font-family: monospace;
+  font-size: 13px;
+}
 
   </style>
 </head>
@@ -175,8 +188,12 @@ button:hover {
     </div>
   </div>
 </div>
-
+<input type="search" id="search-box" placeholder="Find node…" style="margin-left:12px; padding:4px 6px;">
 <div id="sigma-container"></div>
+<div id="side-panel">
+  <h3>Relations</h3>
+  <div id="relations"></div>
+</div>
 <div id="tooltip"></div>
 
 <script type="importmap">
@@ -349,6 +366,8 @@ function main() {
   setupCamera(renderer);
   setupNodeDragging(renderer, graph);
   setupFilters(graph);
+  setupSearch(graph, renderer);
+  setupSelection(graph, renderer);
   setupLayouts(graph);
 }
 
@@ -687,6 +706,78 @@ function setupLayouts(graph) {
     if (loopHandle) stopBtn.click();
   });
 }
+function setupSearch(graph, renderer) {
+  document.addEventListener("keydown", e => {
+    if (e.ctrlKey && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      document.getElementById("search-box").focus();
+    }
+  });
+
+  const searchBox = document.getElementById("search-box");
+
+  // Highlighted nodes
+  renderer.setSetting("nodeReducer", (node, data) => {
+    const out = { ...data };
+    if (graph.getNodeAttribute(node, "highlighted")) {
+      out.color = "#ff4136";
+      out.size = data.size * 1.5;
+    }
+    if (graph.getNodeAttribute(node, "selected")) {
+      out.color = "#0074D9";
+      out.size = data.size * 2.0;
+    }
+    return out;
+  });
+
+  // Listen to typing
+  searchBox.addEventListener("input", () => {
+    const q = searchBox.value.toLowerCase();
+    graph.forEachNode(node => {
+      const label = graph.getNodeAttribute(node, "label").toLowerCase();
+      graph.setNodeAttribute(node, "highlighted", !!q && label.includes(q));
+    });
+    renderer.refresh();
+  });
+}
+
+function setupSelection(graph, renderer) {
+  let selectedNodes = new Set();
+
+  renderer.on("clickNode", ({ node, event }) => {
+    if (event.original.ctrlKey) {
+      if (selectedNodes.has(node)) {
+        selectedNodes.delete(node);
+        graph.setNodeAttribute(node, "selected", false);
+      } else {
+        selectedNodes.add(node);
+        graph.setNodeAttribute(node, "selected", true);
+      }
+    } else {
+      // reset selection
+      selectedNodes.forEach(n => graph.setNodeAttribute(n, "selected", false));
+      selectedNodes.clear();
+      selectedNodes.add(node);
+      graph.setNodeAttribute(node, "selected", true);
+    }
+    updateRelations(selectedNodes);
+    renderer.refresh();
+  });
+
+  function updateRelations(sel) {
+    const panel = document.getElementById("relations");
+    const lines = [];
+    sel.forEach(n => {
+      graph.forEachNeighbor(n, nb => {
+        const edge = graph.edge(n, nb);
+        const scope = graph.getEdgeAttribute(edge, "label");
+        lines.push(`${scope}: ${graph.getNodeAttribute(n,"label")} -> ${graph.getNodeAttribute(nb,"label")}`);
+      });
+    });
+    panel.innerHTML = lines.length ? "<pre>" + lines.join("\n") + "</pre>" : "<i>No relations</i>";
+  }
+}
+
 </script>
 </body>
 </html>
