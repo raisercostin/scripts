@@ -3,8 +3,24 @@
 <head>
   <meta charset="UTF-8" />
   <title>XMvn Graph</title>
-  <style>
-html, body { height: 100%; margin: 0; }
+<style>
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden; /* prevent page scrollbars */
+  display: flex;
+  flex-direction: column;
+}
+
+#sigma-container {
+  flex: 1 1 auto;
+  border: 1px solid #ccc; /* optional: to see the bounds */
+  overflow: hidden;       /* clip inside container */
+}
+
+#topbar {
+  flex: 0 0 auto; /* natural height */
+}
 
 #topbar {
   display: flex;
@@ -14,10 +30,6 @@ html, body { height: 100%; margin: 0; }
   background: #f5f5f7;
   border-bottom: 1px solid #e5e5ea;
   font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-}
-
-#sigma-container {
-  height: calc(100% - 100px); /* taller topbar now */
 }
 
 .left {
@@ -60,15 +72,22 @@ html, body { height: 100%; margin: 0; }
 }
 
 #log {
-  height: 80px;
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  width: 320px;
+  height: 120px;
   overflow-y: auto;
   font-family: monospace;
-  background: #fafafa;
+  background: rgba(250,250,250,0.95);
   color: #333;
   font-size: 12px;
   padding: 6px 8px;
   border: 1px solid #ddd;
   border-radius: 6px;
+  z-index: 1500;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  display: none; /* hidden by default */
 }
 
 .right {
@@ -121,19 +140,23 @@ button:hover {
   display: none;
   z-index: 1000;
 }
-#side-panel {
+
+.relations-panel {
   position: absolute;
+  top: 60px;        /* below topbar */
   right: 0;
-  top: 52px;  /* below topbar */
-  bottom: 0;
-  width: 300px;
-  overflow: auto;
-  background: #fafafa;
+  width: 280px;
+  max-height: 70%;
+  overflow-y: auto;
+  background: rgba(250,250,250,0.95);
   border-left: 1px solid #ddd;
   padding: 8px;
   font-family: monospace;
   font-size: 13px;
+  z-index: 2000;
+  box-shadow: -2px 0 4px rgba(0,0,0,0.1);
 }
+
   </style>
 </head>
 <body>
@@ -147,7 +170,6 @@ button:hover {
     <fieldset id="filter-fieldset">
       <legend>Filter</legend>
     </fieldset>
-    <div id="log"></div>
   </div>
 
   <div class="right">
@@ -157,7 +179,13 @@ button:hover {
         <select id="layout-select">
           <option value="none">None (Manual)</option>
           <option value="random">Randomize</option>
+          <option value="circular">Circular</option>
+          <option value="pack">Circle Pack</option>
           <option value="fa2" selected>ForceAtlas2</option>
+          <option value="noverlap">Noverlap</option>
+          <option value="breadth">Breadth Order</option>
+          <option value="dag-global">DAG Global</option>
+          <option value="dag-selected">DAG Selected Root</option>
         </select>
       </label>
       <label>
@@ -171,6 +199,8 @@ button:hover {
       <button id="start-loop">Start</button>
       <button id="stop-loop" disabled>Stop</button>
       <button id="reset-camera" title="Reset camera">Reset View</button>
+      <button id="toggle-relations">Show Relations</button>
+      <button id="toggle-log">Show Log</button>
     </div>
 
     <div class="options">
@@ -189,12 +219,9 @@ button:hover {
 </div>
 <input type="search" id="search-box" placeholder="Find node…" style="margin-left:12px; padding:4px 6px;">
 <div id="sigma-container"></div>
-<div id="side-panel">
-  <h3>Relations</h3>
-  <div id="relations"></div>
-</div>
 <div id="tooltip"></div>
-
+<div id="log"></div>
+<div id="relations" class="relations-panel" style="display:none;"></div>
 <script type="importmap">
 {
   "imports": {
@@ -203,7 +230,10 @@ button:hover {
     "@sigma/node-image": "https://cdn.jsdelivr.net/npm/@sigma/node-image@3/+esm",
     "@sigma/rendering": "https://cdn.jsdelivr.net/npm/sigma@3/rendering/dist/sigma-rendering.esm.js/+esm",
     "@sigma/utils": "https://cdn.jsdelivr.net/npm/sigma@3/utils/dist/sigma-utils.esm.js/+esm",
-    "graphology-layout-forceatlas2": "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm"
+    "graphology-layout": "https://cdn.jsdelivr.net/npm/graphology-layout@0.6.1/+esm",
+    "graphology-layout-forceatlas2": "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm",
+    "graphology-layout-noverlap": "https://cdn.jsdelivr.net/npm/graphology-layout-noverlap@0.4.2/+esm",
+    "graphology-dagre": "https://cdn.jsdelivr.net/npm/graphology-dag@0.3.0/+esm"
   }
 }
 </script>
@@ -212,9 +242,12 @@ button:hover {
 import Sigma from "sigma";
 import Graph from "graphology";
 import { createNodeImageProgram } from "@sigma/node-image";
-import forceAtlas2 from "graphology-layout-forceatlas2";
 import * as rendering from "@sigma/rendering";
-
+//layouts
+import { circular, circlepack, random as randomLayout } from "graphology-layout";
+import forceAtlas2 from "graphology-layout-forceatlas2";
+import noverlap from "graphology-layout-noverlap";
+import { topologicalGenerations } from "graphology-dagre";
 
 const ARROW_PRESETS = {
   xslim:    { length: 9.0, wideness: 1.5 },
@@ -255,7 +288,8 @@ const EdgeArrowScaledProgram = createEdgeArrowScaledProgram({});
 const state = {
   hoveredNode: null,
   hoveredNeighbors: null,
-  isDragging: false
+  isDragging: false,
+  lastSelectedNode: null
 };
 // Color palette for nodes
 const NODE_TYPE_COLORS = {
@@ -363,17 +397,58 @@ function main() {
   });
 
   // Kick-start layout
+  //const settings = forceAtlas2.inferSettings(graph);
+  //forceAtlas2.assign(graph, { iterations: 200, settings:{...settings,gravity:100} });
+  //forceAtlas2.assign(graph, { iterations: 200, settings });
+  /*
+  forceAtlas2.assign(graph, {
+    iterations: 1000, // more steps → more stable layout
+    settings: {
+      ...settings,
+      gravity: 1,          // keep nodes centered, not collapsed
+      scalingRatio: 10,    // spread them apart
+      strongGravityMode: false
+    }
+  });
+  */
   const settings = forceAtlas2.inferSettings(graph);
-  forceAtlas2.assign(graph, { iterations: 200, settings });
+  /*
+  const settings = {
+    linLogMode: true,       // better for clustering
+    outboundAttractionDistribution: false,
+    adjustSizes: true,      // prevent node overlap
+    edgeWeightInfluence: 1, // respect edge weights
+    scalingRatio: 10,       // how far apart clusters spread (default 1 → too tight)
+    strongGravityMode: false,
+    gravity: 1,             // mild central pull
+    slowDown: 1             // increase if layout jumps too fast
+  };
+  */
+
+  forceAtlas2.assign(graph, {
+    iterations: 200, // more steps for stability
+    settings: {
+      ...settings,
+      //scalingRatio: 10,       // how far apart clusters spread (default 1 → too tight)
+      //strongGravityMode: false,
+      //gravity: 1,             // mild central pull
+      //linLogMode: true,
+    }
+  });
+  //renderer.refresh();
+  //renderer.getCamera().animatedReset({ duration: 300 }); // reset view to fit
+
   renderer.refresh();
   setupTooltips(graph, renderer);
   setupHoverHighlight(graph, renderer);
   setupCamera(renderer);
   setupNodeDragging(renderer, graph);
+  setupLogPanel();
   setupFilters(graph);
   setupSearch(graph, renderer);
+  setupRelationsPanel();
   setupSelection(graph, renderer);
-  setupLayouts(graph);
+  setupLayouts(graph, renderer);
   console.log("rendering finished");
 }
 
@@ -524,12 +599,6 @@ function setupFilters(graph) {
     edgeChecks[type] = document.getElementById(`f-edge-${type}`);
   });
 
-  function logMsg(msg) {
-    if (!logEl) return;
-    logEl.innerHTML += msg + "<br/>";
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
   function nodeMatchesFilters(attrs) {
     const t = attrs.meta?.nodeType;
     if (!t) return true;
@@ -665,7 +734,154 @@ function setupNodeDragging(renderer, graph) {
   renderer.getContainer().addEventListener("mouseleave", handleUp, { passive: false });
 }
 
-function setupLayouts(graph) {
+function breadthLayout(graph, rootNode) {
+  const visited = new Set([rootNode]);
+  const levels = {};
+  const queue = [{ node: rootNode, depth: 0 }];
+
+  while (queue.length) {
+    const { node, depth } = queue.shift();
+    if (!levels[depth]) levels[depth] = [];
+    levels[depth].push(node);
+
+    // Save depth marker
+    graph.setNodeAttribute(node, "depth", depth);
+
+    // Ensure we always have a base label stored
+    const currentLabel = graph.getNodeAttribute(node, "label");
+    const baseLabel = graph.getNodeAttribute(node, "baseLabel") || currentLabel;
+    graph.setNodeAttribute(node, "baseLabel", baseLabel);
+
+    // Reset label to base + depth
+    graph.setNodeAttribute(node, "label", `${baseLabel} [${depth}]`);
+
+    // Outgoing → positive depth
+    graph.forEachOutboundNeighbor(node, (nbr) => {
+      if (!visited.has(nbr)) {
+        visited.add(nbr);
+        queue.push({ node: nbr, depth: depth + 1 });
+      }
+    });
+
+    // Incoming → negative depth
+    graph.forEachInboundNeighbor(node, (nbr) => {
+      if (!visited.has(nbr)) {
+        visited.add(nbr);
+        queue.push({ node: nbr, depth: depth - 1 });
+      }
+    });
+  }
+
+  const xGap = 200;
+  const yGap = 120;
+
+  Object.entries(levels).forEach(([depthStr, nodes]) => {
+    const depth = parseInt(depthStr, 10);
+    const total = nodes.length;
+    nodes.forEach((n, i) => {
+      const x = (i - (total - 1) / 2) * xGap;
+      const y = depth * yGap;
+      graph.setNodeAttribute(n, "x", x);
+      graph.setNodeAttribute(n, "y", y);
+    });
+  });
+
+  // Root override
+  graph.setNodeAttribute(rootNode, "x", 0);
+  graph.setNodeAttribute(rootNode, "y", 0);
+  graph.setNodeAttribute(rootNode, "depth", 0);
+}
+
+function dagGlobalLayout(graph, { xGap, yGap, markDepth }) {
+  const generations = topologicalGenerations(graph);
+
+  generations.forEach((nodes, depth) => {
+    const total = nodes.length;
+    nodes.forEach((n, i) => {
+      const x = (i - (total - 1) / 2) * xGap;
+      const y = depth * yGap;
+      graph.setNodeAttribute(n, "x", x);
+      graph.setNodeAttribute(n, "y", y);
+
+      if (markDepth) {
+        const base = graph.getNodeAttribute(n, "baseLabel") || graph.getNodeAttribute(n, "label");
+        graph.setNodeAttribute(n, "label", `${base} [${depth}]`);
+      }
+    });
+  });
+}
+
+function dagSelectedLayout(graph, rootNode, { xGap, yGap, markDepth }) {
+  if (!rootNode) {
+    console.warn("[dagSelectedLayout] No root node provided.");
+    return;
+  }
+  const visited = new Set();
+  const levels = new Map();
+  const queue = [{ node: rootNode, depth: 0 }];
+  visited.add(rootNode);
+  levels.set(rootNode, 0);
+
+  while (queue.length) {
+    const { node, depth } = queue.shift();
+    graph.forEachEdge((edge, attrs, source, target) => {
+      if (source === node || target === node) {
+        const nbr = source === node ? target : source;
+        const dir = source === node ? +1 : -1;
+        const newDepth = depth + dir;
+
+        if (
+          !levels.has(nbr) ||
+          (dir > 0 && newDepth > levels.get(nbr)) ||
+          (dir < 0 && newDepth < levels.get(nbr))
+        ) {
+          levels.set(nbr, newDepth);
+          if (!visited.has(nbr)) {
+            visited.add(nbr);
+            queue.push({ node: nbr, depth: newDepth });
+          }
+        }
+      }
+    });
+  }
+
+  const grouped = {};
+  levels.forEach((d, n) => {
+    grouped[d] ??= [];
+    grouped[d].push(n);
+  });
+
+  Object.entries(grouped).forEach(([depth, nodes]) => {
+    const total = nodes.length;
+    nodes.forEach((n, i) => {
+      const x = (i - (total - 1) / 2) * xGap;
+      const y = depth * yGap;
+
+      graph.setNodeAttribute(n, "x", x);
+      graph.setNodeAttribute(n, "y", y);
+
+      if (markDepth) {
+        const base = graph.getNodeAttribute(n, "baseLabel") || graph.getNodeAttribute(n, "label");
+        graph.setNodeAttribute(n, "label", `${base} [${depth}]`);
+      }
+    });
+  });
+}
+
+
+function restoreBaseLabels(graph) {
+  graph.forEachNode(n => {
+    let base = graph.getNodeAttribute(n, "baseLabel");
+    if (!base) {
+      // first time we see this node, take whatever label it has now as baseline
+      base = graph.getNodeAttribute(n, "label");
+      graph.setNodeAttribute(n, "baseLabel", base);
+    }
+    graph.setNodeAttribute(n, "label", base);
+  });
+}
+
+function setupLayouts(graph, renderer) {
   const $ = (id) => document.getElementById(id);
   const layoutSelect = $("layout-select");
   const iterationsInput = $("iterations");
@@ -674,23 +890,35 @@ function setupLayouts(graph) {
   const stopBtn = $("stop-loop");
   let loopHandle = null;
 
-  function randomizePositions() {
-    graph.forEachNode((n) => {
-      graph.setNodeAttribute(n, "x", (Math.random() - 0.5) * 200);
-      graph.setNodeAttribute(n, "y", (Math.random() - 0.5) * 200);
-    });
-  }
   function runOnce() {
     const mode = layoutSelect.value;
     const iters = Math.max(1, parseInt(iterationsInput.value || "1", 10));
+    restoreBaseLabels(graph);
+
     if (mode === "none") return;
-    if (mode === "random") { randomizePositions(); return; }
-    if (mode === "fa2") {
+
+    if (mode === "random") {
+      randomLayout.assign(graph);
+    } else if (mode === "circular") {
+      circular.assign(graph);
+    } else if (mode === "circlepack") {
+      circlepack.assign(graph);
+    } else if (mode === "fa2") {
       const settings = forceAtlas2.inferSettings(graph);
       forceAtlas2.assign(graph, { iterations: iters, settings });
-      return;
+    } else if (mode === "noverlap") {
+      noverlap.assign(graph, { margin: 5 });
+    } else if (mode === "breadth") {
+      const root = state.lastSelectedNode || graph.nodes()[0];
+      breadthLayout(graph, root);
+    } else if (mode === "dag-global") {
+      dagGlobalLayout(graph, { xGap: 200, yGap: 120, markDepth: true });
+    } else if (mode === "dag-selected") {
+      dagSelectedLayout(graph, state.lastSelectedNode, { xGap: 200, yGap: 120, markDepth: true });
     }
+    renderer.refresh();
   }
+
   runBtn.addEventListener("click", runOnce);
 
   startBtn.addEventListener("click", () => {
@@ -703,6 +931,7 @@ function setupLayouts(graph) {
     loopHandle = setInterval(tick, 30);
     startBtn.disabled = true; stopBtn.disabled = false;
   });
+
   stopBtn.addEventListener("click", () => {
     if (loopHandle) clearInterval(loopHandle);
     loopHandle = null;
@@ -710,8 +939,10 @@ function setupLayouts(graph) {
   });
   layoutSelect.addEventListener("change", () => {
     if (loopHandle) stopBtn.click();
+    runOnce();
   });
 }
+
 function setupSearch(graph, renderer) {
   document.addEventListener("keydown", e => {
     if (e.ctrlKey && e.key.toLowerCase() === "f") {
@@ -751,6 +982,7 @@ function setupSelection(graph, renderer) {
   let selectedNodes = new Set();
 
   renderer.on("clickNode", ({ node, event }) => {
+    state.lastSelectedNode = node;
     if (event.original.ctrlKey) {
       if (selectedNodes.has(node)) {
         selectedNodes.delete(node);
@@ -766,22 +998,59 @@ function setupSelection(graph, renderer) {
       selectedNodes.add(node);
       graph.setNodeAttribute(node, "selected", true);
     }
-    updateRelations(selectedNodes);
+    updateRelations(selectedNodes, graph);
     renderer.refresh();
   });
+}
 
-  function updateRelations(sel) {
-    const panel = document.getElementById("relations");
-    const lines = [];
-    sel.forEach(n => {
-      graph.forEachNeighbor(n, nb => {
-        const edge = graph.edge(n, nb);
-        const scope = graph.getEdgeAttribute(edge, "label");
-        lines.push(`${scope}: ${graph.getNodeAttribute(n,"label")} -> ${graph.getNodeAttribute(nb,"label")}`);
+function setupLogPanel() {
+  const logPanel = document.getElementById("log");
+  const toggleBtn = document.getElementById("toggle-log");
+
+  toggleBtn.addEventListener("click", () => {
+    logPanel.style.display =
+      logPanel.style.display === "none" ? "block" : "none";
+  });
+}
+
+function setupRelationsPanel() {
+  const panel = document.getElementById("relations");
+  const toggleBtn = document.getElementById("toggle-relations");
+
+  toggleBtn.addEventListener("click", () => {
+    panel.style.display =
+      panel.style.display === "none" ? "block" : "none";
+  });
+}
+function logMsg(msg) {
+  const logPanel = document.getElementById("log");
+  if (!logPanel || logPanel.style.display === "none") return;
+  logPanel.innerHTML += msg + "<br/>";
+  logPanel.scrollTop = logPanel.scrollHeight;
+}
+
+function updateRelations(sel, graph) {
+  const panel = document.getElementById("relations");
+  if (!panel || panel.style.display === "none") return;
+
+  const lines = [];
+  sel.forEach(n => {
+    graph.forEachNeighbor(n, nb => {
+      const edges = graph.edges(n, nb);
+      edges.forEach(eid => {
+        const scope =
+          graph.getEdgeAttribute(eid, "label") ||
+          graph.getEdgeAttribute(eid, "meta")?.edgeType || "";
+        lines.push(
+          `${scope}: ${graph.getNodeAttribute(n, "label")} -> ${graph.getNodeAttribute(nb, "label")}`
+        );
       });
     });
-    panel.innerHTML = lines.length ? "<pre>" + lines.join("\n") + "</pre>" : "<i>No relations</i>";
-  }
+  });
+
+  panel.innerHTML = lines.length
+    ? "<pre>" + lines.join("\n") + "</pre>"
+    : "<i>No relations</i>";
 }
 
 
