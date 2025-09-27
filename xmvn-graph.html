@@ -201,6 +201,10 @@ button:hover {
       <button id="reset-camera" title="Reset camera">Reset View</button>
       <button id="toggle-relations">Show Relations</button>
       <button id="toggle-log">Show Log</button>
+      <label>
+        <input type="checkbox" id="layout-visible-only">
+        Layout only visible nodes/edges
+      </label>
     </div>
 
     <div class="options">
@@ -233,7 +237,8 @@ button:hover {
     "graphology-layout": "https://cdn.jsdelivr.net/npm/graphology-layout@0.6.1/+esm",
     "graphology-layout-forceatlas2": "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm",
     "graphology-layout-noverlap": "https://cdn.jsdelivr.net/npm/graphology-layout-noverlap@0.4.2/+esm",
-    "graphology-dagre": "https://cdn.jsdelivr.net/npm/graphology-dag@0.3.0/+esm"
+    "graphology-dagre": "https://cdn.jsdelivr.net/npm/graphology-dag@0.3.0/+esm",
+    "graphology-utils": "https://cdn.jsdelivr.net/npm/graphology-utils@2.5.0/+esm"
   }
 }
 </script>
@@ -248,6 +253,7 @@ import { circular, circlepack, random as randomLayout } from "graphology-layout"
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import noverlap from "graphology-layout-noverlap";
 import { topologicalGenerations } from "graphology-dagre";
+import { subgraph } from "https://cdn.jsdelivr.net/npm/graphology-operators@1.6.1/+esm";
 
 const ARROW_PRESETS = {
   xslim:    { length: 9.0, wideness: 1.5 },
@@ -629,6 +635,9 @@ function setupFilters(graph) {
     const msg = `[${new Date().toLocaleTimeString()}] Filters: nodes [${nodeParts.join(", ")}], edges [${edgeParts.join(", ")}] — ${shownNodes}/${graph.order} nodes, ${shownEdges}/${graph.size} edges shown.`;
     logMsg(msg);
     console.log(msg);
+    if (document.getElementById("layout-select").value === "fa2") {
+      runForceAtlas2Layout(graph, parseInt(document.getElementById("iterations").value, 10) || 200);
+    }
   }
 
   // Add event listeners to all checkboxes
@@ -793,11 +802,16 @@ function breadthLayout(graph, rootNode) {
 }
 
 function dagGlobalLayout(graph, { xGap, yGap, markDepth }) {
+  const onlyVisible = layoutVisibleOnly();
   const generations = topologicalGenerations(graph);
 
   generations.forEach((nodes, depth) => {
-    const total = nodes.length;
-    nodes.forEach((n, i) => {
+    const workingNodes = onlyVisible
+      ? nodes.filter(n => !graph.getNodeAttribute(n, "hidden"))
+      : nodes;
+
+    const total = workingNodes.length;
+    workingNodes.forEach((n, i) => {
       const x = (i - (total - 1) / 2) * xGap;
       const y = depth * yGap;
       graph.setNodeAttribute(n, "x", x);
@@ -816,6 +830,8 @@ function dagSelectedLayout(graph, rootNode, { xGap, yGap, markDepth }) {
     console.warn("[dagSelectedLayout] No root node provided.");
     return;
   }
+  const onlyVisible = layoutVisibleOnly();
+
   const visited = new Set();
   const levels = new Map();
   const queue = [{ node: rootNode, depth: 0 }];
@@ -852,8 +868,12 @@ function dagSelectedLayout(graph, rootNode, { xGap, yGap, markDepth }) {
   });
 
   Object.entries(grouped).forEach(([depth, nodes]) => {
-    const total = nodes.length;
-    nodes.forEach((n, i) => {
+    const workingNodes = onlyVisible
+      ? nodes.filter(n => !graph.getNodeAttribute(n, "hidden"))
+      : nodes;
+
+    const total = workingNodes.length;
+    workingNodes.forEach((n, i) => {
       const x = (i - (total - 1) / 2) * xGap;
       const y = depth * yGap;
 
@@ -904,8 +924,7 @@ function setupLayouts(graph, renderer) {
     } else if (mode === "circlepack") {
       circlepack.assign(graph);
     } else if (mode === "fa2") {
-      const settings = forceAtlas2.inferSettings(graph);
-      forceAtlas2.assign(graph, { iterations: iters, settings });
+      runForceAtlas2Layout(graph, iters)
     } else if (mode === "noverlap") {
       noverlap.assign(graph, { margin: 5 });
     } else if (mode === "breadth") {
@@ -941,6 +960,39 @@ function setupLayouts(graph, renderer) {
     if (loopHandle) stopBtn.click();
     runOnce();
   });
+}
+
+function runForceAtlas2Layout(graph, iterations = 200) {
+  if (!layoutVisibleOnly()) {
+    forceAtlas2.assign(graph, {
+      iterations,
+      settings: forceAtlas2.inferSettings(graph)
+    });
+    return;
+  }
+
+  // Collect visible nodes
+  const visible = [];
+  graph.forEachNode(n => {
+    if (!graph.getNodeAttribute(n, "hidden")) visible.push(n);
+  });
+
+  // Subgraph of visible nodes
+  const g2 = subgraph(graph, visible);
+
+  // Layout only visible subgraph
+  forceAtlas2.assign(g2, {
+    iterations,
+    settings: forceAtlas2.inferSettings(g2)
+  });
+
+  // Copy positions back
+  g2.forEachNode((n, attrs) => {
+    graph.setNodeAttribute(n, "x", attrs.x);
+    graph.setNodeAttribute(n, "y", attrs.y);
+  });
+
+  logMsg("relayout ForceAtlas2 on visible nodes (" + visible.length + ")");
 }
 
 function setupSearch(graph, renderer) {
@@ -1053,6 +1105,9 @@ function updateRelations(sel, graph) {
     : "<i>No relations</i>";
 }
 
+function layoutVisibleOnly() {
+  return document.getElementById("layout-visible-only")?.checked;
+}
 
 const DATA =
 /* XMVN_DATA_START */
