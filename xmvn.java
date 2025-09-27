@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -38,6 +39,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import org.fusesource.jansi.AnsiConsole;
@@ -46,6 +48,7 @@ import org.zeroturnaround.exec.ProcessExecutor;
 
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
@@ -129,7 +132,8 @@ public class xmvn {
     @Override
     public Integer call() throws Exception {
       RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
-      Project rootPom = xmvn.PomLoader.loadRootPom(this);
+      //Project rootPom = xmvn.PomLoader.loadRootPom(this);
+      Project rootPom = null;
       generateGraphFiles(rootPom);
       return 0;
     }
@@ -248,40 +252,71 @@ public class xmvn {
       }
     }
 
-    private void generateGraphFiles(xmvn.Project rootPom) throws IOException {
-      GraphData graph = new GraphData();
-      //      Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
-      //        if (p.modules != null && p.modules.module != null) {
-      //          return p.modules.module.stream().map(m -> xmvn.PomLoader.loadPom(null, p, new File(p.pomFile.getParentFile(), m), p.context))
-      //              .filter(Objects::nonNull).toList();
+    private void generateGraphFiles(xmvn.Project rootPom) {
+      rootPom = xmvn.PomLoader.loadRootPom(this);
+
+      //      private static GradleModules collectModuleArtifactIdToGradlePath(Project rootPom, File rootDir, boolean ignoreUnknown, Projects effectivePom) {
+      //        GradleModules gradleModules = new GradleModules();
+      //        collectModulesRecursivelyWithPaths(rootPom, rootPom, rootDir, "", gradleModules);
+      //        return gradleModules;
+      //      }
+      //
+      //      private static void collectModulesRecursivelyWithPaths(Project root, Project pom, File baseDir, String parentGradlePath,
+      //          GradleModules gradleModules) {
+      //        if (pom == null || pom.modules == null || pom.modules.module == null)
+      //          return;
+      //
+      //        for (String moduleName : pom.modules.module) {
+      //          File moduleDir = new File(baseDir, moduleName);
+      //          Project childPom = PomLoader.loadPom(root, pom, moduleDir, root.context);
+      //          if (childPom != null && childPom.artifactId != null) {
+      //            String fullPath = parentGradlePath.isEmpty() ? moduleName : parentGradlePath + ":" + moduleName;
+      //            gradleModules.addGradleModule(childPom.ga(), fullPath);
+      //            collectModulesRecursivelyWithPaths(root, childPom, moduleDir, fullPath, gradleModules);
+      //          }
       //        }
-      //        return List.of();
-      //      });
-      //      traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, graph));
-      rootPom.effectivePomOrThis().context.effectivePom.project.forEach(ep -> emitProjectAndDeps(ep, graph));
+      //      }
+
+      GraphData graph = new GraphData();
+      Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
+        if (p.modules != null && p.modules.modules != null) {
+          return p.children().stream().filter(Objects::nonNull).toList();
+          //          return p.modules.modules.stream().map(m -> xmvn.PomLoader.loadPom(null, p, new File(p.pomFile.getParentFile(), m), p.context))
+          //              .filter(Objects::nonNull).toList();
+        }
+        return List.of();
+      });
+      traverser.depthFirstPreOrder(rootPom).forEach(p -> emitProjectAndDeps(p, graph, "effective"));
+      //rootPom.traverseEffectivePoms(p -> emitProjectAndDeps(p, graph, "effective"));
+      //rootPom.traverseAggregatedPoms(p -> emitProjectAndDeps(p, graph, "aggregator"));
       log.info("Graph has {} nodes and {} edges", graph.nodes.size(), graph.edges.size());
       ObjectMapper om = new ObjectMapper();
-      Map<String, Object> g = Map.of("nodes", new ArrayList<>(graph.nodes.values()), "edges", new ArrayList<>(graph.edges.values()));
-      String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(g);
+      try {
+        Map<String, Object> g = Map.of("nodes", new ArrayList<>(graph.nodes.values()), "edges", new ArrayList<>(graph.edges.values()));
+        String jsonString = om.writerWithDefaultPrettyPrinter().writeValueAsString(g);
 
-      // --- Load HTML template from classpath ---
-      String html;
-      try (InputStream in = getClass().getResourceAsStream("/xmvn-graph.html")) {
-        if (in == null)
-          throw new FileNotFoundException("Resource not found: /xmvn-graph.html");
-        html = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        // --- Load HTML template from classpath ---
+        String html;
+        try (InputStream in = getClass().getResourceAsStream("/xmvn-graph.html")) {
+          if (in == null)
+            throw new FileNotFoundException("Resource not found: /xmvn-graph.html");
+          html = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+
+        String replaced = html.replaceAll("(?s)/\\* XMVN_DATA_START \\*/.*?/\\* XMVN_DATA_END \\*/",
+            "/* XMVN_DATA_START */\n" + jsonString + "\n/* XMVN_DATA_END */");
+
+        File htmlFile = new File(projectDir, "xmvn-graph.html");
+        Files.writeString(htmlFile.toPath(), replaced, java.nio.charset.StandardCharsets.UTF_8);
+        log.info("Sigma v3 HTML with filters+highlight written to {}", htmlFile.getAbsolutePath());
+      } catch (IOException e) {
+        throw new RuntimeException("Cannot write graph-data.json", e);
       }
-
-      String replaced = html.replaceAll("(?s)/\\* XMVN_DATA_START \\*/.*?/\\* XMVN_DATA_END \\*/",
-          "/* XMVN_DATA_START */\n" + jsonString + "\n/* XMVN_DATA_END */");
-
-      File htmlFile = new File(projectDir, "xmvn-graph.html");
-      Files.writeString(htmlFile.toPath(), replaced, java.nio.charset.StandardCharsets.UTF_8);
-      log.info("Sigma v3 HTML with filters+highlight written to {}", htmlFile.getAbsolutePath());
     }
 
-    private void emitProjectAndDeps(xmvn.Project project, GraphData graph) {
-      project = project.effectivePomOrThis();
+    private void emitProjectAndDeps(xmvn.Project projectOrig, GraphData graph, String mode) {
+      Project project = projectOrig.effectivePomOrThis();
+      log.info("Emit project {} (pom: {})", project.idAndPath(), mode);
       String projKey = project.ga();
 
       // ---- Project Node ----
@@ -312,6 +347,19 @@ public class xmvn {
           String edgeKey = projKey + "/" + depKey;
           addEdge(graph.edges, edgeKey, projKey, depKey, edgeAttrs);
         }
+      }
+      
+      if(projectOrig.moduleAgregator!=null) {
+        var parent = projectOrig.moduleAgregator.effectivePomOrThis();
+        String parentKey = parent.ga();
+        NodeAttributes parentAttrs = new NodeAttributes(parent.groupId + ":" + parent.artifactId, nodeColor("moduleAgregator"), 0, 0, 6.0,
+            new NodeMeta("moduleAgregator", null, "pom", parent.groupId, parent.artifactId, parent.version));
+        addNode(graph.nodes, parentKey, parentAttrs);
+
+        EdgeAttributes parentEdgeAttrs = new EdgeAttributes(1.0, nodeColor("moduleAgregator"), "moduleAgregator",
+            new EdgeMeta("moduleAgregator", null, null, "moduleAgregator", null, "pom"));
+        String edgeKey = projKey + "_moduleAgregator_" + parentKey;
+        addEdge(graph.edges, edgeKey, projKey, parentKey, parentEdgeAttrs);
       }
 
       // ---- Parent Relation ----
@@ -419,8 +467,8 @@ public class xmvn {
           """);
 
       Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
-        if (p.modules != null && p.modules.module != null) {
-          return p.modules.module.stream().map(m -> xmvn.PomLoader.loadPom(null, p, new File(p.pomFile.getParentFile(), m), p.context))
+        if (p.modules != null && p.modules.modules != null) {
+          return p.modules.modules.stream().map(m -> xmvn.PomLoader.loadPom(null, p, new File(p.pomFile.getParentFile(), m), p.context))
               .filter(Objects::nonNull).toList();
         }
         return List.of();
@@ -624,12 +672,27 @@ public class xmvn {
     public Properties properties;
     public Build build;
     public Modules modules;
+    public Subprojects subprojects;
     public Repositories repositories;
     public PluginRepositories pluginRepositories;
     public Reporting reporting;
     public Profiles profiles;
 
+    private transient List<Project> modulesChildren = new ArrayList<>();
+    private transient List<Project> subprojectsChildren = new ArrayList<>();
+    // navigability
+    private transient xmvn.Project moduleAgregator;
+    private transient xmvn.Project subprojectsAgregator;
+
     private Project() {
+    }
+
+    public <T> void traverseEffectivePoms(Consumer<EffectivePom> action) {
+      effectivePomOrThis().context.effectivePom.project.forEach(ep -> action.accept(ep));
+    }
+
+    public <T> void traverseAggregatedPoms(Consumer<EffectivePom> action) {
+      effectivePomOrThis().context.effectivePom.project.forEach(ep -> action.accept(ep));
     }
 
     @Override
@@ -676,6 +739,9 @@ public class xmvn {
 
     public Project effectivePomOrThis() {
       var effectivePom = effectivePom();
+      if (effectivePom != null && effectivePom.pomFile == null) {
+        effectivePom.pomFile = this.pomFile;
+      }
       return effectivePom != null ? effectivePom : this;
     }
 
@@ -688,6 +754,29 @@ public class xmvn {
         }
       }
       return new Plugin();
+    }
+
+    public void addSubmodule(xmvn.Project project) {
+      if(project==this) {
+        throw new IllegalArgumentException("Cannot add self as submodule");
+      }
+      modulesChildren.add(project);
+      project.moduleAgregator = this;
+    }
+
+    public void addSubproject(xmvn.Project project) {
+      subprojectsChildren.add(project);
+      project.subprojectsAgregator = this;
+    }
+
+    public List<Project> children() {
+      if (modulesChildren != null && !modulesChildren.isEmpty()) {
+        return modulesChildren;
+      }
+      if (subprojectsChildren != null && !subprojectsChildren.isEmpty()) {
+        return subprojectsChildren;
+      }
+      return List.of();
     }
   }
 
@@ -1100,9 +1189,18 @@ public class xmvn {
   public static class Modules {
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
     @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "module")
-    public java.util.List<String> module;
+    public java.util.List<String> modules;
 
     private Modules() {
+    }
+  }
+
+  public static class Subprojects {
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper(useWrapping = false)
+    @com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty(localName = "subproject")
+    public java.util.List<String> subprojects;
+
+    private Subprojects() {
     }
   }
 
@@ -1711,10 +1809,10 @@ public class xmvn {
 
     // TODO refactor to use pom structure
     private static List<String> collectAllModulePaths(Project pom, String parentPath, File baseDir) {
-      if (pom.modules == null || pom.modules.module == null || pom.modules.module.isEmpty()) {
+      if (pom.modules == null || pom.modules.modules == null || pom.modules.modules.isEmpty()) {
         return List.of();
       }
-      return StreamEx.of(pom.modules.module).flatMap(moduleName -> {
+      return StreamEx.of(pom.modules.modules).flatMap(moduleName -> {
         String fullPath = parentPath.isEmpty() ? moduleName : parentPath + ":" + moduleName;
         File moduleDir = baseDir.toPath().resolve(moduleName).toFile();
         Project childPom = PomLoader.loadPom(null, null, moduleDir, pom.context);
@@ -1736,8 +1834,8 @@ public class xmvn {
         throw new RuntimeException("Failed to write build.gradle.kts for " + pom.artifactId, e);
       }
 
-      if (pom.modules != null && pom.modules.module != null) {
-        for (String moduleName : pom.modules.module) {
+      if (pom.modules != null && pom.modules.modules != null) {
+        for (String moduleName : pom.modules.modules) {
           Path moduleDir = baseDir.resolve(moduleName);
           if (Files.exists(moduleDir)) {
             Project modulePom = PomLoader.loadPom(null, null, moduleDir.toFile(), pom.context);
@@ -2235,10 +2333,10 @@ public class xmvn {
 
     private static void collectModulesRecursivelyWithPaths(Project root, Project pom, File baseDir, String parentGradlePath,
         GradleModules gradleModules) {
-      if (pom == null || pom.modules == null || pom.modules.module == null)
+      if (pom == null || pom.modules == null || pom.modules.modules == null)
         return;
 
-      for (String moduleName : pom.modules.module) {
+      for (String moduleName : pom.modules.modules) {
         File moduleDir = new File(baseDir, moduleName);
         Project childPom = PomLoader.loadPom(root, pom, moduleDir, root.context);
         if (childPom != null && childPom.artifactId != null) {
@@ -2834,21 +2932,21 @@ public class xmvn {
    * } jaxb { javaGen { register("main") { schemas =
    * fileTree("src/main/resources") { include("
    **//*
-                                                 * .xsd") } outputDir =
-                                                 * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
-                                                 * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
-                                                 * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
-                                                 * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
-                                                 * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
-                                                 * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
-                                                 * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
-                                                 * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
-                                                 * Ant classpath for the XJC task ant.withGroovyBuilder {
-                                                 * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
-                                                 * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
-                                                 * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
-                                                 * "generated-sources/jaxb"))
-                                                 */
+                                                         * .xsd") } outputDir =
+                                                         * layout.buildDirectory.dir("generated-sources/jaxb").get().asFile //args =
+                                                         * listOf("-locale", "en", "-extension", "-XtoString", "-Xequals", "-XhashCode",
+                                                         * "-Xcopyable", "-Xinheritance", "-Xannotate") //args = listOf("-version")
+                                                         * //args = listOf("-extension") packageName = "com.foo.compare.generated" args
+                                                         * = listOf("-extension", "-Xannotate", "-Xinheritance", "-Xcopyable",
+                                                         * "-XtoString", "-Xequals", "-XhashCode") //options { // xjcClasspath =
+                                                         * jaxbXjcPlugins //} } } } afterEvaluate { tasks.matching { it.name ==
+                                                         * "jaxbJavaGenMain" }.configureEach { doFirst { // Add the plugin jars to the
+                                                         * Ant classpath for the XJC task ant.withGroovyBuilder {
+                                                         * "project"("antProject") { "taskdef"( "name" to "xjc", "classname" to
+                                                         * "com.sun.tools.xjc.XJCTask", "classpath" to jaxbXjcPlugins.asPath ) } } } } }
+                                                         * sourceSets["main"].java.srcDir(layout.buildDirectory.dir(
+                                                         * "generated-sources/jaxb"))
+                                                         */
 
   /*
    * Try2 jaxb { // Use a named config, e.g. "main" javaGen { create("main") {
@@ -2877,7 +2975,7 @@ public class xmvn {
    */
 
   static class PomLoader {
-    public static Project loadRootPom(LoadPomOptions cli) throws IOException, InterruptedException, TimeoutException {
+    public static Project loadRootPom(LoadPomOptions cli) {
       Projects effectivePom = null;
       if (cli.useEffectivePom) {
         Path effPomPath = cli.projectDir.toPath().resolve("target/effective-pom.xml");
@@ -2891,10 +2989,23 @@ public class xmvn {
       ProjectContext context = new ProjectContext(cli, null, effectivePom);
 
       Project rootPom = loadPom(null, null, context.cli.projectDir, context);
+      //loadAllPomsRecursive(rootPom, context);
       return rootPom;
     }
 
-    private static void generateEffectivePom(File projectDir, Path effPomPath) throws IOException, InterruptedException, TimeoutException {
+    private static void loadAllPomsRecursive(xmvn.Project rootPom, xmvn.ProjectContext context) {
+      if (rootPom == null)
+        return;
+      if (rootPom.modules != null && rootPom.modules.modules != null) {
+        for (String module : rootPom.modules.modules) {
+          File moduleDir = rootPom.context.cli.projectDir.toPath().resolve(module).toFile();
+          Project modulePom = loadPom(rootPom, rootPom, moduleDir, context);
+          loadAllPomsRecursive(modulePom, context);
+        }
+      }
+    }
+
+    private static void generateEffectivePom(File projectDir, Path effPomPath) {
       String mavenCmd = isWindows() ? "mvn.cmd" : "mvn";
       int exit;
       try {
@@ -2902,10 +3013,12 @@ public class xmvn {
             .redirectOutput(System.out).redirectError(System.err).exitValues(0) // Only allow zero exit value
             .execute().getExitValue();
       } catch (InvalidExitValueException e) {
-        throw new IOException("Maven failed with exit code: " + e.getExitValue(), e);
+        throw new RuntimeException("Maven failed with exit code: " + e.getExitValue(), e);
+      } catch (IOException | InterruptedException | TimeoutException e) {
+        throw new RuntimeException("Maven failed to generate " + effPomPath, e);
       }
       if (exit != 0) {
-        throw new IOException("Maven failed to generate " + effPomPath + " (exit " + exit + ")");
+        throw new RuntimeException("Maven failed to generate " + effPomPath + " (exit " + exit + ")");
       }
     }
 
@@ -2913,7 +3026,7 @@ public class xmvn {
       return System.getProperty("os.name").toLowerCase().contains("win");
     }
 
-    private static Projects loadEffectivePom(boolean ignoreUnknown, Path effPomPath) throws IOException {
+    private static Projects loadEffectivePom(boolean ignoreUnknown, Path effPomPath) {
       if (!Files.exists(effPomPath)) {
         throw new RuntimeException("File not found at " + effPomPath);
       }
@@ -2924,20 +3037,24 @@ public class xmvn {
       XmlMapper xmlMapper = new XmlMapper(module);
       xmlMapper.setDefaultUseWrapper(false);
       xmlMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, !ignoreUnknown);
-      String xml = Files.readString(effPomPath);
-
       try {
-        // Try parse as Projects (multi-module)
-        return xmlMapper.readValue(xml, Projects.class);
-      } catch (UnrecognizedPropertyException e) {
-        // If failed because no 'project' wrapper, parse single PomModel then wrap it
-        if (e.getMessage().contains("one known property: \"project\"")) {
-          EffectivePom singlePom = xmlMapper.readValue(xml, EffectivePom.class);
-          Projects projects = new Projects();
-          projects.project.add(singlePom);
-          return projects;
+        String xml = Files.readString(effPomPath);
+
+        try {
+          // Try parse as Projects (multi-module)
+          return xmlMapper.readValue(xml, Projects.class);
+        } catch (JsonProcessingException e) {
+          // If failed because no 'project' wrapper, parse single PomModel then wrap it
+          if (e.getMessage().contains("one known property: \"project\"")) {
+            EffectivePom singlePom = xmlMapper.readValue(xml, EffectivePom.class);
+            Projects projects = new Projects();
+            projects.project.add(singlePom);
+            return projects;
+          }
+          throw e;
         }
-        throw e;
+      } catch (IOException e1) {
+        throw new RuntimeException("Failed to load effective POM from " + effPomPath, e1);
       }
     }
 
@@ -2945,7 +3062,18 @@ public class xmvn {
 
     public static Project loadPom(Project root, Project parentDirPom, File projectDirOrPomFile, ProjectContext context) {
       boolean ignoreUnknown = context.cli.ignoreUnknown;
-      Projects effectivePom = context.effectivePom;
+      //      Projects effectivePom = context.effectivePom;
+      //      if (effectivePom != null && effectivePom.project != null) {
+      //        //search effectivePom for this pomFile
+      //        for (Project p : effectivePom.project) {
+      //          if(p.ga().equals(effectivePom))
+      //          p.ga().equals(root != null ? root.ga() : null);
+      //          String key = p.pomFile != null ? p.pomFile.getAbsolutePath() : null;
+      //          if (key != null && !key.isBlank()) {
+      //            pomCache.put(key, p);
+      //          }
+      //        }
+      //      }
       try {
         File pomFile = projectDirOrPomFile.isDirectory() ? projectDirOrPomFile.toPath().resolve("pom.xml").toFile() : projectDirOrPomFile;
 
@@ -2963,6 +3091,38 @@ public class xmvn {
         pom.context = root == null ? context.withRoot(pom) : context;
         pom.parentDirPom = parentDirPom;
         pomCache.put(key, pom);
+
+        //configure effectivePom if available
+        if (context.effectivePom != null && context.effectivePom.project != null) {
+          for (Project ep : context.effectivePom.project) {
+            if (ep.ga().equals(pom.ga())) {
+              pom.effectivePom = new AtomicReference<>(ep);
+              break;
+            }
+          }
+          var pom2 = pom.effectivePomOrThis();
+          //load also childrens of effectivePom
+          if (pom2.modules != null && pom2.modules.modules != null) {
+            for (String module : pom2.modules.modules) {
+              File moduleDir = pom.pomFile.getParentFile().toPath().resolve(module).toFile();
+              Project modulePom = loadPom(root != null ? root : pom, pom, moduleDir, context);
+              if(modulePom == null) {
+                log.warn("Module {} listed in effective POM of {} not found at {}", module, pom.ga(), moduleDir);
+                continue;
+              }
+              pom.addSubmodule(modulePom);
+              //loadAllPomsRecursive(modulePom, context);
+            }
+          }
+          if (pom2.subprojects != null && pom2.subprojects.subprojects != null) {
+            for (String module : pom2.subprojects.subprojects) {
+              File moduleDir = pom.context.cli.projectDir.toPath().resolve(module).toFile();
+              Project modulePom = loadPom(root != null ? root : pom, pom, moduleDir, context);
+              pom.addSubproject(modulePom);
+              //loadAllPomsRecursive(modulePom, context);
+            }
+          }
+        }
 
         if (pom.parentGav != null) {
           log.info("Resolving parent POM for {} -> {}", pom.ga(), pom.parentGav.ga());
