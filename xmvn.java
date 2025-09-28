@@ -323,8 +323,14 @@ public class xmvn {
       String projKey = project.ga();
 
       // ---- Project Node ----
+      //if contains jib-maven-plugin, add to packaging
+      var packaging = project.packaging;
+      if(project.effectivePomOrThis().build != null && project.effectivePomOrThis().build.plugins != null &&
+          project.effectivePomOrThis().build.plugins.plugin.stream().anyMatch(p -> "jib-maven-plugin".equals(p.artifactId))) {
+        packaging = packaging + "+docker(jib)";
+      }
       NodeAttributes projAttrs = new NodeAttributes(project.ga(), nodeColor("project"), 0, 0, 7.0,
-          new NodeMeta("project", "maven", project.packaging, project.groupId, project.artifactId, project.version));
+          new NodeMeta("project", "maven", packaging, project.groupId, project.artifactId, project.version));
       addNode(graph.nodes, projKey, projAttrs);
 
       // ---- Dependencies ----

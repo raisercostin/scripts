@@ -551,136 +551,6 @@ function setupStats(graph) {
   updateStats(graph.order, graph.size);
 }
 
-function setupFilters(graph) {
-  const filterFieldset = document.getElementById("filter-fieldset");
-
-  // Collect node/edge types
-  const nodeTypeData = {};
-  const edgeTypeData = {};
-  graph.forEachNode((_, attrs) => {
-    const t = attrs.meta?.nodeType;
-    if (t && !nodeTypeData[t]) nodeTypeData[t] = { color: attrs.color || "#888" };
-  });
-  graph.forEachEdge((_, attrs) => {
-    const et = attrs.meta?.edgeType;
-    if (et && !edgeTypeData[et]) edgeTypeData[et] = { color: attrs.color || "#aaa" };
-  });
-
-  // Collect attributes (excluding nodeType/edgeType/x/y/etc.)
-  const { nodeStats, edgeStats } = collectAttributeStats(graph);
-
-  // Build inline HTML
-  const nodeTypeHTML = Object.entries(nodeTypeData)
-    .map(([type, { color }]) => `
-      <label style="margin-right: 10px;">
-        <input type="checkbox" id="f-node-${type}" checked>
-        <span style="display:inline-block;width:13px;height:13px;vertical-align:-2px;background:${color};border-radius:3px;border:1px solid #ccc;margin-right:2px"></span>
-        ${type}
-      </label>
-    `).join("");
-
-  const nodeAttrHTML = Object.entries(nodeStats)
-    .map(([key, count]) => `
-      <label style="margin-right: 10px;">
-        <input type="checkbox" id="f-nodeattr-${key}" checked>
-        ${key} (${count})
-      </label>
-    `).join("");
-
-  const edgeTypeHTML = Object.entries(edgeTypeData)
-    .map(([type, { color }]) => `
-      <label style="margin-right: 10px;">
-        <input type="checkbox" id="f-edge-${type}" checked>
-        <span style="display:inline-block;width:13px;height:13px;vertical-align:-2px;background:${color};border-radius:3px;border:1px solid #ccc;margin-right:2px"></span>
-        ${type}
-      </label>
-    `).join("");
-
-  const edgeAttrHTML = Object.entries(edgeStats)
-    .map(([key, count]) => `
-      <label style="margin-right: 10px;">
-        <input type="checkbox" id="f-edgeattr-${key}" checked>
-        ${key} (${count})
-      </label>
-    `).join("");
-
-  filterFieldset.innerHTML = `
-    <legend>Filter</legend>
-    <div style="margin-bottom:6px; flex-wrap: wrap;">
-      <b>Nodes:</b> ${nodeTypeHTML}
-      <b>Attrs:</b> ${nodeAttrHTML}
-    </div>
-    <div style="flex-wrap: wrap;">
-      <b>Edges:</b> ${edgeTypeHTML}
-      <b>Attrs:</b> ${edgeAttrHTML}
-    </div>
-  `;
-
-  // Collect checkbox refs
-  const nodeChecks = {}, edgeChecks = {}, nodeAttrChecks = {}, edgeAttrChecks = {};
-  Object.keys(nodeTypeData).forEach(t => nodeChecks[t] = document.getElementById(`f-node-${t}`));
-  Object.keys(edgeTypeData).forEach(t => edgeChecks[t] = document.getElementById(`f-edge-${t}`));
-  Object.keys(nodeStats).forEach(k => nodeAttrChecks[k] = document.getElementById(`f-nodeattr-${k}`));
-  Object.keys(edgeStats).forEach(k => edgeAttrChecks[k] = document.getElementById(`f-edgeattr-${k}`));
-
-  function nodeMatchesFilters(attrs) {
-    const t = attrs.meta?.nodeType;
-    if (t && nodeChecks[t] && !nodeChecks[t].checked) return false;
-
-    const meta = attrs.meta || {};
-    for (const [k, v] of Object.entries(meta)) {
-      if (k === "nodeType") continue;
-      const key = `${k}:${v}`;
-      if (nodeAttrChecks[key] && !nodeAttrChecks[key].checked) return false;
-    }
-    return true;
-  }
-
-  function edgeMatchesFilters(attrs, s, t) {
-    const et = attrs.meta?.edgeType;
-    if (et && edgeChecks[et] && !edgeChecks[et].checked) return false;
-
-    const meta = attrs.meta || {};
-    for (const [k, v] of Object.entries(meta)) {
-      if (k === "edgeType") continue;
-      const key = `${k}:${v}`;
-      if (edgeAttrChecks[key] && !edgeAttrChecks[key].checked) return false;
-    }
-
-    const srcHidden = graph.getNodeAttribute(s, "hidden") === true;
-    const tgtHidden = graph.getNodeAttribute(t, "hidden") === true;
-    return !srcHidden && !tgtHidden;
-  }
-
-  function applyFilters() {
-    let shownNodes = 0, shownEdges = 0;
-    graph.forEachNode((n, attrs) => {
-      const visible = nodeMatchesFilters(attrs);
-      graph.setNodeAttribute(n, "hidden", !visible);
-      if (visible) shownNodes++;
-    });
-    graph.forEachEdge((e, attrs, s, t) => {
-      const visible = edgeMatchesFilters(attrs, s, t);
-      graph.setEdgeAttribute(e, "hidden", !visible);
-      if (visible) shownEdges++;
-    });
-    graph._updateStats(shownNodes, shownEdges);
-  }
-
-  // Bind listeners
-  [
-    ...Object.values(nodeChecks),
-    ...Object.values(edgeChecks),
-    ...Object.values(nodeAttrChecks),
-    ...Object.values(edgeAttrChecks),
-  ].forEach(cb => {
-    if (cb) cb.addEventListener("change", applyFilters);
-  });
-
-  // Initial apply
-  applyFilters();
-}
-
 function setupCamera(renderer) {
   document.getElementById("reset-camera").addEventListener("click", () => {
     renderer.getCamera().animatedReset({ duration: 300 });
@@ -1143,52 +1013,264 @@ function layoutVisibleOnly() {
   return document.getElementById("layout-visible-only")?.checked;
 }
 
+// --- helpers used by setupFilters ---
+function safeId(s) {
+  // ID-safe (no spaces/quotes/colons etc.)
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
 function collectAttributeStats(graph) {
+  // Exclude these from the Attributes section:
   const excluded = new Set(["groupId", "artifactId", "version", "x", "y", "nodeType", "edgeType"]);
+
+  const nodeKeys = new Set();
+  const edgeKeys = new Set();
   const nodeStats = {};
   const edgeStats = {};
 
-  // discover all node attribute keys
-  const nodeKeys = new Set();
+  // Discover attribute keys (under attrs.meta) seen anywhere:
   graph.forEachNode((n, attrs) => {
     const meta = attrs.meta || {};
-    Object.keys(meta).forEach(k => {
-      if (!excluded.has(k)) nodeKeys.add(k);
-    });
+    Object.keys(meta).forEach(k => { if (!excluded.has(k)) nodeKeys.add(k); });
   });
-
-  // discover all edge attribute keys
-  const edgeKeys = new Set();
   graph.forEachEdge((e, attrs) => {
     const meta = attrs.meta || {};
-    Object.keys(meta).forEach(k => {
-      if (!excluded.has(k)) edgeKeys.add(k);
-    });
+    Object.keys(meta).forEach(k => { if (!excluded.has(k)) edgeKeys.add(k); });
   });
 
-  // count nodes
+  // Count values, including "null" for missing keys:
   graph.forEachNode((n, attrs) => {
     const meta = attrs.meta || {};
     nodeKeys.forEach(k => {
-      let v = meta[k];
-      if (v == null) v = "null";  // mark missing
+      const v = meta[k] == null ? "null" : meta[k];
       const key = `${k}:${v}`;
       nodeStats[key] = (nodeStats[key] || 0) + 1;
     });
   });
-
-  // count edges
   graph.forEachEdge((e, attrs) => {
     const meta = attrs.meta || {};
     edgeKeys.forEach(k => {
-      let v = meta[k];
-      if (v == null) v = "null";
+      const v = meta[k] == null ? "null" : meta[k];
       const key = `${k}:${v}`;
       edgeStats[key] = (edgeStats[key] || 0) + 1;
     });
   });
 
-  return { nodeStats, edgeStats };
+  return { nodeStats, edgeStats, nodeKeys: Array.from(nodeKeys), edgeKeys: Array.from(edgeKeys) };
+}
+
+// --- DROP-IN: complete replacement ---
+function setupFilters(graph) {
+  const fieldset = document.getElementById("filter-fieldset");
+
+  // Type palettes (already in your code)
+  const nodeTypeData = {};
+  const edgeTypeData = {};
+  graph.forEachNode((_, attrs) => {
+    const t = attrs.meta?.nodeType;
+    if (t && !nodeTypeData[t]) nodeTypeData[t] = { color: attrs.color || "#888" };
+  });
+  graph.forEachEdge((_, attrs) => {
+    const et = attrs.meta?.edgeType;
+    if (et && !edgeTypeData[et]) edgeTypeData[et] = { color: attrs.color || "#aaa" };
+  });
+
+  // Attribute stats (with :null)
+  const { nodeStats, edgeStats, nodeKeys, edgeKeys } = collectAttributeStats(graph);
+
+  // Helper to render inline checkbox chip
+  const chip = (id, label, colorBoxCss = "") => `
+    <label style="display:inline-flex;align-items:center;gap:6px;margin:0 10px 6px 0;">
+      <input type="checkbox" id="${id}" data-id="${id}" checked>
+      ${colorBoxCss ? `<span style="${colorBoxCss}"></span>` : ""}
+      <span>${label}</span>
+    </label>`;
+
+  // Build inline UI
+  const nodeTypesRow = Object.entries(nodeTypeData)
+    .map(([type, { color }]) => {
+      const id = `f-nodeType-${safeId(type)}`;
+      const box = `display:inline-block;width:13px;height:13px;background:${color};border:1px solid #ccc;border-radius:3px;vertical-align:-2px`;
+      return chip(id, type, box);
+    })
+    .join("");
+
+  const edgeTypesRow = Object.entries(edgeTypeData)
+    .map(([type, { color }]) => {
+      const id = `f-edgeType-${safeId(type)}`;
+      const box = `display:inline-block;width:13px;height:13px;background:${color};border:1px solid #ccc;border-radius:3px;vertical-align:-2px`;
+      return chip(id, type, box);
+    })
+    .join("");
+
+  // Sort attributes by key then value, with ":null" last
+  const byKeyThenVal = (a, b) => {
+    const [ka, va] = a[0].split(":", 2);
+    const [kb, vb] = b[0].split(":", 2);
+    if (ka !== kb) return ka.localeCompare(kb);
+    if (va === "null" && vb !== "null") return 1;
+    if (vb === "null" && va !== "null") return -1;
+    return String(va).localeCompare(String(vb));
+  };
+
+  const nodeAttrsRow = Object.entries(nodeStats)
+    .sort(byKeyThenVal)
+    .map(([pair, count]) => {
+      const id = `f-nodeAttr-${safeId(pair)}`;
+      return chip(id, `${pair} (${count})`);
+    })
+    .join("");
+
+  const edgeAttrsRow = Object.entries(edgeStats)
+    .sort(byKeyThenVal)
+    .map(([pair, count]) => {
+      const id = `f-edgeAttr-${safeId(pair)}`;
+      return chip(id, `${pair} (${count})`);
+    })
+    .join("");
+
+  // Render everything (inline / compact)
+  fieldset.innerHTML = `
+    <legend>Filter</legend>
+
+    <div style="margin-bottom:6px;display:flex;flex-wrap:wrap;align-items:center;">
+      <b style="margin-right:8px;">Nodes:</b>
+      ${nodeTypesRow || `<i style="color:#777">No node types</i>`}
+      <b style="margin:0 8px 0 16px;">Attrs:</b>
+      ${nodeAttrsRow || `<i style="color:#777">No node attributes</i>`}
+    </div>
+
+    <div style="display:flex;flex-wrap:wrap;align-items:center;">
+      <b style="margin-right:8px;">Edges:</b>
+      ${edgeTypesRow || `<i style="color:#777">No edge types</i>`}
+      <b style="margin:0 8px 0 16px;">Attrs:</b>
+      ${edgeAttrsRow || `<i style="color:#777">No edge attributes</i>`}
+    </div>
+  `;
+
+  // Build lookups from DOM state on demand
+  const getAllowedSets = () => {
+    const allowedNodeTypes = new Set();
+    const allowedEdgeTypes = new Set();
+    const allowedNodePairs = new Set(); // e.g. "buildTool:gradle", "buildTool:null"
+    const allowedEdgePairs = new Set();
+
+    // types
+    fieldset.querySelectorAll('input[id^="f-nodeType-"]').forEach(cb => {
+      if (cb.checked) allowedNodeTypes.add(cb.id.replace(/^f-nodeType-/, "").replace(/_/g, " "));
+    });
+    fieldset.querySelectorAll('input[id^="f-edgeType-"]').forEach(cb => {
+      if (cb.checked) allowedEdgeTypes.add(cb.id.replace(/^f-edgeType-/, "").replace(/_/g, " "));
+    });
+
+    // attrs
+    fieldset.querySelectorAll('input[id^="f-nodeAttr-"]').forEach(cb => {
+      if (cb.checked) {
+        const raw = cb.id.replace(/^f-nodeAttr-/, "");
+        // reverse safeId: we replaced non [a-zA-Z0-9_-] with _; we cannot perfectly reverse.
+        // But we still have the readable label next to it; to avoid ambiguity, store the real value as data-pair:
+        // (we’ll attach data-pair below just before returning)
+      }
+    });
+    fieldset.querySelectorAll('input[id^="f-edgeAttr-"]').forEach(cb => {
+      if (cb.checked) { /* same note as above */ }
+    });
+
+    // Because safe->raw isn’t reversible 100%, we store the real pair in dataset:
+    fieldset.querySelectorAll('input[id^="f-nodeAttr-"]').forEach(cb => {
+      const pair = cb.dataset.pair;
+      if (cb.checked && pair) allowedNodePairs.add(pair);
+    });
+    fieldset.querySelectorAll('input[id^="f-edgeAttr-"]').forEach(cb => {
+      const pair = cb.dataset.pair;
+      if (cb.checked && pair) allowedEdgePairs.add(pair);
+    });
+
+    return { allowedNodeTypes, allowedEdgeTypes, allowedNodePairs, allowedEdgePairs };
+  };
+
+  // Attach REAL pair value into dataset (so we don’t rely on ID decoding)
+  fieldset.querySelectorAll('input[id^="f-nodeAttr-"]').forEach(cb => {
+    const label = cb.parentElement?.querySelector("span:last-child")?.textContent || "";
+    const pair = label.replace(/\s*\(\d+\)\s*$/, ""); // drop " (count)"
+    cb.dataset.pair = pair;
+  });
+  fieldset.querySelectorAll('input[id^="f-edgeAttr-"]').forEach(cb => {
+    const label = cb.parentElement?.querySelector("span:last-child")?.textContent || "";
+    const pair = label.replace(/\s*\(\d+\)\s*$/, "");
+    cb.dataset.pair = pair;
+  });
+
+  // Visibility checks
+  function nodeMatches(attrs, sets) {
+    const meta = attrs.meta || {};
+    const t = meta.nodeType;
+
+    // Type gate: if a type is present in the UI and is unchecked → hide
+    if (t && Object.prototype.hasOwnProperty.call(nodeTypeData, t) && !sets.allowedNodeTypes.has(t)) return false;
+
+    // Attributes: build the node's pairs over the discovered keys (so nulls apply)
+    for (const k of nodeKeys) {
+      const v = meta[k] == null ? "null" : meta[k];
+      const pair = `${k}:${v}`;
+      // If that pair exists in the UI and is NOT checked → hide
+      if (Object.prototype.hasOwnProperty.call(nodeStats, pair) && !sets.allowedNodePairs.has(pair)) return false;
+    }
+    return true;
+  }
+
+  function edgeMatches(attrs, s, t, sets) {
+    const meta = attrs.meta || {};
+    const et = meta.edgeType;
+
+    if (et && Object.prototype.hasOwnProperty.call(edgeTypeData, et) && !sets.allowedEdgeTypes.has(et)) return false;
+
+    for (const k of edgeKeys) {
+      const v = meta[k] == null ? "null" : meta[k];
+      const pair = `${k}:${v}`;
+      if (Object.prototype.hasOwnProperty.call(edgeStats, pair) && !sets.allowedEdgePairs.has(pair)) return false;
+    }
+
+    // also ensure both endpoints are visible
+    const srcHidden = graph.getNodeAttribute(s, "hidden") === true;
+    const tgtHidden = graph.getNodeAttribute(t, "hidden") === true;
+    return !srcHidden && !tgtHidden;
+  }
+
+  function applyFilters() {
+    const sets = getAllowedSets();
+
+    let shownNodes = 0, shownEdges = 0;
+
+    // Nodes
+    graph.forEachNode((n, attrs) => {
+      const visible = nodeMatches(attrs, sets);
+      graph.setNodeAttribute(n, "hidden", !visible);
+      if (visible) shownNodes++;
+    });
+
+    // Edges (respect hidden endpoints)
+    graph.forEachEdge((e, attrs, s, t) => {
+      const visible = edgeMatches(attrs, s, t, sets);
+      graph.setEdgeAttribute(e, "hidden", !visible);
+      if (visible) shownEdges++;
+    });
+
+    // Update badge & maybe re-run FA2 on visible-only
+    if (typeof graph._updateStats === "function") graph._updateStats(shownNodes, shownEdges);
+
+    if (document.getElementById("layout-select")?.value === "fa2") {
+      runForceAtlas2Layout(graph, parseInt(document.getElementById("iterations").value, 10) || 200);
+    }
+  }
+
+  // One event listener for all checkboxes (event delegation FTW)
+  fieldset.addEventListener("change", (e) => {
+    if (e.target && e.target.matches('input[type="checkbox"]')) applyFilters();
+  });
+
+  // Initial pass
+  applyFilters();
 }
 
 const DATA =
