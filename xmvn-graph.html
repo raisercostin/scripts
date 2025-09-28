@@ -553,71 +553,105 @@ function setupStats(graph) {
 
 function setupFilters(graph) {
   const filterFieldset = document.getElementById("filter-fieldset");
-  const logEl = document.getElementById("log");
 
-  // Gather unique node and edge types, and one example color for each
+  // Collect node/edge types
   const nodeTypeData = {};
   const edgeTypeData = {};
-
   graph.forEachNode((_, attrs) => {
     const t = attrs.meta?.nodeType;
-    if (t && !nodeTypeData[t]) {
-      nodeTypeData[t] = { color: attrs.color || "#888" };
-    }
+    if (t && !nodeTypeData[t]) nodeTypeData[t] = { color: attrs.color || "#888" };
   });
   graph.forEachEdge((_, attrs) => {
     const et = attrs.meta?.edgeType;
-    if (et && !edgeTypeData[et]) {
-      edgeTypeData[et] = { color: attrs.color || "#aaa" };
-    }
+    if (et && !edgeTypeData[et]) edgeTypeData[et] = { color: attrs.color || "#aaa" };
   });
 
-  // Build HTML for checkboxes, with colored squares and group labels
-  let html = `<legend>Filter</legend>
-    <div style="margin-bottom:6px"><b>Nodes:</b> `;
-  Object.entries(nodeTypeData).forEach(([type, { color }]) => {
-    html += `
+  // Collect attributes (excluding nodeType/edgeType/x/y/etc.)
+  const { nodeStats, edgeStats } = collectAttributeStats(graph);
+
+  // Build inline HTML
+  const nodeTypeHTML = Object.entries(nodeTypeData)
+    .map(([type, { color }]) => `
       <label style="margin-right: 10px;">
         <input type="checkbox" id="f-node-${type}" checked>
         <span style="display:inline-block;width:13px;height:13px;vertical-align:-2px;background:${color};border-radius:3px;border:1px solid #ccc;margin-right:2px"></span>
         ${type}
-      </label>`;
-  });
-  html += `</div><div><b>Edges:</b> `;
-  Object.entries(edgeTypeData).forEach(([type, { color }]) => {
-    html += `
+      </label>
+    `).join("");
+
+  const nodeAttrHTML = Object.entries(nodeStats)
+    .map(([key, count]) => `
+      <label style="margin-right: 10px;">
+        <input type="checkbox" id="f-nodeattr-${key}" checked>
+        ${key} (${count})
+      </label>
+    `).join("");
+
+  const edgeTypeHTML = Object.entries(edgeTypeData)
+    .map(([type, { color }]) => `
       <label style="margin-right: 10px;">
         <input type="checkbox" id="f-edge-${type}" checked>
         <span style="display:inline-block;width:13px;height:13px;vertical-align:-2px;background:${color};border-radius:3px;border:1px solid #ccc;margin-right:2px"></span>
         ${type}
-      </label>`;
-  });
-  html += `</div>`;
-  filterFieldset.innerHTML = html;
+      </label>
+    `).join("");
 
-  // Only now get the elements for event listeners
-  const nodeChecks = {};
-  const edgeChecks = {};
-  Object.keys(nodeTypeData).forEach(type => {
-    nodeChecks[type] = document.getElementById(`f-node-${type}`);
-  });
-  Object.keys(edgeTypeData).forEach(type => {
-    edgeChecks[type] = document.getElementById(`f-edge-${type}`);
-  });
+  const edgeAttrHTML = Object.entries(edgeStats)
+    .map(([key, count]) => `
+      <label style="margin-right: 10px;">
+        <input type="checkbox" id="f-edgeattr-${key}" checked>
+        ${key} (${count})
+      </label>
+    `).join("");
+
+  filterFieldset.innerHTML = `
+    <legend>Filter</legend>
+    <div style="margin-bottom:6px; flex-wrap: wrap;">
+      <b>Nodes:</b> ${nodeTypeHTML}
+      <b>Attrs:</b> ${nodeAttrHTML}
+    </div>
+    <div style="flex-wrap: wrap;">
+      <b>Edges:</b> ${edgeTypeHTML}
+      <b>Attrs:</b> ${edgeAttrHTML}
+    </div>
+  `;
+
+  // Collect checkbox refs
+  const nodeChecks = {}, edgeChecks = {}, nodeAttrChecks = {}, edgeAttrChecks = {};
+  Object.keys(nodeTypeData).forEach(t => nodeChecks[t] = document.getElementById(`f-node-${t}`));
+  Object.keys(edgeTypeData).forEach(t => edgeChecks[t] = document.getElementById(`f-edge-${t}`));
+  Object.keys(nodeStats).forEach(k => nodeAttrChecks[k] = document.getElementById(`f-nodeattr-${k}`));
+  Object.keys(edgeStats).forEach(k => edgeAttrChecks[k] = document.getElementById(`f-edgeattr-${k}`));
 
   function nodeMatchesFilters(attrs) {
     const t = attrs.meta?.nodeType;
-    if (!t) return true;
-    return nodeChecks[t]?.checked !== false;
+    if (t && nodeChecks[t] && !nodeChecks[t].checked) return false;
+
+    const meta = attrs.meta || {};
+    for (const [k, v] of Object.entries(meta)) {
+      if (k === "nodeType") continue;
+      const key = `${k}:${v}`;
+      if (nodeAttrChecks[key] && !nodeAttrChecks[key].checked) return false;
+    }
+    return true;
   }
+
   function edgeMatchesFilters(attrs, s, t) {
     const et = attrs.meta?.edgeType;
-    let allowedByType = true;
-    if (et) allowedByType = edgeChecks[et]?.checked !== false;
+    if (et && edgeChecks[et] && !edgeChecks[et].checked) return false;
+
+    const meta = attrs.meta || {};
+    for (const [k, v] of Object.entries(meta)) {
+      if (k === "edgeType") continue;
+      const key = `${k}:${v}`;
+      if (edgeAttrChecks[key] && !edgeAttrChecks[key].checked) return false;
+    }
+
     const srcHidden = graph.getNodeAttribute(s, "hidden") === true;
     const tgtHidden = graph.getNodeAttribute(t, "hidden") === true;
-    return allowedByType && !srcHidden && !tgtHidden;
+    return !srcHidden && !tgtHidden;
   }
+
   function applyFilters() {
     let shownNodes = 0, shownEdges = 0;
     graph.forEachNode((n, attrs) => {
@@ -630,22 +664,22 @@ function setupFilters(graph) {
       graph.setEdgeAttribute(e, "hidden", !visible);
       if (visible) shownEdges++;
     });
-    const nodeParts = Object.keys(nodeChecks).filter(t => nodeChecks[t].checked);
-    const edgeParts = Object.keys(edgeChecks).filter(t => edgeChecks[t].checked);
-    const msg = `[${new Date().toLocaleTimeString()}] Filters: nodes [${nodeParts.join(", ")}], edges [${edgeParts.join(", ")}] — ${shownNodes}/${graph.order} nodes, ${shownEdges}/${graph.size} edges shown.`;
-    logMsg(msg);
-    console.log(msg);
-    if (document.getElementById("layout-select").value === "fa2") {
-      runForceAtlas2Layout(graph, parseInt(document.getElementById("iterations").value, 10) || 200);
-    }
+    graph._updateStats(shownNodes, shownEdges);
   }
 
-  // Add event listeners to all checkboxes
-  Object.values(nodeChecks).forEach(cb => cb.addEventListener("change", applyFilters));
-  Object.values(edgeChecks).forEach(cb => cb.addEventListener("change", applyFilters));
+  // Bind listeners
+  [
+    ...Object.values(nodeChecks),
+    ...Object.values(edgeChecks),
+    ...Object.values(nodeAttrChecks),
+    ...Object.values(edgeAttrChecks),
+  ].forEach(cb => {
+    if (cb) cb.addEventListener("change", applyFilters);
+  });
+
+  // Initial apply
   applyFilters();
 }
-
 
 function setupCamera(renderer) {
   document.getElementById("reset-camera").addEventListener("click", () => {
@@ -1107,6 +1141,54 @@ function updateRelations(sel, graph) {
 
 function layoutVisibleOnly() {
   return document.getElementById("layout-visible-only")?.checked;
+}
+
+function collectAttributeStats(graph) {
+  const excluded = new Set(["groupId", "artifactId", "version", "x", "y", "nodeType", "edgeType"]);
+  const nodeStats = {};
+  const edgeStats = {};
+
+  // discover all node attribute keys
+  const nodeKeys = new Set();
+  graph.forEachNode((n, attrs) => {
+    const meta = attrs.meta || {};
+    Object.keys(meta).forEach(k => {
+      if (!excluded.has(k)) nodeKeys.add(k);
+    });
+  });
+
+  // discover all edge attribute keys
+  const edgeKeys = new Set();
+  graph.forEachEdge((e, attrs) => {
+    const meta = attrs.meta || {};
+    Object.keys(meta).forEach(k => {
+      if (!excluded.has(k)) edgeKeys.add(k);
+    });
+  });
+
+  // count nodes
+  graph.forEachNode((n, attrs) => {
+    const meta = attrs.meta || {};
+    nodeKeys.forEach(k => {
+      let v = meta[k];
+      if (v == null) v = "null";  // mark missing
+      const key = `${k}:${v}`;
+      nodeStats[key] = (nodeStats[key] || 0) + 1;
+    });
+  });
+
+  // count edges
+  graph.forEachEdge((e, attrs) => {
+    const meta = attrs.meta || {};
+    edgeKeys.forEach(k => {
+      let v = meta[k];
+      if (v == null) v = "null";
+      const key = `${k}:${v}`;
+      edgeStats[key] = (edgeStats[key] || 0) + 1;
+    });
+  });
+
+  return { nodeStats, edgeStats };
 }
 
 const DATA =
