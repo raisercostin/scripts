@@ -80,7 +80,7 @@ public class mvn2zild {
     @Override
     public Integer call() throws Exception {
       // Path pomPath = projectDir.toPath().resolve("pom.xml");
-      mvn2gradle.Cli gradleCli = new mvn2gradle.Cli();
+      ToGradle.Cli gradleCli = new ToGradle.Cli();
       gradleCli.projectDir = this.projectDir;
       // set gradleCli fields as needed
 

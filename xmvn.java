@@ -139,9 +139,7 @@ public class xmvn {
     @Override
     public Integer call() throws Exception {
       RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
-      //Project rootPom = xmvn.PomLoader.loadRootPom(this);
-      Project rootPom = null;
-      generateGraphFiles(rootPom);
+      generateGraphFiles();
       return 0;
     }
 
@@ -259,31 +257,8 @@ public class xmvn {
       }
     }
 
-    private void generateGraphFiles(xmvn.Project rootPom) {
-      rootPom = xmvn.PomLoader.loadRootPom(this);
-
-      //      private static GradleModules collectModuleArtifactIdToGradlePath(Project rootPom, File rootDir, boolean ignoreUnknown, Projects effectivePom) {
-      //        GradleModules gradleModules = new GradleModules();
-      //        collectModulesRecursivelyWithPaths(rootPom, rootPom, rootDir, "", gradleModules);
-      //        return gradleModules;
-      //      }
-      //
-      //      private static void collectModulesRecursivelyWithPaths(Project root, Project pom, File baseDir, String parentGradlePath,
-      //          GradleModules gradleModules) {
-      //        if (pom == null || pom.modules == null || pom.modules.module == null)
-      //          return;
-      //
-      //        for (String moduleName : pom.modules.module) {
-      //          File moduleDir = new File(baseDir, moduleName);
-      //          Project childPom = PomLoader.loadPom(root, pom, moduleDir, root.context);
-      //          if (childPom != null && childPom.artifactId != null) {
-      //            String fullPath = parentGradlePath.isEmpty() ? moduleName : parentGradlePath + ":" + moduleName;
-      //            gradleModules.addGradleModule(childPom.ga(), fullPath);
-      //            collectModulesRecursivelyWithPaths(root, childPom, moduleDir, fullPath, gradleModules);
-      //          }
-      //        }
-      //      }
-
+    private void generateGraphFiles() {
+      var rootPom = xmvn.PomLoader.loadRootPom(this);
       GraphData graph = new GraphData();
       Traverser<xmvn.Project> traverser = Traverser.forTree(p -> {
         if (p.modules != null && p.modules.modules != null) {
@@ -3083,21 +3058,6 @@ public class xmvn {
         current = after.stream().filter(k -> !reconfigured.contains(k)).collect(TreeSet<Project>::new, TreeSet::add, TreeSet::addAll);
         log.info("... {} poms still to reconfigure parents ... {}", current.size(), current.stream().map(Project::ga).toList());
       } while (current.size() > 0);
-
-//      log.info("5. Also loading submodules and subprojects listed in root POM if any. Most should be already loaded in memory/cache.");
-//      if (rootPom.modules != null && rootPom.modules.modules != null) {
-//        for (String module : rootPom.modules.modules) {
-//          File moduleDir = rootPom.context.cli.projectDir.toPath().resolve(module).toFile();
-//          Project modulePom = loadPom(rootPom, rootPom, moduleDir, context);
-//          if (modulePom == null) {
-//            log.warn("Module {} listed in POM of {} not found at {}", module, rootPom.ga(), moduleDir);
-//          } else if (modulePom.ga().equals(rootPom.ga())) {
-//            log.warn("Module {} listed in POM of {} has the same G:A as parent, skipping to avoid cycle", module, rootPom.ga());
-//          } else {
-//            //loadAllPomsRecursive(modulePom, context);
-//          }
-//        }
-//      }
       return rootPom;
     }
 
