@@ -1,18 +1,13 @@
 //usr/bin/env jbang "$0" "$@" ; exit $?
 //Description: Convert Multimodule Maven pom.xml to Gradle build.gradle.kts
 //DEPS info.picocli:picocli:4.7.7
-//DEPS org.slf4j:slf4j-api:2.0.9
-//DEPS ch.qos.logback:logback-classic:1.4.14
-//DEPS org.fusesource.jansi:jansi:2.4.0
 //DEPS com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.17.1
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.1
 //DEPS com.fasterxml.jackson.core:jackson-annotations:2.17.1
-//DEPS org.slf4j:slf4j-api:2.0.12
-//DEPS ch.qos.logback:logback-classic:1.4.14
 //DEPS org.zeroturnaround:zt-exec:1.12
 //DEPS one.util:streamex:0.8.2
 //DEPS com.google.guava:guava:32.1.2-jre
-//SOURCES com/namekis/utils/RichLogback.java
+//SOURCES com/namekis/utils/RichCli.java
 //FILES xmvn-graph.html
 
 import java.io.File;
@@ -49,7 +44,6 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
-import org.fusesource.jansi.AnsiConsole;
 import org.zeroturnaround.exec.InvalidExitValueException;
 import org.zeroturnaround.exec.ProcessExecutor;
 
@@ -64,21 +58,17 @@ import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlElementWrapper;
 import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlProperty;
 import com.google.common.graph.Traverser;
-import com.namekis.utils.RichLogback;
+import com.namekis.utils.RichCli;
 
 import one.util.streamex.StreamEx;
 import picocli.CommandLine;
-import picocli.CommandLine.Help.Visibility;
 import picocli.CommandLine.Option;
 
 public class xmvn {
   private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(xmvn.class);
 
   public static void main(String... args) {
-    AnsiConsole.systemInstall();
-    int exitCode = new CommandLine(new XmvnRoot()).execute(args);
-    AnsiConsole.systemUninstall();
-    System.exit(exitCode);
+    RichCli.main(args, () -> new XmvnRoot());
   }
 
   @CommandLine.Command(name = "xmvn", mixinStandardHelpOptions = true, version = "0.1", description = """
@@ -92,19 +82,7 @@ public class xmvn {
     }
   }
 
-  public abstract static class CommonOptions {
-    @Option(names = { "-v", "--verbose" }, description = "Increase verbosity. Specify multiple times to increase (-vvv).")
-    boolean[] verbosity = new boolean[0];
-
-    @Option(names = { "-q", "--quiet" }, description = "Suppress all output except errors.")
-    boolean quiet = false;
-
-    @Option(names = { "-c",
-        "--color" }, description = "Enable colored output (default: true).", defaultValue = "true", showDefaultValue = Visibility.ALWAYS)
-    public boolean color = true;
-
-    @Option(names = { "-d", "--debug" }, description = "Enable debug (default: false).", defaultValue = "false", showDefaultValue = Visibility.ALWAYS)
-    public boolean debug = false;
+  public abstract static class CommonOptions extends RichCli.BaseOptions {
   }
 
   public abstract static class LoadPomOptions extends CommonOptions {
@@ -138,7 +116,6 @@ public class xmvn {
 
     @Override
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
       generateGraphFiles();
       return 0;
     }
@@ -425,7 +402,6 @@ public class xmvn {
   public static class ToArangoGraph extends LoadPomOptions implements Callable<Integer> {
     @Override
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
       Project rootPom = xmvn.PomLoader.loadRootPom(this);
       generateArangoGraph(rootPom);
       return 0;

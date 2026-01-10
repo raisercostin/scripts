@@ -1,14 +1,11 @@
 //usr/bin/env jbang "$0" "$@" ; exit $?
 //DEPS info.picocli:picocli:4.7.7
-//DEPS org.slf4j:slf4j-api:2.0.12
-//DEPS ch.qos.logback:logback-classic:1.4.14
-//DEPS org.fusesource.jansi:jansi:2.4.0
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.1
 //DEPS com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.17.1
 //DEPS org.eclipse.jgit:org.eclipse.jgit:6.8.0.202311291450-r
 //DEPS org.zeroturnaround:zt-exec:1.12
 //DEPS one.util:streamex:0.8.2
-//SOURCES com/namekis/utils/RichLogback.java
+//SOURCES com/namekis/utils/RichCli.java
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,42 +18,25 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 
-import org.fusesource.jansi.AnsiConsole;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import com.namekis.utils.RichLogback;
+import com.namekis.utils.RichCli;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
-import picocli.CommandLine.Help.Visibility;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
 public class zild {
   public static void main(String... args) {
-    AnsiConsole.systemInstall();
-    try {
-      int exitCode = new CommandLine(new ZildRoot()).execute(args);
-      System.exit(exitCode);
-    } finally {
-      AnsiConsole.systemUninstall();
-    }
+    RichCli.main(args, () -> new ZildRoot());
   }
 
-  public static abstract class CommonOptions {
-    @Option(names = { "-v", "--verbose" }, description = "Increase verbosity. Use multiple (-vvv)")
-    boolean[] verbosity = new boolean[0];
-
-    @Option(names = { "-q", "--quiet" }, description = "Silence all output except errors")
-    boolean quiet = false;
-
-    @Option(names = { "-c",
-        "--color" }, description = "Enable colored output (default: true)", defaultValue = "true", showDefaultValue = Visibility.ALWAYS)
-    boolean color = true;
+  public static abstract class CommonOptions extends RichCli.BaseOptions {
   }
 
   @Command(name = "zild", mixinStandardHelpOptions = true, subcommands = { Lock.class, Run.class, Explain.class,
@@ -66,7 +46,6 @@ public class zild {
 
     @Override
     public void run() {
-      RichLogback.configureLogbackByVerbosity(verbosity.length, quiet, color);
       log.info("Use subcommands: lock | scan | run <task> | explain");
     }
   }
@@ -77,7 +56,6 @@ public class zild {
     final ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
 
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(verbosity.length, quiet, color);
       ZildSpec spec = yaml.readValue(Files.newInputStream(Path.of("zild.yaml")), ZildSpec.class);
       ZildLock lock = new ZildLock();
       lock.version = "0.1.0";
@@ -114,7 +92,6 @@ public class zild {
     String module;
 
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(verbosity.length, quiet, color);
       ZildLock lock = yaml.readValue(Files.newInputStream(Path.of("zild.lock.yaml")), ZildLock.class);
       var mod = lock.modules.get(module);
       if (mod == null || !mod.tasks.containsKey(taskName)) {
@@ -134,12 +111,11 @@ public class zild {
     }
   }
 
-  @Command(name = "explain", description = "Prints task per module from lock file")
+    @Command(name = "explain", description = "Prints task per module from lock file")
   public static class Explain extends CommonOptions implements Callable<Integer> {
     final ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
 
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(verbosity.length, quiet, color);
       ZildLock lock = yaml.readValue(Files.newInputStream(Path.of("zild.lock.yaml")), ZildLock.class);
       for (var entry : lock.modules.entrySet()) {
         System.out.printf("Module: %s (%s)\n", entry.getKey(), entry.getValue().template);
@@ -156,8 +132,6 @@ public class zild {
     final ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
 
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(verbosity.length, quiet, color);
-
       ZildSpec spec = new ZildSpec();
       spec.root = true;
       spec.templates = new HashMap<>();

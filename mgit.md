@@ -12,7 +12,7 @@
 * ASCII-only for all output (no Unicode punctuation).
 * Logging must always show exact git command run at INFO level, in a form that can be copy-pasted and run manually.
 * All code should minimize duplication (e.g., all repo-finding/filtering must go through a single method).
-* Use `RichLogback` for log configuration, with standard flags: verbosity (multi-level), color, quiet.
+* Use `RichCli` for log configuration, with standard flags: verbosity (multi-level), color, quiet.
 
 ### **status**
 

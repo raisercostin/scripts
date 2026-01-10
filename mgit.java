@@ -1,13 +1,11 @@
 //usr/bin/env jbang "$0" "$@" ; exit $?
 //DEPS info.picocli:picocli:4.7.7
-//DEPS org.slf4j:slf4j-api:2.0.9
-//DEPS ch.qos.logback:logback-classic:1.4.14
 //DEPS org.fusesource.jansi:jansi:2.4.0
 //DEPS org.zeroturnaround:zt-exec:1.12
 //DEPS one.util:streamex:0.8.2
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.1
 //DEPS com.fasterxml.jackson.core:jackson-annotations:2.17.1
-//SOURCES com/namekis/utils/RichLogback.java
+//SOURCES com/namekis/utils/RichCli.java
 
 import java.io.File;
 import java.io.IOException;
@@ -36,13 +34,12 @@ import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.namekis.utils.RichLogback;
+import com.namekis.utils.RichCli;
 
 import one.util.streamex.StreamEx;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Help.Ansi;
-import picocli.CommandLine.Help.Visibility;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
@@ -80,8 +77,7 @@ public class mgit {
   static final Logger log = LoggerFactory.getLogger(mgit.class);
 
   public static void main(String... args) {
-    int exitCode = new CommandLine(new MgitRoot()).execute(args);
-    System.exit(exitCode);
+    RichCli.main(args, () -> new MgitRoot());
   }
 
   public static void stdout(String msg) {
@@ -99,24 +95,11 @@ public class mgit {
 
     @Override
     public void run() {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
       new CommandLine(this).usage(System.out);
     }
   }
 
-  public abstract static class CommonOptions {
-    @Option(names = { "-v", "--verbose" }, description = "Increase verbosity. Specify multiple times to increase (-vvv).")
-    boolean[] verbosity = new boolean[0];
-
-    @Option(names = { "-q", "--quiet" }, description = "Suppress all output except errors.")
-    boolean quiet = false;
-
-    @Option(names = { "-c",
-        "--color" }, description = "Enable colored output (default: true).", defaultValue = "true", showDefaultValue = Visibility.ALWAYS)
-    public boolean color = true;
-
-    @Option(names = { "-d", "--debug" }, description = "Enable debug (default: false).", defaultValue = "false", showDefaultValue = Visibility.ALWAYS)
-    public boolean debug = false;
+  public abstract static class CommonOptions extends RichCli.BaseOptions {
   }
 
   public abstract static class MGitCommon extends CommonOptions {
@@ -197,8 +180,6 @@ public class mgit {
 
     @Override
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
-
       List<File> repoDirs = findRepos();
       if (repoDirs.isEmpty()) {
         log.warn("No repos found.");
@@ -374,7 +355,6 @@ public class mgit {
 
     @Override
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
       List<File> repoDirs = findRepos();
       if (repoDirs.isEmpty()) {
         log.warn("No repos found.");
@@ -656,7 +636,6 @@ public class mgit {
 
     @Override
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
       List<File> repoDirs = findRepos();
       if (repoDirs.isEmpty()) {
         log.warn("No repos found.");
@@ -730,7 +709,6 @@ public class mgit {
 
     @Override
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
       List<File> repoDirs = findRepos();
       if (repoDirs.isEmpty()) {
         log.warn("No repos found.");
@@ -961,7 +939,6 @@ public class mgit {
     boolean fetch;
     @Override
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, false);
       List<File> repoDirs = findRepos();
       if (repoDirs.isEmpty()) {
         log.warn("No repos found.");
@@ -1168,7 +1145,6 @@ public class mgit {
   private static class Fetch extends MGitCommon implements Callable<Integer> {
     @Override
     public Integer call() throws Exception {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
       int fetched = 0, errors = 0;
       for (File repo : findRepos()) {
         try {
@@ -1268,8 +1244,6 @@ public class mgit {
 
     @Override
     public Integer call() {
-      RichLogback.configureLogbackByVerbosity(null, verbosity != null ? verbosity.length : 0, quiet, color, debug);
-
       PathMatcher fileMatcher = null;
       if (files != null && !files.isEmpty()) {
         // support comma-separated globs
