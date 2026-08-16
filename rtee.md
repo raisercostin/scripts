@@ -21,6 +21,42 @@ It is useful for agentic sessions where tool output should remain visible in the
 
 The first positional argument is always the transcript file. The next argument is always the command to execute. There is no `--` separator requirement for wrapped command options.
 
+## Install / Dev Usage
+
+Use Scoopix app installs instead of wrapper scripts. Scoopix compiles `rtee.rs` from Git source with local `rustc`, injects the derived Git version into the binary, and installs the generated executable on `PATH`.
+
+Source: https://github.com/raisercostin/scripts/blob/main/rtee.rs
+
+- Public one-shot installer:
+
+  ```bash
+  deno run --allow-all https://github.com/raisercostin/scoopix/raw/refs/heads/main/scoopix.ts install main/rtee --approve-rustc-build
+  rtee --version
+  ```
+
+- Public install:
+
+  ```bash
+  deno install --allow-all --force --name=scoopix https://github.com/raisercostin/scoopix/raw/refs/heads/main/scoopix.ts
+  scoopix install main/rtee --approve-rustc-build
+  rtee --version
+  ```
+
+- Dev install:
+
+  ```bash
+  deno install --allow-all --force --name=scoopix D:/home/raiser/work/2025-11-10--scoopix/scoopix.ts
+  scoopix install main/rtee --approve-rustc-build --ignore-download-cache
+  rtee --version
+  ```
+
+- Dev local:
+
+  ```bash
+  rustc rtee.rs -O -o rtee
+  ./rtee --version
+  ```
+
 ## Quick Example
 
 Run a command and save the interaction to `session.md`:
