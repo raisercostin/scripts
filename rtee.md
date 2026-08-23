@@ -7,7 +7,7 @@
 ## Synopsis
 
 ```text
-rtee [--add-time] <log-file> <command> [args...]
+rtee [--add-time] [--control-stderr] [--session <log-file>] <command> [args...]
 rtee -h
 rtee --help
 rtee --version
@@ -19,7 +19,21 @@ rtee --version
 
 It is useful for agentic sessions where tool output should remain visible in the terminal while also being recorded in a durable markdown-friendly log.
 
-The first positional argument is always the transcript file. The next argument is always the command to execute. There is no `--` separator requirement for wrapped command options.
+`rtee` prints its own control records (`##`, `cmd>`, `res>`) to stdout by default so non-interactive runners such as Codex can see command framing. Use `--control-stderr` for the older behavior.
+
+Positional arguments are always the command and its arguments. The transcript file defaults to `rtee.log`. Use `--session` or `--log` to choose a different transcript file.
+
+For simple usage:
+
+```bash
+rtee ls
+```
+
+For a named transcript:
+
+```bash
+rtee --session baubau git status --short
+```
 
 ## Install / Dev Usage
 
@@ -53,7 +67,7 @@ Source: https://github.com/raisercostin/scripts/blob/main/rtee.rs
 - Dev local:
 
   ```bash
-  rustc rtee.rs -O -o rtee
+  rustc --edition 2024 rtee.rs -O -o rtee
   ./rtee --version
   ```
 
@@ -62,7 +76,7 @@ Source: https://github.com/raisercostin/scripts/blob/main/rtee.rs
 Run a command and save the interaction to `session.md`:
 
 ```bash
-./rtee.exe --add-time session.md sh -c "printf 'hello\\n'; printf 'warn\\n' >&2; exit 3"
+./rtee.exe --add-time --session session.md sh -c "printf 'hello\\n'; printf 'warn\\n' >&2; exit 3"
 ```
 
 Terminal output still appears live:
@@ -84,6 +98,14 @@ The same structured section is appended to `session.md`, so an agent or human ca
 
 Prefix each transcript record with elapsed milliseconds since `rtee` started.
 
+`--control-stderr`
+
+Print `rtee` control records to stderr instead of stdout. Child stdout and stderr keep their normal live stream destinations.
+
+`--session <log-file>`, `--log <log-file>`
+
+Set the transcript file explicitly. Without this flag, `rtee` writes to `rtee.log`.
+
 `-h`, `--help`
 
 Show built-in help and exit.
@@ -93,10 +115,6 @@ Show built-in help and exit.
 Show the `rtee` version and exit.
 
 ## Arguments
-
-`<log-file>`
-
-The transcript file to append to. The file is created if it does not exist.
 
 `<command>`
 
@@ -143,7 +161,7 @@ Record tags:
 Record a repository inspection command:
 
 ```bash
-./rtee.exe --add-time session.md git status --short
+./rtee.exe --add-time --session session.md git status --short
 ```
 
 Example transcript:
@@ -161,7 +179,7 @@ Example transcript:
 Record a test command:
 
 ```bash
-./rtee.exe --add-time session.md deno check src/main.ts
+./rtee.exe --add-time --session session.md deno check src/main.ts
 ```
 
 Example transcript:
@@ -178,7 +196,7 @@ Example transcript:
 Record a shell command through the chosen shell explicitly:
 
 ```bash
-./rtee.exe --add-time session.md sh -c "printf 'hello\\n'; printf 'warn\\n' >&2"
+./rtee.exe --add-time --session session.md sh -c "printf 'hello\\n'; printf 'warn\\n' >&2"
 ```
 
 Example transcript:
@@ -225,10 +243,10 @@ Objective:
 
 Important details:
 
-- Use `./rtee.exe --add-time session.md <command>` for logged tool commands.
-- The first positional argument is always the log file.
-- The next argument is always the child command.
-- Wrapped command options do not need `--` because the log-file boundary is mandatory.
+- Use `./rtee.exe --add-time <command>` for default `rtee.log` logging.
+- Use `./rtee.exe --add-time --session session.md <command>` for named transcripts.
+- Positional arguments are always the child command and its args.
+- Wrapped command options do not need `--` because rtee options are parsed before the child command.
 - Do not pipe raw binary payloads through `rtee`; transcript tags corrupt byte-perfect streams.
 - Use byte-preserving tools for archives, databases, images, PDFs, and other binary payloads.
 - Current verified implementation is Rust: `rtee.rs` / `rtee.exe`.
@@ -283,11 +301,11 @@ Relevant files:
 - Preserve stdout and stderr as separate tagged streams.
 - Forward piped stdin to the child command and record it as `in >`.
 - Preserve the wrapped command's exit code.
-- Avoid a `--` separator requirement by making `<log-file>` mandatory and treating the next argument as the command boundary.
+- Avoid a `--` separator requirement by parsing only leading rtee options and treating the remaining arguments as the child command.
 
 ### Design Decisions
 
-- The transcript file is the first positional argument so command options after it belong to the child command.
+- The transcript file defaults to `rtee.log`; `--session`/`--log` selects a named transcript.
 - The log file is opened with create + append semantics.
 - Start and end timestamps are written as UTC ISO-like records.
 - `--add-time` is elapsed time from process start, not wall-clock timestamp per line.
@@ -318,9 +336,10 @@ Use `rtee` to log the command and diagnostic text around binary operations, not 
 
 These requests shaped the tool and its documentation:
 
-- Use `./rtee.exe --add-time session.md <command>` for logged command execution.
+- Use `./rtee.exe --add-time <command>` for default logged command execution.
+- Use `./rtee.exe --add-time --session session.md <command>` when the transcript name matters.
 - Keep raw binary payloads out of `rtee` because labels and text framing can corrupt streams.
-- Make the first positional argument the log file.
+- Default the transcript file to `rtee.log` so common use does not require a session name.
 - Record `cmd>`, `in >`, `out>`, `err>`, and `res>` records.
 - Add ISO start and end timestamps.
 - Add elapsed millisecond timing with `--add-time`.

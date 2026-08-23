@@ -7,35 +7,40 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const PREFIX_WIDTH: usize = 3;
-const VERSION: &str = "0.1.0";
+const VERSION: &str = "0.1.2";
+const DEFAULT_LOG_FILE: &str = "rtee.log";
 
 #[derive(Clone, Copy)]
 struct FormatOptions {
     add_time: bool,
     started: Instant,
+    control_stdout: bool,
 }
 
 fn usage() -> ! {
     eprintln!("Usage:");
-    eprintln!("  rtee [--add-time] <log-file> <command> [args...]");
+    eprintln!("  rtee [--add-time] [--control-stderr] [--session <log-file>] <command> [args...]");
     eprintln!();
     eprintln!("Example:");
-    eprintln!("  rtee session.md git status --short");
+    eprintln!("  rtee git status --short");
+    eprintln!("  rtee --session session.md git status --short");
     std::process::exit(2);
 }
 
 fn help() -> ! {
     eprintln!("Usage:");
-    eprintln!("  rtee [--add-time] <log-file> <command> [args...]");
+    eprintln!("  rtee [--add-time] [--control-stderr] [--session <log-file>] <command> [args...]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --add-time  Prefix each record with elapsed milliseconds since start.");
+    eprintln!("  --control-stderr  Print rtee control records to stderr instead of stdout.");
+    eprintln!("  --session, --log <log-file>  Set transcript file; default is rtee.log.");
     eprintln!("  --version   Show version.");
     eprintln!("  -h, --help  Show this help.");
     eprintln!();
     eprintln!("Command boundary:");
-    eprintln!("  <log-file> is mandatory. The argument after it is always the command.");
-    eprintln!("  This means wrapped command options do not need -- separators.");
+    eprintln!("  Positional arguments are always the command and its args.");
+    eprintln!("  Use --session/--log to change the transcript file; default is rtee.log.");
     eprintln!();
     eprintln!("Records:");
     eprintln!("  ## <iso-time> start/end timestamp");
@@ -46,13 +51,22 @@ fn help() -> ! {
     eprintln!("  res> exit code; with --add-time, its prefix is total elapsed time");
     eprintln!();
     eprintln!("Example:");
-    eprintln!("  rtee --add-time session.md git status --short");
+    eprintln!("  rtee --add-time git status --short");
+    eprintln!("  rtee --add-time --session session.md git status --short");
     std::process::exit(0);
 }
 
 fn version() -> ! {
     println!("rtee {}", VERSION);
     std::process::exit(0);
+}
+
+fn print_control(format: FormatOptions, text: &str) {
+    if format.control_stdout {
+        println!("{text}");
+    } else {
+        eprintln!("{text}");
+    }
 }
 
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
@@ -223,18 +237,40 @@ fn main() -> io::Result<()> {
         version();
     }
 
-    if args.len() < 2 {
+    if args.is_empty() {
         usage();
     }
 
-    let add_time = if args.first().map(|arg| arg == "--add-time").unwrap_or(false) {
-        args.remove(0);
-        true
-    } else {
-        false
-    };
+    let mut add_time = false;
+    let mut control_stdout = true;
+    let mut explicit_log_file = None;
+    loop {
+        match args.first().map(String::as_str) {
+            Some("--add-time") => {
+                args.remove(0);
+                add_time = true;
+            }
+            Some("--control-stdout") => {
+                args.remove(0);
+                control_stdout = true;
+            }
+            Some("--control-stderr") => {
+                args.remove(0);
+                control_stdout = false;
+            }
+            Some("--session") | Some("--log") => {
+                let flag = args.remove(0);
+                if args.is_empty() {
+                    eprintln!("{flag} requires a log-file value");
+                    usage();
+                }
+                explicit_log_file = Some(args.remove(0));
+            }
+            _ => break,
+        }
+    }
 
-    if args.len() < 2 {
+    if args.is_empty() {
         usage();
     }
 
@@ -245,9 +281,9 @@ fn main() -> io::Result<()> {
         version();
     }
 
-    let format = FormatOptions { add_time, started: Instant::now() };
+    let format = FormatOptions { add_time, started: Instant::now(), control_stdout };
 
-    let log_file = args.remove(0);
+    let log_file = explicit_log_file.unwrap_or_else(|| DEFAULT_LOG_FILE.to_string());
     let command = args.remove(0);
     let rendered_command = std::iter::once(command.as_str())
         .chain(args.iter().map(String::as_str))
@@ -260,8 +296,8 @@ fn main() -> io::Result<()> {
 
     let started_at = iso_timestamp_utc();
     write_log(&log, &format!("\n## {}\n\n{}", started_at, tagged(format, "cmd", &rendered_command)))?;
-    eprintln!("## {}", started_at);
-    eprintln!("{}", tagged(format, "cmd", &rendered_command).trim_end());
+    print_control(format, &format!("## {}", started_at));
+    print_control(format, tagged(format, "cmd", &rendered_command).trim_end());
 
     let mut child = Command::new(&command)
         .args(&args)
@@ -308,9 +344,9 @@ fn main() -> io::Result<()> {
 
     let code = status.code().unwrap_or(1);
     write_log(&log, &tagged(format, "res", &code.to_string()))?;
-    eprintln!("{}", tagged(format, "res", &code.to_string()).trim_end());
+    print_control(format, tagged(format, "res", &code.to_string()).trim_end());
     let ended_at = format!("## {}\n", iso_timestamp_utc());
     write_log(&log, &ended_at)?;
-    eprintln!("{}", ended_at.trim_end());
+    print_control(format, ended_at.trim_end());
     std::process::exit(code);
 }
