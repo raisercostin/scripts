@@ -14,7 +14,7 @@ sudo --help
 
 ## Description
 
-This is a Windows-oriented `sudo` helper. It is not Unix `sudo`; it uses Windows UAC elevation. If the current process is already elevated, it runs the command directly. Otherwise it relaunches itself with the Windows `runas` verb, waits for the elevated command, replays captured stdout/stderr, and exits with the elevated command's exit code.
+This is a Windows-oriented `sudo` helper. It is not Unix `sudo`; it uses Windows UAC elevation. If the current process is already elevated, it runs the command directly. Otherwise it resolves the requested executable in the caller context, relaunches itself with the Windows `runas` verb, streams the elevated command's stdout/stderr back through named pipes, and exits with the elevated command's exit code.
 
 The native executable avoids shell-specific `sudo`, `sudo.cmd`, and `sudo.ps1` resolution issues. This matters for tools such as `rtee`, Rust, Deno, and other process-spawning programs that call `CreateProcess` directly instead of going through Git Bash or PowerShell command resolution.
 
@@ -70,4 +70,6 @@ rtee --session sudo-session.md sudo ps
 
 ## Notes
 
-Elevated commands run without forwarded stdin. In the non-admin path, output is captured in temporary files by the elevated child and replayed by the parent process after the command exits. This makes process-spawning tools such as `rtee` capture the elevated output reliably, but output is not streamed live during the elevated command.
+Elevated commands run without forwarded stdin. In the non-admin path, stdout and stderr are streamed back through per-run Windows named pipes. This makes process-spawning tools such as `rtee` capture elevated output reliably while still showing output during the elevated command.
+
+When launched from Git Bash/MSYS, `sudo` asks Bash for the executable path with `type -P` before elevation. This makes `sudo ps -faW` run the same executable that the caller shell would have run, instead of resolving `ps` later in the elevated environment.
