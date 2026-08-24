@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const PREFIX_WIDTH: usize = 3;
-const VERSION: &str = "0.1.2";
+const VERSION: &str = "0.1.3";
 const DEFAULT_LOG_FILE: &str = "rtee.log";
 
 #[derive(Clone, Copy)]
@@ -45,6 +45,11 @@ fn help() -> ! {
     eprintln!("Records:");
     eprintln!("  ## <iso-time> start/end timestamp");
     eprintln!("  cmd> command line");
+    eprintln!("  cwd> current working directory");
+    eprintln!("  usr> user name");
+    eprintln!("  hst> host name");
+    eprintln!("  pid> rtee process id");
+    eprintln!("  exe> rtee executable path");
     eprintln!("  in > stdin");
     eprintln!("  out> stdout");
     eprintln!("  err> stderr");
@@ -67,6 +72,46 @@ fn print_control(format: FormatOptions, text: &str) {
     } else {
         eprintln!("{text}");
     }
+}
+
+fn user_name() -> String {
+    env::var("USER")
+        .or_else(|_| env::var("USERNAME"))
+        .or_else(|_| env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn host_name() -> String {
+    env::var("COMPUTERNAME")
+        .or_else(|_| env::var("HOSTNAME"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "unknown".to_string())
+        })
+}
+
+fn context_records() -> Vec<(&'static str, String)> {
+    vec![
+        ("cwd", env::current_dir().map(|path| path.display().to_string()).unwrap_or_else(|_| "unknown".to_string())),
+        ("usr", user_name()),
+        ("hst", host_name()),
+        ("pid", std::process::id().to_string()),
+        ("exe", env::current_exe().map(|path| path.display().to_string()).unwrap_or_else(|_| "unknown".to_string())),
+    ]
+}
+
+fn write_control_record(log: &Arc<Mutex<BufWriter<File>>>, format: FormatOptions, prefix: &str, value: &str) -> io::Result<()> {
+    let record = tagged(format, prefix, value);
+    write_log(log, &record)?;
+    print_control(format, record.trim_end());
+    Ok(())
 }
 
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
@@ -295,9 +340,12 @@ fn main() -> io::Result<()> {
     let log = Arc::new(Mutex::new(BufWriter::new(file)));
 
     let started_at = iso_timestamp_utc();
-    write_log(&log, &format!("\n## {}\n\n{}", started_at, tagged(format, "cmd", &rendered_command)))?;
+    write_log(&log, &format!("\n## {}\n\n", started_at))?;
     print_control(format, &format!("## {}", started_at));
-    print_control(format, tagged(format, "cmd", &rendered_command).trim_end());
+    write_control_record(&log, format, "cmd", &rendered_command)?;
+    for (prefix, value) in context_records() {
+        write_control_record(&log, format, prefix, &value)?;
+    }
 
     let mut child = Command::new(&command)
         .args(&args)

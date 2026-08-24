@@ -19,7 +19,7 @@ rtee --version
 
 It is useful for agentic sessions where tool output should remain visible in the terminal while also being recorded in a durable markdown-friendly log.
 
-`rtee` prints its own control records (`##`, `cmd>`, `res>`) to stdout by default so non-interactive runners such as Codex can see command framing. Use `--control-stderr` for the older behavior.
+`rtee` prints its own control records (`##`, `cmd>`, context records, `res>`) to stdout by default so non-interactive runners such as Codex can see command framing. Use `--control-stderr` for the older behavior.
 
 Positional arguments are always the command and its arguments. The transcript file defaults to `rtee.log`. Use `--session` or `--log` to choose a different transcript file.
 
@@ -84,6 +84,11 @@ Terminal output still appears live:
 ```text
 ## 2026-08-16T06:50:57Z
 00000ms cmd> sh -c 'printf '"'"'hello\n'"'"'; printf '"'"'warn\n'"'"' >&2; exit 3'
+00000ms cwd> D:\home\raiser\work\2025-10-18--scripts
+00000ms usr> raiser
+00000ms hst> AMANTAWIN3
+00000ms pid> 12345
+00000ms exe> D:\home\raiser\work\2025-10-18--scripts\rtee.exe
 00387ms out> hello
 00388ms err> warn
 00408ms res> 3
@@ -132,6 +137,11 @@ Each invocation appends a new section to the transcript:
 ## 2026-08-15T20:42:13Z
 
 cmd> git status --short
+cwd> D:\home\raiser\work\2025-10-18--scripts
+usr> raiser
+hst> AMANTAWIN3
+pid> 12345
+exe> D:\home\raiser\work\2025-10-18--scripts\rtee.exe
 out> ...
 err> ...
 res> 0
@@ -142,6 +152,11 @@ With `--add-time`, records include elapsed milliseconds:
 
 ```text
 00000ms cmd> git status --short
+00000ms cwd> D:\home\raiser\work\2025-10-18--scripts
+00000ms usr> raiser
+00000ms hst> AMANTAWIN3
+00000ms pid> 12345
+00000ms exe> D:\home\raiser\work\2025-10-18--scripts\rtee.exe
 00043ms out>  M src/main.ts
 00044ms out> ?? notes.md
 00048ms res> 0
@@ -150,6 +165,11 @@ With `--add-time`, records include elapsed milliseconds:
 Record tags:
 
 - `cmd>` rendered command line.
+- `cwd>` current working directory where `rtee` was started.
+- `usr>` user name from the process environment.
+- `hst>` host name from the process environment or `hostname` command.
+- `pid>` `rtee` process id.
+- `exe>` resolved `rtee` executable path.
 - `in >` stdin forwarded to the child command.
 - `out>` stdout from the child command.
 - `err>` stderr from the child command.
@@ -170,6 +190,11 @@ Example transcript:
 ## 2026-08-16T07:00:00Z
 
 00000ms cmd> git status --short
+00000ms cwd> D:\home\raiser\work\2025-10-18--scripts
+00000ms usr> raiser
+00000ms hst> AMANTAWIN3
+00000ms pid> 12345
+00000ms exe> D:\home\raiser\work\2025-10-18--scripts\rtee.exe
 00021ms out>  M src/main.ts
 00022ms out> ?? notes.md
 00025ms res> 0
@@ -188,6 +213,11 @@ Example transcript:
 ## 2026-08-16T07:01:00Z
 
 00000ms cmd> deno check src/main.ts
+00000ms cwd> D:\home\raiser\work\2025-10-18--scripts
+00000ms usr> raiser
+00000ms hst> AMANTAWIN3
+00000ms pid> 12345
+00000ms exe> D:\home\raiser\work\2025-10-18--scripts\rtee.exe
 00142ms out> Check file:///D:/project/src/main.ts
 00148ms res> 0
 ## 2026-08-16T07:01:00Z
@@ -205,6 +235,11 @@ Example transcript:
 ## 2026-08-16T07:02:00Z
 
 00000ms cmd> sh -c 'printf '"'"'hello\n'"'"'; printf '"'"'warn\n'"'"' >&2'
+00000ms cwd> D:\home\raiser\work\2025-10-18--scripts
+00000ms usr> raiser
+00000ms hst> AMANTAWIN3
+00000ms pid> 12345
+00000ms exe> D:\home\raiser\work\2025-10-18--scripts\rtee.exe
 00016ms out> hello
 00017ms err> warn
 00019ms res> 0
@@ -256,7 +291,7 @@ Completed:
 
 - Created `rtee.rs` and compiled `rtee.exe`.
 - Implemented append-only transcript logging.
-- Implemented `cmd>`, `in >`, `out>`, `err>`, and `res>` records.
+- Implemented `cmd>`, `cwd>`, `usr>`, `hst>`, `pid>`, `exe>`, `in >`, `out>`, `err>`, and `res>` records.
 - Implemented UTC ISO start/end timestamp section markers.
 - Implemented `--add-time` elapsed millisecond prefixes.
 - Implemented passthrough stdout/stderr while recording separate tagged log lines.
